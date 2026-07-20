@@ -10,8 +10,9 @@
 #![cfg(test)]
 
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal, String,
+    Address, BytesN, Env, IntoVal, String, Vec,
 };
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
@@ -180,4 +181,103 @@ fn test_pause_is_idempotent() {
 fn test_fresh_contract_starts_unpaused() {
     let (_env, client, _admin, _relay) = setup();
     assert!(!client.is_paused());
+}
+
+// ─── Contract upgrade tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_upgrade_only_admin_can_upgrade() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let relay = Address::generate(&env);
+    client.initialize(&admin, &relay);
+
+    let attacker = Address::generate(&env);
+    let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+    // A non-admin cannot upgrade — only the attacker's auth is supplied.
+    let attacker_attempt = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (dummy_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_upgrade(&dummy_hash);
+    assert!(attacker_attempt.is_err());
+
+    // The admin can upgrade.
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (dummy_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .upgrade(&dummy_hash);
+}
+
+#[test]
+fn test_upgrade_storage_survives_same_schema_upgrade() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let relay = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &relay);
+
+    // Register a transaction so we have data in persistent storage.
+    let payload = valid_payload(&env);
+    let tx_id = client.register_callback(&payload);
+    assert_eq!(
+        client.get_transaction(&tx_id).status,
+        TransactionStatus::Pending
+    );
+
+    // Simulate an upgrade to the current contract's own WASM — this is a
+    // no-op in practice but proves the upgrade call succeeds and that
+    // persistent storage (transactions, admin, relay) survive the call.
+    let current_wasm_hash = env.deployer().current_wasm_hash(&contract_id);
+    client.upgrade(&current_wasm_hash);
+
+    // After the upgrade, the transaction record still exists and is readable.
+    let tx = client.get_transaction(&tx_id);
+    assert_eq!(tx.id, tx_id);
+    assert_eq!(tx.status, TransactionStatus::Pending);
+    assert_eq!(tx.amount, 1_000);
+
+    // Admin privileges survive: relay signer can still be rotated.
+    let new_relay = Address::generate(&env);
+    client.set_relay_signer(&new_relay);
+}
+
+#[test]
+fn test_upgrade_emits_contract_upgraded_event() {
+    let (env, client, _admin, _relay) = setup();
+    let dummy_hash = BytesN::from_array(&env, &[0xabu8; 32]);
+    client.upgrade(&dummy_hash);
+
+    // Verify the upgrade event was emitted.
+    let events = env.events().all();
+    let upgrade_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.0.as_ref().map_or(false, |topics| {
+                topics.len() == 2
+                    && topics.get(0) == Some(soroban_sdk::Val::from_symbol(symbol_short!("synapse")))
+                    && topics.get(1)
+                        == Some(soroban_sdk::Val::from_symbol(symbol_short!("upgrade")))
+            })
+        })
+        .collect();
+    assert_eq!(upgrade_events.len(), 1, "Expected exactly one upgrade event");
 }

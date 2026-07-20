@@ -35,7 +35,7 @@ mod validation;
 #[cfg(test)]
 mod test_pause;
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
@@ -233,6 +233,30 @@ impl SynapseCoreContract {
         // TODO: AdminClient::require_admin(&env)?
         // TODO: StorageClient::set_relay_signer(&env, &new_signer)
         todo!()
+    }
+
+    // ── Contract upgrade ───────────────────────────────────────────────────────
+
+    /// Replace the contract WASM in-place.
+    ///
+    /// Only the current admin may call this.  The new WASM **must** be compatible
+    /// with the existing storage schema (`StorageKey` variants, `Transaction`
+    /// struct layout).  Persistent storage (admin, relay_signer, transactions)
+    /// and instance storage (init flag, pause flag) survive intact; temporary
+    /// storage (idempotency keys) is evicted.
+    ///
+    /// # Events
+    /// Emits [`events::EventContractUpgraded`] on success.
+    ///
+    /// # Trust
+    /// Because this entry point allows the admin to deploy arbitrary WASM, the
+    /// admin key **MUST** be held by a multisig or DAO.  See `DECISIONS.md` for
+    /// the full rationale and `README.md` for operational requirements.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash);
+        Ok(())
     }
 
     // ── Emergency pause / circuit breaker ──────────────────────────────────────
