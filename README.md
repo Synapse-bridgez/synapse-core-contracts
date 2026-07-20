@@ -130,3 +130,30 @@ calls within the window return the original `tx_id` without re-writing.
 | Transactions     | `persistent`| Long-lived audit record                 |
 | Idempotency keys | `temporary` | Self-expiring after 24 h (≈18 000 ledgers) |
 | Init flag        | `instance`  | Lives with the contract instance        |
+
+### In-Place Contract Upgradability
+
+**Status:** ✅ Supported
+
+This contract includes an `upgrade(new_wasm_hash)` entry point gated by the admin
+role.  The full rationale, trade-off analysis, and upgrade-boundary guarantees
+are documented in [`DECISIONS.md`](./DECISIONS.md).
+
+**Key guarantee:** Persistent and instance storage survive a same-schema upgrade.
+Only temporary storage (idempotency keys) is evicted — acceptable because their
+TTL is short and the contract rejects duplicates via existing transaction records.
+
+**Trust requirement:** The admin key **MUST** be held by a multisig (≥3-of-5) or
+a DAO.  Admin-key compromise allows arbitrary WASM deployment, not just role
+rotation.  See [`DECISIONS.md`](./DECISIONS.md#6-trust-assumptions) for the full
+trust model.
+
+**When to upgrade:**
+- Bug fixes in contract logic
+- Adding new read-only queries or event fields
+- State-machine extensions for future phases
+
+**When to deploy fresh:**
+- Breaking changes to `Transaction` struct layout or `StorageKey` variants
+- Fundamental access-control model changes
+- WASM size exceeds Soroban deployment constraints

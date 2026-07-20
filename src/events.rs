@@ -15,7 +15,7 @@
 //! This two-topic convention is consistent with the Stellar Asset Contract
 //! standard and makes event filtering straightforward in Horizon / RPC queries.
 
-use soroban_sdk::{contracttype, symbol_short, Env, String};
+use soroban_sdk::{contracttype, symbol_short, BytesN, Env, String};
 
 use crate::types::TransactionStatus;
 
@@ -80,6 +80,20 @@ pub struct EventAdminTransferred {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::upgrade`] when the contract WASM is
+/// replaced in-place.
+///
+/// Downstream indexers and monitoring tooling subscribe to this to detect
+/// unexpected upgrades (potential admin-key compromise).
+#[contracttype]
+pub struct EventContractUpgraded {
+    /// Admin that authorised the upgrade.
+    pub admin: soroban_sdk::Address,
+    /// The new WASM hash (SHA-256 of the deployed `.wasm`).
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub ledger: u32,
+}
+
 /// Emitted by [`SynapseCoreContract::pause`] / [`SynapseCoreContract::unpause`]
 /// whenever the emergency circuit breaker is toggled.
 ///
@@ -125,6 +139,22 @@ impl EventEmitter {
                 amount: tx.amount,
                 asset_code: tx.asset_code.clone(),
                 anchor_transaction_id: tx.anchor_transaction_id.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventContractUpgraded`].
+    pub fn contract_upgraded(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        new_wasm_hash: &soroban_sdk::BytesN<32>,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("upgrade")),
+            EventContractUpgraded {
+                admin: admin.clone(),
+                new_wasm_hash: new_wasm_hash.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
