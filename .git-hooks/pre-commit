@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# Pre-commit hook — mirrors the fmt + clippy steps in CI.
+#
+# Install once per clone:
+#   git config core.hooksPath .git-hooks
+#
+# What it checks:
+#   1. cargo fmt --check   — formatting must match rustfmt.toml
+#   2. cargo clippy        — no warnings allowed (same flags as CI)
+
+set -e
+
+echo "==> cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "==> cargo clippy"
+cargo clippy --all-targets -- -D warnings -A clippy::todo
+
+echo "Pre-commit checks passed."
