@@ -21,10 +21,9 @@ impl AdminClient {
     ///
     /// Returns `Err(ContractError::Unauthorised)` when auth fails.
     pub fn require_admin(env: &Env) -> Result<Address, ContractError> {
-        // TODO: let admin = StorageClient::get_admin(env)?;
-        // TODO: admin.require_auth();
-        // TODO: Ok(admin)
-        todo!()
+        let admin = StorageClient::get_admin(env)?;
+        admin.require_auth();
+        Ok(admin)
     }
 
     /// Assert that `caller` is either the admin or the trusted relay signer.

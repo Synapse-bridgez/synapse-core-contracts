@@ -80,6 +80,20 @@ pub struct EventAdminTransferred {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::pause`] / [`SynapseCoreContract::unpause`]
+/// whenever the emergency circuit breaker is toggled.
+///
+/// Off-chain incident-response tooling subscribes to this so a pause is
+/// observable on-chain the moment it happens.
+#[contracttype]
+pub struct EventPauseToggled {
+    /// New pause state: `true` = paused, `false` = unpaused.
+    pub paused: bool,
+    /// Admin address that performed the toggle.
+    pub admin: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -91,26 +105,41 @@ impl EventEmitter {
         admin: &soroban_sdk::Address,
         relay_signer: &soroban_sdk::Address,
     ) {
-        // TODO:
-        // env.events().publish(
-        //     (symbol_short!("synapse"), symbol_short!("init")),
-        //     EventInitialised {
-        //         admin: admin.clone(),
-        //         relay_signer: relay_signer.clone(),
-        //         ledger: env.ledger().sequence(),
-        //     },
-        // );
-        todo!()
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("init")),
+            EventInitialised {
+                admin: admin.clone(),
+                relay_signer: relay_signer.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
     }
 
     /// Emit [`EventTransactionRegistered`].
     pub fn transaction_registered(env: &Env, tx: &crate::types::Transaction) {
-        // TODO:
-        // env.events().publish(
-        //     (symbol_short!("synapse"), symbol_short!("reg")),
-        //     EventTransactionRegistered { ... },
-        // );
-        todo!()
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("reg")),
+            EventTransactionRegistered {
+                tx_id: tx.id.clone(),
+                stellar_account: tx.stellar_account.clone(),
+                amount: tx.amount,
+                asset_code: tx.asset_code.clone(),
+                anchor_transaction_id: tx.anchor_transaction_id.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventPauseToggled`].
+    pub fn pause_toggled(env: &Env, paused: bool, admin: &soroban_sdk::Address) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("pause")),
+            EventPauseToggled {
+                paused,
+                admin: admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
     }
 
     /// Emit [`EventStatusChanged`].

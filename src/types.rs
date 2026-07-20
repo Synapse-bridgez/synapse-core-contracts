@@ -144,6 +144,12 @@ pub enum StorageKey {
     Admin,
     /// Singleton: trusted relay signer address.
     RelaySigner,
+    /// Singleton: emergency-pause / circuit-breaker flag.
+    ///
+    /// When set to `true` the contract refuses new callback ingestion via
+    /// [`crate::SynapseCoreContract::register_callback`]. Absent/`false` means
+    /// the contract operates normally.
+    Paused,
     /// Per-transaction record keyed by transaction ID.
     Transaction(String),
     /// Idempotency key → cached response ledger; keyed by idempotency key.
@@ -171,6 +177,9 @@ pub enum ContractError {
     Unauthorised = 10,
     /// Caller is not the trusted relay signer.
     NotRelaySigner = 11,
+    /// The contract is paused (emergency circuit breaker engaged); the
+    /// requested operation is temporarily disabled.
+    ContractPaused = 12,
 
     // ── Payload validation ──────────────────────────────────────────────────
     /// `stellar_account` field is malformed.

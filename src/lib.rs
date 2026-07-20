@@ -32,6 +32,9 @@ mod storage;
 mod types;
 mod validation;
 
+#[cfg(test)]
+mod test_pause;
+
 use soroban_sdk::{contract, contractimpl, Address, Env, String};
 
 use crate::admin::AdminClient;
@@ -57,10 +60,16 @@ impl SynapseCoreContract {
     /// * `relay_signer` — Address of the trusted off-chain relay that forwards
     ///                    Anchor Platform callbacks on-chain.
     pub fn initialize(env: Env, admin: Address, relay_signer: Address) -> Result<(), ContractError> {
-        // TODO: guard against re-initialisation
-        // TODO: persist admin + relay_signer via StorageClient
-        // TODO: emit Initialized event
-        todo!()
+        if StorageClient::is_initialised(&env) {
+            return Err(ContractError::AlreadyInitialised);
+        }
+        StorageClient::set_admin(&env, &admin);
+        StorageClient::set_relay_signer(&env, &relay_signer);
+        // Start unpaused so a freshly deployed contract accepts callbacks.
+        StorageClient::set_paused(&env, false);
+        StorageClient::set_initialised(&env);
+        EventEmitter::initialised(&env, &admin, &relay_signer);
+        Ok(())
     }
 
     // ── Callback ingestion (Phase 1 core) ─────────────────────────────────────
@@ -82,15 +91,49 @@ impl SynapseCoreContract {
         env: Env,
         payload: CallbackPayload,
     ) -> Result<String, ContractError> {
-        // TODO: require relay_signer auth (env.current_contract_address / stored signer)
-        // TODO: Validator::validate_payload(&env, &payload)?
-        // TODO: idempotency check via StorageClient::get_idempotency_key
-        // TODO: build Transaction { id: new_uuid, status: Pending, ..payload }
-        // TODO: StorageClient::save_transaction
-        // TODO: StorageClient::set_idempotency_key (TTL ~24h in ledgers)
-        // TODO: EventEmitter::transaction_registered(&env, &tx)
-        // TODO: return Ok(tx.id)
-        todo!()
+        // Circuit breaker: while the emergency pause is engaged we fail closed
+        // and reject all new callback ingestion outright. This check is first so
+        // ingestion is blocked regardless of caller. Read-only queries and
+        // draining of already-registered work are intentionally left unguarded
+        // (see the module docs on `pause`).
+        if StorageClient::is_paused(&env) {
+            return Err(ContractError::ContractPaused);
+        }
+
+        // Only the trusted relay signer may forward Anchor Platform callbacks.
+        let relay = StorageClient::get_relay_signer(&env)?;
+        relay.require_auth();
+
+        Validator::validate_payload(&env, &payload)?;
+
+        // Idempotency: a replayed key returns the original tx id without a
+        // second write, mirroring the off-chain Redis idempotency behaviour.
+        if StorageClient::get_idempotency_key(&env, &payload.idempotency_key).is_some() {
+            return Ok(payload.transaction_id.clone());
+        }
+
+        let ledger = env.ledger().sequence();
+        let tx = Transaction {
+            id: payload.transaction_id.clone(),
+            stellar_account: payload.stellar_account.clone(),
+            amount: payload.amount,
+            asset_code: payload.asset_code.clone(),
+            asset_issuer: payload.asset_issuer.clone(),
+            status: TransactionStatus::Pending,
+            created_at_ledger: ledger,
+            updated_at_ledger: ledger,
+            anchor_transaction_id: payload.anchor_transaction_id.clone(),
+            callback_type: payload.callback_type.clone(),
+            callback_status: payload.callback_status.clone(),
+            stellar_tx_hash: String::from_str(&env, ""),
+            failure_reason: String::from_str(&env, ""),
+        };
+
+        StorageClient::save_transaction(&env, &tx);
+        StorageClient::set_idempotency_key(&env, &payload.idempotency_key);
+        EventEmitter::transaction_registered(&env, &tx);
+
+        Ok(tx.id)
     }
 
     // ── Status transitions ────────────────────────────────────────────────────
@@ -155,8 +198,9 @@ impl SynapseCoreContract {
     /// Return the [`Transaction`] for the given `tx_id`, or
     /// [`ContractError::TransactionNotFound`].
     pub fn get_transaction(env: Env, tx_id: String) -> Result<Transaction, ContractError> {
-        // TODO: StorageClient::get_transaction(&env, &tx_id)
-        todo!()
+        // Read-only: intentionally NOT gated by the pause flag — pausing must
+        // never brick reads.
+        StorageClient::get_transaction(&env, &tx_id)
     }
 
     /// Return the current [`TransactionStatus`] without fetching the full record.
@@ -191,13 +235,46 @@ impl SynapseCoreContract {
         todo!()
     }
 
+    // ── Emergency pause / circuit breaker ──────────────────────────────────────
+
+    /// Engage the emergency circuit breaker.  Admin-gated.
+    ///
+    /// While paused, [`Self::register_callback`] rejects all new ingestion with
+    /// [`ContractError::ContractPaused`]. Status transitions
+    /// (`start_processing` / `complete_transaction` / `fail_transaction`) are
+    /// **deliberately left running** so already-registered work can drain during
+    /// an incident, and all read-only queries stay available. Idempotent: pausing
+    /// an already-paused contract is a no-op success.
+    pub fn pause(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        StorageClient::set_paused(&env, true);
+        EventEmitter::pause_toggled(&env, true, &admin);
+        Ok(())
+    }
+
+    /// Release the emergency circuit breaker, resuming normal callback
+    /// ingestion.  Admin-gated. Idempotent.
+    pub fn unpause(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        StorageClient::set_paused(&env, false);
+        EventEmitter::pause_toggled(&env, false, &admin);
+        Ok(())
+    }
+
+    /// Return whether the emergency pause is currently engaged.
+    pub fn is_paused(env: Env) -> bool {
+        StorageClient::is_paused(&env)
+    }
+
     /// Liveness probe — returns `true` when the contract is initialised.
     pub fn health(env: Env) -> bool {
         StorageClient::is_initialised(&env)
     }
 
     /// Return the contract version string (semver).
-    pub fn version(_env: Env) -> &'static str {
-        env!("CARGO_PKG_VERSION")
+    pub fn version(env: Env) -> String {
+        // NOTE: `&'static str` is not a Soroban-representable return type, so the
+        // package version is returned as a host `String`.
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 }
