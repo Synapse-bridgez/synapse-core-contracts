@@ -79,21 +79,59 @@ src/
 
 - Rust 1.81+ with `wasm32-unknown-unknown` target  
 - `stellar-cli` ≥ 22.x
+- `make` (pre-installed on macOS/Linux; on Windows use [WSL](https://learn.microsoft.com/en-us/windows/wsl/) or [GNU Make for Windows](https://gnuwin32.sourceforge.net/packages/make.htm))
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install --locked stellar-cli --features opt
 ```
 
+### First-time setup
+
+After cloning, run the one-time setup to install the pre-commit hook:
+
+```bash
+make setup
+```
+
+This registers `.git-hooks/pre-commit` so that every commit automatically
+runs `cargo fmt --check` and `cargo clippy` before it is accepted locally —
+the same checks CI enforces.
+
+### Run the full check suite
+
+```bash
+make check
+```
+
+`make check` runs **fmt → clippy → test → wasm build** in order, using
+exactly the same flags as the CI job. A green `make check` on your machine
+means the same commit will pass CI.
+
+| Target | Command it runs |
+|---|---|
+| `make fmt` | `cargo fmt --all -- --check` |
+| `make clippy` | `cargo clippy --all-targets -- -D warnings -A clippy::todo` |
+| `make test` | `cargo test --verbose` |
+| `make wasm` | `cargo build --target wasm32-unknown-unknown --release` |
+| `make build` | `cargo build --verbose` (quick debug build) |
+| `make check` | all of the above, in order |
+
 ### Build
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+# Debug build
+make build
+
+# Release wasm artefact
+make wasm
 ```
 
 ### Test
 
 ```bash
+make test
+# or directly:
 cargo test
 ```
 
