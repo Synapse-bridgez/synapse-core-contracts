@@ -24,33 +24,53 @@ impl Validator {
     }
 
     /// Stellar G-address: must be exactly 56 characters and start with 'G'.
-    pub fn validate_stellar_account(env: &Env, account: &String) -> Result<(), ContractError> {
-        // TODO: account.len() == 56 && account starts with b'G'
-        // Use env.bytes() comparison rather than std string ops.
-        todo!()
+    pub fn validate_stellar_account(_env: &Env, account: &String) -> Result<(), ContractError> {
+        if account.len() != 56 {
+            return Err(ContractError::InvalidStellarAccount);
+        }
+        let mut buf = [0u8; 56];
+        account.copy_into_slice(&mut buf);
+        if buf[0] != b'G' {
+            return Err(ContractError::InvalidStellarAccount);
+        }
+        Ok(())
     }
 
     /// Amount must be strictly positive (> 0 stroops).
     pub fn validate_amount(amount: i128) -> Result<(), ContractError> {
-        // TODO: if amount <= 0 { return Err(ContractError::InvalidAmount) }
-        todo!()
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        Ok(())
     }
 
     /// Asset code: 1–12 ASCII uppercase characters (SEP-11).
-    pub fn validate_asset_code(env: &Env, code: &String) -> Result<(), ContractError> {
-        // TODO: 1 <= code.len() <= 12, all chars uppercase ASCII
-        todo!()
+    pub fn validate_asset_code(_env: &Env, code: &String) -> Result<(), ContractError> {
+        let len = code.len() as usize;
+        if len == 0 || len > 12 {
+            return Err(ContractError::InvalidAssetCode);
+        }
+        let mut buf = [0u8; 12];
+        code.copy_into_slice(&mut buf[..len]);
+        for &byte in &buf[..len] {
+            if !byte.is_ascii_uppercase() {
+                return Err(ContractError::InvalidAssetCode);
+            }
+        }
+        Ok(())
     }
 
     /// Issuer: must be a valid G-address (same rule as stellar_account).
     pub fn validate_asset_issuer(env: &Env, issuer: &String) -> Result<(), ContractError> {
-        // TODO: reuse validate_stellar_account logic
-        todo!()
+        Self::validate_stellar_account(env, issuer)
+            .map_err(|_| ContractError::InvalidAssetIssuer)
     }
 
     /// Idempotency key: non-empty (off-chain enforces UUID format).
-    pub fn validate_idempotency_key(env: &Env, key: &String) -> Result<(), ContractError> {
-        // TODO: if key.len() == 0 { return Err(ContractError::MissingIdempotencyKey) }
-        todo!()
+    pub fn validate_idempotency_key(_env: &Env, key: &String) -> Result<(), ContractError> {
+        if key.is_empty() {
+            return Err(ContractError::MissingIdempotencyKey);
+        }
+        Ok(())
     }
 }

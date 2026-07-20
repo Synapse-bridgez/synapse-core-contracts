@@ -38,38 +38,57 @@ impl StorageClient {
 
     /// Persist the initialised flag.  Called exactly once during `initialize()`.
     pub fn set_initialised(env: &Env) {
-        // TODO: env.storage().instance().set(&StorageKey::Initialised, &true)
-        todo!()
+        env.storage().instance().set(&StorageKey::Initialised, &true);
+    }
+
+    // ── Pause / circuit breaker ───────────────────────────────────────────────
+
+    /// Returns `true` when the emergency-pause flag is engaged.
+    ///
+    /// Defaults to `false` when the flag has never been written, so a freshly
+    /// initialised contract is always unpaused.
+    pub fn is_paused(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&StorageKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Persist the emergency-pause flag.
+    pub fn set_paused(env: &Env, paused: bool) {
+        env.storage().instance().set(&StorageKey::Paused, &paused);
     }
 
     // ── Admin ─────────────────────────────────────────────────────────────────
 
     /// Read the current admin address from persistent storage.
     pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
-        // TODO: env.storage().persistent().get(&StorageKey::Admin)
-        //       .ok_or(ContractError::NotInitialised)
-        todo!()
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::NotInitialised)
     }
 
     /// Persist an admin address.
     pub fn set_admin(env: &Env, admin: &Address) {
-        // TODO: env.storage().persistent().set(&StorageKey::Admin, admin)
-        todo!()
+        env.storage().persistent().set(&StorageKey::Admin, admin);
     }
 
     // ── Relay signer ──────────────────────────────────────────────────────────
 
     /// Read the trusted relay signer address.
     pub fn get_relay_signer(env: &Env) -> Result<Address, ContractError> {
-        // TODO: env.storage().persistent().get(&StorageKey::RelaySigner)
-        //       .ok_or(ContractError::NotInitialised)
-        todo!()
+        env.storage()
+            .persistent()
+            .get(&StorageKey::RelaySigner)
+            .ok_or(ContractError::NotInitialised)
     }
 
     /// Persist the relay signer address.
     pub fn set_relay_signer(env: &Env, signer: &Address) {
-        // TODO: env.storage().persistent().set(&StorageKey::RelaySigner, signer)
-        todo!()
+        env.storage()
+            .persistent()
+            .set(&StorageKey::RelaySigner, signer);
     }
 
     // ── Transactions ──────────────────────────────────────────────────────────
@@ -78,23 +97,29 @@ impl StorageClient {
     ///
     /// Extends the ledger TTL on each access so active records are never evicted.
     pub fn get_transaction(env: &Env, tx_id: &String) -> Result<Transaction, ContractError> {
-        // TODO: let key = StorageKey::Transaction(tx_id.clone());
-        // TODO: env.storage()
-        //           .persistent()
-        //           .get::<StorageKey, Transaction>(&key)
-        //           .ok_or(ContractError::TransactionNotFound)
-        //
-        // After retrieval, extend TTL:
-        // TODO: env.storage().persistent().extend_ttl(&key, TRANSACTION_MIN_TTL_LEDGERS, ...)
-        todo!()
+        let key = StorageKey::Transaction(tx_id.clone());
+        let tx = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Transaction>(&key)
+            .ok_or(ContractError::TransactionNotFound)?;
+        env.storage().persistent().extend_ttl(
+            &key,
+            TRANSACTION_MIN_TTL_LEDGERS,
+            TRANSACTION_MIN_TTL_LEDGERS,
+        );
+        Ok(tx)
     }
 
     /// Persist (insert or update) a [`Transaction`].
     pub fn save_transaction(env: &Env, tx: &Transaction) {
-        // TODO: let key = StorageKey::Transaction(tx.id.clone());
-        // TODO: env.storage().persistent().set(&key, tx)
-        // TODO: extend TTL on the key
-        todo!()
+        let key = StorageKey::Transaction(tx.id.clone());
+        env.storage().persistent().set(&key, tx);
+        env.storage().persistent().extend_ttl(
+            &key,
+            TRANSACTION_MIN_TTL_LEDGERS,
+            TRANSACTION_MIN_TTL_LEDGERS,
+        );
     }
 
     // ── Idempotency keys ──────────────────────────────────────────────────────
@@ -102,23 +127,21 @@ impl StorageClient {
     /// Return the ledger sequence at which an idempotency key was first stored,
     /// or `None` if the key is unknown / expired.
     pub fn get_idempotency_key(env: &Env, key: &String) -> Option<u32> {
-        // TODO: env.storage()
-        //           .temporary()
-        //           .get::<StorageKey, u32>(&StorageKey::IdempotencyKey(key.clone()))
-        todo!()
+        env.storage()
+            .temporary()
+            .get::<StorageKey, u32>(&StorageKey::IdempotencyKey(key.clone()))
     }
 
     /// Record an idempotency key with a ~24-hour TTL.
     pub fn set_idempotency_key(env: &Env, key: &String) {
-        // TODO: env.storage()
-        //           .temporary()
-        //           .set(&StorageKey::IdempotencyKey(key.clone()),
-        //                &env.ledger().sequence())
-        // TODO: env.storage().temporary().extend_ttl(
-        //           &StorageKey::IdempotencyKey(key.clone()),
-        //           IDEMPOTENCY_TTL_LEDGERS,
-        //           IDEMPOTENCY_TTL_LEDGERS,
-        //       )
-        todo!()
+        let storage_key = StorageKey::IdempotencyKey(key.clone());
+        env.storage()
+            .temporary()
+            .set(&storage_key, &env.ledger().sequence());
+        env.storage().temporary().extend_ttl(
+            &storage_key,
+            IDEMPOTENCY_TTL_LEDGERS,
+            IDEMPOTENCY_TTL_LEDGERS,
+        );
     }
 }
