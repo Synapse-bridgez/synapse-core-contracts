@@ -192,6 +192,8 @@ pub enum ContractError {
     InvalidAssetIssuer = 23,
     /// `idempotency_key` is empty.
     MissingIdempotencyKey = 24,
+    /// A `String` field exceeds its maximum allowed length (cost-control cap).
+    StringTooLong = 25,
 
     // ── Transaction lifecycle ───────────────────────────────────────────────
     /// No transaction with the given ID exists in storage.

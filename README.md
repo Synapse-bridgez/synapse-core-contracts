@@ -97,14 +97,17 @@ cargo build --target wasm32-unknown-unknown --release
 cargo test
 ```
 
-### Deploy (testnet)
+### Deploy
 
-```bash
-stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/synapse_core_contract.wasm \
-  --source <DEPLOYER_SECRET> \
-  --network testnet
-```
+See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for a full deployment guide covering
+initialisation, upgrade, post-deployment checklist, admin key requirements, and
+monitoring setup.
+
+### Cost estimates
+
+See **[COST_MODEL.md](./COST_MODEL.md)** for the per-transaction XLM cost
+model, including persistent and temporary storage footprints, rent fees, and
+monthly budget projections at various volumes.
 
 ---
 
