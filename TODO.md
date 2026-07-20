@@ -9,5 +9,9 @@
 - [x] 5. Update `src/lib.rs` — add `upgrade()` entry point
 - [x] 6. Update `src/test_pause.rs` — add upgrade auth + storage-survival tests
 - [x] 7. Update `README.md` — design-decisions section for upgradability
-- [ ] 8. Verify `cargo build` and `cargo test` compile (in progress — slow network)
+- [x] 8. Create `COST_MODEL.md` — per-transaction XLM cost estimate
+- [x] 9. Create `DEPLOYMENT.md` — deployment guide referencing cost model
+- [x] 10. Update `README.md` — reference COST_MODEL.md and DEPLOYMENT.md
+- [x] 11. Implement string-length caps in `validation.rs` + new `StringTooLong` error in `types.rs`
+- [x] 12. Update `COST_MODEL.md` §6 — reflect enforced caps (not just proposed)
 
