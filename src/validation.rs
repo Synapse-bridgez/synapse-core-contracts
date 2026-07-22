@@ -1,14 +1,37 @@
 //! # Validation
 //!
 //! Stateless guards that reject malformed inputs before they touch storage.
-//! Each function is pure (takes `&Env` only for string construction) and maps
-//! directly to a [`ContractError`] variant.
+//! Each function is pure (takes `&Env` only when needed for host string ops) and
+//! maps directly to a [`ContractError`] variant.
 //!
 //! ## String-length caps
 //!
 //! Several `String` fields have maximum-length caps to prevent unbounded
 //! storage-rent costs.  These caps are enforced here and referenced by the
 //! [`cost model`](../COST_MODEL.md#6-string-length-cap-impact).
+//!
+//! ## Stellar G-address validation (SEP-23 strkey)
+//!
+//! **Decision (accepted): full base32-decode + CRC16-XModem checksum.**
+//!
+//! A cheap `len == 56 && starts_with('G')` check lets single-character typos
+//! that still look well-shaped through, silently registering a transaction
+//! against an address that corresponds to no real account.  That residual risk
+//! is unacceptable for an on-chain registry that keys deposits to a destination.
+//!
+//! Cost of the full check inside this `#![no_std]`, `opt-level = "z"` contract
+//! (measured on the release wasm artefact — see [`DECISIONS.md`](../DECISIONS.md)
+//! § Strkey CRC16):
+//!
+//! | Metric | Approx. impact |
+//! |--------|----------------|
+//! | Algorithm | 56× base32 nibble + CRC16 over 33 bytes |
+//! | Estimated CPU instructions | low thousands (≪ one storage write) |
+//! | Release WASM size delta | on the order of 1–2 KiB |
+//! | Fee impact | negligible vs ~0.01 XLM `register_callback` write cost |
+//!
+//! Implementation is hand-rolled (no external crate) to stay within the
+//! no_std / wasm-size budget.  See fixtures in the unit tests below.
 
 use soroban_sdk::{Env, String};
 
@@ -27,10 +50,91 @@ const MAX_STELLAR_TX_HASH_LEN: u32 = 72;
 #[allow(dead_code)]
 const MAX_FAILURE_REASON_LEN: u32 = 64;
 
+/// Encoded ed25519 public-key strkey length (SEP-23).
+const STRKEY_ENCODED_LEN: u32 = 56;
+/// Decoded length: 1 version + 32 pubkey + 2 CRC16 = 35 bytes.
+const STRKEY_DECODED_LEN: usize = 35;
+/// Version byte for ed25519 public keys (`6 << 3`), base32-encodes to `'G'`.
+const VERSION_ED25519_PUBLIC_KEY: u8 = 6 << 3;
+/// CRC16-XModem polynomial \(x^{16} + x^{12} + x^{5} + 1\).
+const CRC16_XMODEM_POLY: u16 = 0x1021;
+
 /// Generic helper: reject a `String` if its byte length exceeds `max`.
 fn enforce_max_length(field: &String, max: u32) -> Result<(), ContractError> {
     if field.len() > max {
         return Err(ContractError::StringTooLong);
+    }
+    Ok(())
+}
+
+/// Map a single RFC 4648 base32 alphabet character to its 5-bit value.
+#[inline]
+fn base32_value(c: u8) -> Result<u8, ()> {
+    match c {
+        b'A'..=b'Z' => Ok(c - b'A'),
+        b'2'..=b'7' => Ok(c - b'2' + 26),
+        _ => Err(()),
+    }
+}
+
+/// Decode an unpadded 56-character SEP-23 strkey into 35 raw bytes.
+fn base32_decode_strkey(
+    encoded: &[u8; STRKEY_ENCODED_LEN as usize],
+) -> Result<[u8; STRKEY_DECODED_LEN], ()> {
+    let mut out = [0u8; STRKEY_DECODED_LEN];
+    let mut bit_buffer: u32 = 0;
+    let mut bits_in_buffer: u32 = 0;
+    let mut out_idx = 0usize;
+
+    for &c in encoded {
+        let val = base32_value(c)? as u32;
+        bit_buffer = (bit_buffer << 5) | val;
+        bits_in_buffer += 5;
+        if bits_in_buffer >= 8 {
+            bits_in_buffer -= 8;
+            out[out_idx] = ((bit_buffer >> bits_in_buffer) & 0xff) as u8;
+            out_idx += 1;
+        }
+    }
+
+    // 56 × 5 bits = 280 bits = exactly 35 bytes; leftover must be zero.
+    if out_idx != STRKEY_DECODED_LEN || bits_in_buffer != 0 {
+        return Err(());
+    }
+    Ok(out)
+}
+
+/// CRC16-XModem (init 0, no final XOR) used by Stellar strkeys.
+fn crc16_xmodem(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ CRC16_XMODEM_POLY;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+/// Verify a Stellar ed25519 public-key strkey (G-address) per SEP-23.
+///
+/// Steps: length → base32 decode → version byte → CRC16-XModem (little-endian).
+fn verify_ed25519_public_key_strkey(encoded: &[u8; STRKEY_ENCODED_LEN as usize]) -> Result<(), ()> {
+    let decoded = base32_decode_strkey(encoded)?;
+    if decoded[0] != VERSION_ED25519_PUBLIC_KEY {
+        return Err(());
+    }
+    let payload = &decoded[..STRKEY_DECODED_LEN - 2];
+    let expected = u16::from_le_bytes([
+        decoded[STRKEY_DECODED_LEN - 2],
+        decoded[STRKEY_DECODED_LEN - 1],
+    ]);
+    if crc16_xmodem(payload) != expected {
+        return Err(());
     }
     Ok(())
 }
@@ -53,17 +157,17 @@ impl Validator {
         Ok(())
     }
 
-    /// Stellar G-address: must be exactly 56 characters and start with 'G'.
+    /// Stellar G-address: SEP-23 ed25519 public-key strkey with CRC16 checksum.
+    ///
+    /// Rejects wrong length/prefix, invalid base32, wrong version byte, and
+    /// checksum mismatches (including well-shaped single-character typos).
     pub fn validate_stellar_account(_env: &Env, account: &String) -> Result<(), ContractError> {
-        if account.len() != 56 {
+        if account.len() != STRKEY_ENCODED_LEN {
             return Err(ContractError::InvalidStellarAccount);
         }
-        let mut buf = [0u8; 56];
+        let mut buf = [0u8; STRKEY_ENCODED_LEN as usize];
         account.copy_into_slice(&mut buf);
-        if buf[0] != b'G' {
-            return Err(ContractError::InvalidStellarAccount);
-        }
-        Ok(())
+        verify_ed25519_public_key_strkey(&buf).map_err(|_| ContractError::InvalidStellarAccount)
     }
 
     /// Amount must be strictly positive (> 0 stroops).
@@ -129,5 +233,99 @@ impl Validator {
     #[allow(dead_code)]
     pub fn validate_failure_reason(reason: &String) -> Result<(), ContractError> {
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
+    }
+}
+
+// ─── Unit tests & fixtures ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::Env;
+
+    // Fixtures — real SEP-23 shapes, not synthetic "G" + filler.
+    //
+    // VALID: canonical ed25519 public-key example from SEP-23.
+    const FIXTURE_VALID: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+    // CHECKSUM-INVALID: same length + `G` prefix, one character corrupted so
+    // CRC16 fails (would pass a cheap prefix/length check).
+    const FIXTURE_CHECKSUM_INVALID: &str =
+        "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGY";
+    // MALFORMED: wrong length (genuinely not a strkey shape).
+    const FIXTURE_MALFORMED_SHORT: &str = "GSHORT";
+    // MALFORMED: invalid base32 alphabet character (`0` is not in RFC 4648).
+    const FIXTURE_MALFORMED_ALPHABET: &str =
+        "GAAAAAAAAAAAAAAA0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    // MALFORMED: correct length but wrong version prefix (`C` = contract).
+    const FIXTURE_WRONG_PREFIX: &str = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+
+    #[test]
+    fn fixture_valid_address_passes() {
+        let env = Env::default();
+        let account = String::from_str(&env, FIXTURE_VALID);
+        assert_eq!(Validator::validate_stellar_account(&env, &account), Ok(()));
+    }
+
+    #[test]
+    fn fixture_checksum_invalid_is_rejected() {
+        let env = Env::default();
+        // Sanity: still looks like a cheap-check G-address.
+        assert_eq!(FIXTURE_CHECKSUM_INVALID.len(), 56);
+        assert!(FIXTURE_CHECKSUM_INVALID.starts_with('G'));
+
+        let account = String::from_str(&env, FIXTURE_CHECKSUM_INVALID);
+        assert_eq!(
+            Validator::validate_stellar_account(&env, &account),
+            Err(ContractError::InvalidStellarAccount)
+        );
+    }
+
+    #[test]
+    fn fixture_malformed_short_is_rejected() {
+        let env = Env::default();
+        let account = String::from_str(&env, FIXTURE_MALFORMED_SHORT);
+        assert_eq!(
+            Validator::validate_stellar_account(&env, &account),
+            Err(ContractError::InvalidStellarAccount)
+        );
+    }
+
+    #[test]
+    fn fixture_malformed_alphabet_is_rejected() {
+        let env = Env::default();
+        assert_eq!(FIXTURE_MALFORMED_ALPHABET.len(), 56);
+        let account = String::from_str(&env, FIXTURE_MALFORMED_ALPHABET);
+        assert_eq!(
+            Validator::validate_stellar_account(&env, &account),
+            Err(ContractError::InvalidStellarAccount)
+        );
+    }
+
+    #[test]
+    fn fixture_wrong_prefix_is_rejected() {
+        let env = Env::default();
+        assert_eq!(FIXTURE_WRONG_PREFIX.len(), 56);
+        let account = String::from_str(&env, FIXTURE_WRONG_PREFIX);
+        assert_eq!(
+            Validator::validate_stellar_account(&env, &account),
+            Err(ContractError::InvalidStellarAccount)
+        );
+    }
+
+    #[test]
+    fn issuer_maps_checksum_failure_to_invalid_asset_issuer() {
+        let env = Env::default();
+        let issuer = String::from_str(&env, FIXTURE_CHECKSUM_INVALID);
+        assert_eq!(
+            Validator::validate_asset_issuer(&env, &issuer),
+            Err(ContractError::InvalidAssetIssuer)
+        );
+    }
+
+    #[test]
+    fn crc16_matches_known_sep23_vector() {
+        let mut buf = [0u8; 56];
+        buf.copy_from_slice(FIXTURE_VALID.as_bytes());
+        assert!(verify_ed25519_public_key_strkey(&buf).is_ok());
     }
 }

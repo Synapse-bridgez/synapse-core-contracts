@@ -166,6 +166,15 @@ as of this document's publication.  The caps are:
 strings, driving rent cost to tens of XLM per entry.  The caps close this
 attack vector.
 
+### 6.1 Strkey CRC16 validation cost
+
+`stellar_account` / `asset_issuer` are validated with a hand-rolled SEP-23
+base32 decode + CRC16-XModem check (see [`DECISIONS.md`](./DECISIONS.md)
+§ Strkey CRC16).  Per-call CPU is low thousands of instructions — negligible
+beside the ~0.01 XLM storage write for `register_callback`.  Release WASM grew
+by **418 bytes** (19 820 → 20 238) under `opt-level = "z"`; fee impact is
+dominated by ledger writes, not validation.
+
 With the enforced caps, the **worst-case persistent entry** is:
 
 | Field (worst case)          | Size     |

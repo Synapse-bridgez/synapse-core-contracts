@@ -153,13 +153,28 @@ monthly budget projections at various volumes.
 
 ---
 
+## Contributing
+
+See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for branch/PR conventions, how to
+run the local check suite, doc-comment expectations, and guidance on when to
+write an Architecture Decision Record.
+
+---
+
 ## Key design decisions
+
+Non-obvious decisions are recorded as Architecture Decision Records in
+[`docs/adr/`](./docs/adr/). The ADR log is the canonical place to understand
+*why* a design choice was made, what alternatives were considered, and what
+trade-offs were accepted.
 
 ### Why relay_signer instead of direct Anchor Platform calls?
 
 The Anchor Platform can't sign Stellar transactions directly; the off-chain  
 `synapse-core` service acts as the authenticated relay. The contract trusts one  
-specific `relay_signer` address whose key is held by the relay service.
+specific `relay_signer` address whose key is held by the relay service.  
+See **[ADR-0001](./docs/adr/0001-relay-signer-trust-model.md)** for the full
+trust-model analysis.
 
 ### Idempotency (on-chain)
 

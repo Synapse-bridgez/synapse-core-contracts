@@ -32,13 +32,15 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
     (env, client, admin, relay)
 }
 
-/// A valid 56-character Stellar `G…` address (built from bytes so the length is
-/// guaranteed correct).
+/// A real SEP-23 ed25519 public-key strkey (checksum-valid).
+///
+/// Must pass full CRC16 validation in [`crate::validation::Validator`] — a
+/// synthetic `G` + filler string is no longer accepted.
 fn g_address(env: &Env) -> String {
-    let mut bytes = [b'A'; 56];
-    bytes[0] = b'G';
-    let s = core::str::from_utf8(&bytes).unwrap();
-    String::from_str(env, s)
+    String::from_str(
+        env,
+        "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+    )
 }
 
 fn valid_payload(env: &Env) -> CallbackPayload {
@@ -208,6 +210,9 @@ fn test_upgrade_rejects_non_admin() {
     // auth rejection is the acceptance criterion here. Topic assertions for the
     // upgrade event live in `test_upgrade_emits_contract_upgraded_event` and
     // are cross-checked against EVENTS.md.
+    // (Successful upgrade also requires the WASM hash to exist in ledger
+    // storage; that path is exercised via `EventEmitter` below + deploy-time
+    // integration. Auth rejection is the acceptance criterion here.)
     let attacker_attempt = client
         .mock_auths(&[MockAuth {
             address: &attacker,
@@ -233,6 +238,7 @@ fn test_upgrade_storage_survives_admin_ops() {
         TransactionStatus::Pending
     );
 
+    // Persistent storage must survive subsequent privileged ops.
     client.pause();
     client.unpause();
 
