@@ -169,3 +169,84 @@ The admin key is the **single most important secret** in the Synapse Bridge ecos
 - [SEP-11: Stellar Asset Code Conventions](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0011.md)
 - [Phoenix Protocol: Upgradeable Pools](https://github.com/Phoenix-Protocol-Group/phoenix)
 
+---
+
+# Decision: Full SEP-23 Strkey CRC16 Validation
+
+> **Status:** Accepted · **Date:** 2026-Q3  
+> **Scope:** `validate_stellar_account` / `validate_asset_issuer` in [`src/validation.rs`](./src/validation.rs)  
+> **Issue:** [#28](https://github.com/Synapse-bridgez/synapse-core-contracts/issues/28)
+
+---
+
+## 1. Problem Statement
+
+Stellar G-addresses are SEP-23 strkeys: unpadded base32 of
+`(version_byte ‖ ed25519_pubkey ‖ CRC16-XModem)`, 56 characters, version
+`6 << 3` (encodes to `'G'`).
+
+The previous guard was a **cheap shape check**:
+
+```text
+len == 56 && first_byte == b'G'
+```
+
+That accepts checksum-invalid strings that still look like addresses — e.g. a
+single-character typo — and would let `register_callback` persist a deposit
+keyed to an account that cannot exist on the network.
+
+---
+
+## 2. Options Considered
+
+### Option A — Full base32 + CRC16-XModem (hand-rolled) ✅
+
+Decode 56 chars → 35 bytes, require version `0x30`, verify little-endian
+CRC16-XModem over the 33-byte payload. No external crate (keeps `#![no_std]` /
+`opt-level = "z"` size budget).
+
+### Option B — Keep cheap prefix/length check
+
+Document residual risk in module docs and rely on off-chain relay validation.
+
+---
+
+## 3. Cost measurement
+
+| Metric | Result |
+|--------|--------|
+| Work per call | 56 base32 lookups + CRC16 over 33 bytes (~264 bit ops) |
+| Estimated host CPU | low thousands of instructions — far below one persistent storage write |
+| Release WASM (baseline, pre-change) | **19 820** bytes |
+| Release WASM (post-change) | **20 238** bytes (**+418** bytes / ~2.1%) |
+| Fee context | `register_callback` ≈ **0.01 XLM** dominated by storage writes ([`COST_MODEL.md`](./COST_MODEL.md)); validation CPU is noise |
+
+**Conclusion:** the security win outweighs the size/CPU cost. Option A accepted.
+
+---
+
+## 4. Residual risk if we had rejected
+
+An invalid-but-well-shaped account could be registered on-chain. Relayers would
+still pay fees; funds destination would not match any real account. That is a
+deliberate trade-off only if WASM size were at the limit — it is not.
+
+---
+
+## 5. Fixtures
+
+Unit tests in `validation.rs` cover:
+
+| Fixture | Role |
+|---------|------|
+| `GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ` | Valid SEP-23 ed25519 public key |
+| `…VSGY` (last char flipped) | Prefix/length-valid, checksum-invalid |
+| `GSHORT` / invalid alphabet / `C…` prefix | Genuinely malformed |
+
+---
+
+## 6. References
+
+- [SEP-23: Strkeys](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md)
+- [Stellar Go `strkey` + CRC16-XModem](https://github.com/stellar/go/tree/master/strkey)
+
