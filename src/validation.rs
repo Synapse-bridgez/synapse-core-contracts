@@ -21,15 +21,14 @@ const MAX_ANCHOR_TX_ID_LEN: u32 = 64;
 /// Maximum length for `callback_status` (short code, e.g. "pending_external").
 const MAX_CALLBACK_STATUS_LEN: u32 = 32;
 /// Maximum length for `stellar_tx_hash` (SHA-256 hex is 64 chars).
+#[allow(dead_code)]
 const MAX_STELLAR_TX_HASH_LEN: u32 = 72;
 /// Maximum length for `failure_reason` (short human-readable code).
+#[allow(dead_code)]
 const MAX_FAILURE_REASON_LEN: u32 = 64;
 
 /// Generic helper: reject a `String` if its byte length exceeds `max`.
-fn enforce_max_length(
-    field: &String,
-    max: u32,
-) -> Result<(), ContractError> {
+fn enforce_max_length(field: &String, max: u32) -> Result<(), ContractError> {
     if field.len() > max {
         return Err(ContractError::StringTooLong);
     }
@@ -93,8 +92,7 @@ impl Validator {
 
     /// Issuer: must be a valid G-address (same rule as stellar_account).
     pub fn validate_asset_issuer(env: &Env, issuer: &String) -> Result<(), ContractError> {
-        Self::validate_stellar_account(env, issuer)
-            .map_err(|_| ContractError::InvalidAssetIssuer)
+        Self::validate_stellar_account(env, issuer).map_err(|_| ContractError::InvalidAssetIssuer)
     }
 
     /// Idempotency key: non-empty (off-chain enforces UUID format).
@@ -122,11 +120,13 @@ impl Validator {
     }
 
     /// Stellar transaction hash: max length enforced for rent cost control.
+    #[allow(dead_code)]
     pub fn validate_stellar_tx_hash(hash: &String) -> Result<(), ContractError> {
         enforce_max_length(hash, MAX_STELLAR_TX_HASH_LEN)
     }
 
     /// Failure reason: max length enforced for rent cost control.
+    #[allow(dead_code)]
     pub fn validate_failure_reason(reason: &String) -> Result<(), ContractError> {
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
     }

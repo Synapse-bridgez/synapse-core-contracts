@@ -14,8 +14,13 @@
 //!
 //! This two-topic convention is consistent with the Stellar Asset Contract
 //! standard and makes event filtering straightforward in Horizon / RPC queries.
+//!
+//! **Public API:** topic names, payload fields/types/order, and multi-event
+//! emission order are versioned for Phase 2 / Phase 3 subscribers. See
+//! [`EVENTS.md`](../EVENTS.md) (catalogue + semver) and
+//! [`CHANGELOG.md`](../CHANGELOG.md#event-schema).
 
-use soroban_sdk::{contracttype, symbol_short, BytesN, Env, String};
+use soroban_sdk::{contracttype, symbol_short, Env, String};
 
 use crate::types::TransactionStatus;
 
@@ -173,11 +178,12 @@ impl EventEmitter {
     }
 
     /// Emit [`EventStatusChanged`].
+    #[allow(dead_code)]
     pub fn status_changed(
-        env: &Env,
-        tx_id: &String,
-        old_status: TransactionStatus,
-        new_status: TransactionStatus,
+        _env: &Env,
+        _tx_id: &String,
+        _old_status: TransactionStatus,
+        _new_status: TransactionStatus,
     ) {
         // TODO:
         // env.events().publish(
@@ -193,7 +199,8 @@ impl EventEmitter {
     }
 
     /// Emit [`EventTransactionCompleted`].
-    pub fn transaction_completed(env: &Env, tx_id: &String, stellar_tx_hash: &String) {
+    #[allow(dead_code)]
+    pub fn transaction_completed(_env: &Env, _tx_id: &String, _stellar_tx_hash: &String) {
         // TODO:
         // env.events().publish(
         //     (symbol_short!("synapse"), symbol_short!("done")),
@@ -203,7 +210,8 @@ impl EventEmitter {
     }
 
     /// Emit [`EventTransactionFailed`].
-    pub fn transaction_failed(env: &Env, tx_id: &String, reason: &String) {
+    #[allow(dead_code)]
+    pub fn transaction_failed(_env: &Env, _tx_id: &String, _reason: &String) {
         // TODO:
         // env.events().publish(
         //     (symbol_short!("synapse"), symbol_short!("fail")),
@@ -213,10 +221,11 @@ impl EventEmitter {
     }
 
     /// Emit [`EventAdminTransferred`].
+    #[allow(dead_code)]
     pub fn admin_transferred(
-        env: &Env,
-        old_admin: &soroban_sdk::Address,
-        new_admin: &soroban_sdk::Address,
+        _env: &Env,
+        _old_admin: &soroban_sdk::Address,
+        _new_admin: &soroban_sdk::Address,
     ) {
         // TODO:
         // env.events().publish(

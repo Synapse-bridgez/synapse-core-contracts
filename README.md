@@ -55,6 +55,10 @@ src/
 ├── validation.rs   ← stateless input guards
 ├── admin.rs        ← role-based access control (admin + relay_signer)
 └── tests.rs        ← integration test skeletons (one per entry-point)
+
+EVENTS.md           ← locked event schema (topics, payloads, ordering, semver)
+CHANGELOG.md        ← release notes; Event schema section for subscribers
+DECISIONS.md        ← architectural decision records
 ```
 
 ---
@@ -198,3 +202,26 @@ trust model.
 - Breaking changes to `Transaction` struct layout or `StorageKey` variants
 - Fundamental access-control model changes
 - WASM size exceeds Soroban deployment constraints
+
+### Event schema as a stable public API
+
+**Status:** 🔒 Locked (documented)
+
+Once Phase 2 (Swap Engine) and Phase 3 (Cross-Chain Bridge) subscribe to this
+contract’s events, topic names, payload field types/order, and multi-event
+emission order are a **cross-repo API**. They do not share this repository’s
+PR review or release cadence.
+
+- **Catalogue + ordering:** [`EVENTS.md`](./EVENTS.md) — topics, `#[contracttype]`
+  fields, emitting entry-points, and guaranteed order (e.g. `complete_transaction`
+  emits `status` then `done`).
+- **Semver:** Additive trailing fields / new events → minor or patch bump of
+  `version()`. Removal, rename, reorder, type change, or emission-order change →
+  **major** bump with advance notice to subscriber teams
+  ([policy](./EVENTS.md#5-semver-policy)).
+- **Subscriber-facing diffs:** [`CHANGELOG.md` → Event schema](./CHANGELOG.md#event-schema)
+  only — separate from general code notes.
+
+Live emitters today: `init`, `reg`, `pause`, `upgrade`. Remaining lifecycle /
+admin events are schema-locked in `EVENTS.md` and `src/events.rs` pending
+emitter wiring.
