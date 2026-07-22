@@ -40,9 +40,7 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
-use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus,
-};
+use crate::types::{CallbackPayload, ContractError, Transaction, TransactionStatus};
 use crate::validation::Validator;
 
 // ─── Public contract interface ───────────────────────────────────────────────
@@ -59,7 +57,11 @@ impl SynapseCoreContract {
     /// * `admin`        — Address that may call privileged methods.
     /// * `relay_signer` — Address of the trusted off-chain relay that forwards
     ///                    Anchor Platform callbacks on-chain.
-    pub fn initialize(env: Env, admin: Address, relay_signer: Address) -> Result<(), ContractError> {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        relay_signer: Address,
+    ) -> Result<(), ContractError> {
         if StorageClient::is_initialised(&env) {
             return Err(ContractError::AlreadyInitialised);
         }
@@ -87,10 +89,7 @@ impl SynapseCoreContract {
     ///
     /// # Events
     /// Emits [`events::TransactionRegistered`] on first write.
-    pub fn register_callback(
-        env: Env,
-        payload: CallbackPayload,
-    ) -> Result<String, ContractError> {
+    pub fn register_callback(env: Env, payload: CallbackPayload) -> Result<String, ContractError> {
         // Circuit breaker: while the emergency pause is engaged we fail closed
         // and reject all new callback ingestion outright. This check is first so
         // ingestion is blocked regardless of caller. Read-only queries and
@@ -143,9 +142,9 @@ impl SynapseCoreContract {
     /// Called by the relay when the off-chain processor picks up the job.
     /// Enforces the state machine: only `Pending → Processing` is valid here.
     pub fn start_processing(
-        env: Env,
-        tx_id: String,
-        caller: Address,
+        _env: Env,
+        _tx_id: String,
+        _caller: Address,
     ) -> Result<(), ContractError> {
         // TODO: caller.require_auth()
         // TODO: AdminClient::assert_is_relay_or_admin(&env, &caller)?
@@ -162,10 +161,10 @@ impl SynapseCoreContract {
     /// `stellar_tx_hash` — the Stellar transaction hash confirming the deposit
     ///                     was settled on Horizon. Stored for auditability.
     pub fn complete_transaction(
-        env: Env,
-        tx_id: String,
-        stellar_tx_hash: String,
-        caller: Address,
+        _env: Env,
+        _tx_id: String,
+        _stellar_tx_hash: String,
+        _caller: Address,
     ) -> Result<(), ContractError> {
         // TODO: caller.require_auth()
         // TODO: AdminClient::assert_is_relay_or_admin(&env, &caller)?
@@ -180,10 +179,10 @@ impl SynapseCoreContract {
     /// `reason` — short human-readable failure code (e.g. "horizon_timeout",
     ///            "invalid_account", "circuit_open").
     pub fn fail_transaction(
-        env: Env,
-        tx_id: String,
-        reason: String,
-        caller: Address,
+        _env: Env,
+        _tx_id: String,
+        _reason: String,
+        _caller: Address,
     ) -> Result<(), ContractError> {
         // TODO: caller.require_auth()
         // TODO: AdminClient::assert_is_relay_or_admin
@@ -204,13 +203,13 @@ impl SynapseCoreContract {
     }
 
     /// Return the current [`TransactionStatus`] without fetching the full record.
-    pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
+    pub fn get_status(_env: Env, _tx_id: String) -> Result<TransactionStatus, ContractError> {
         // TODO: fetch tx, return tx.status
         todo!()
     }
 
     /// Check whether an idempotency key has already been processed.
-    pub fn is_duplicate(env: Env, idempotency_key: String) -> bool {
+    pub fn is_duplicate(_env: Env, _idempotency_key: String) -> bool {
         // TODO: StorageClient::get_idempotency_key(&env, &idempotency_key).is_some()
         todo!()
     }
@@ -218,7 +217,7 @@ impl SynapseCoreContract {
     // ── Admin ─────────────────────────────────────────────────────────────────
 
     /// Transfer the admin role to `new_admin`.  Requires existing admin auth.
-    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+    pub fn transfer_admin(_env: Env, _new_admin: Address) -> Result<(), ContractError> {
         // TODO: AdminClient::require_admin(&env)?
         // TODO: StorageClient::set_admin(&env, &new_admin)
         // TODO: EventEmitter::admin_transferred
@@ -226,10 +225,7 @@ impl SynapseCoreContract {
     }
 
     /// Rotate the trusted relay signer address.
-    pub fn set_relay_signer(
-        env: Env,
-        new_signer: Address,
-    ) -> Result<(), ContractError> {
+    pub fn set_relay_signer(_env: Env, _new_signer: Address) -> Result<(), ContractError> {
         // TODO: AdminClient::require_admin(&env)?
         // TODO: StorageClient::set_relay_signer(&env, &new_signer)
         todo!()
@@ -254,7 +250,8 @@ impl SynapseCoreContract {
     /// the full rationale and `README.md` for operational requirements.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
         let admin = AdminClient::require_admin(&env)?;
-        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
         EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash);
         Ok(())
     }

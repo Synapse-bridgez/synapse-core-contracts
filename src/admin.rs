@@ -29,10 +29,8 @@ impl AdminClient {
     /// Assert that `caller` is either the admin or the trusted relay signer.
     ///
     /// Used by status-transition methods which are callable by both roles.
-    pub fn assert_is_relay_or_admin(
-        env: &Env,
-        caller: &Address,
-    ) -> Result<(), ContractError> {
+    #[allow(dead_code)]
+    pub fn assert_is_relay_or_admin(_env: &Env, _caller: &Address) -> Result<(), ContractError> {
         // TODO: let admin = StorageClient::get_admin(env)?;
         // TODO: let relay = StorageClient::get_relay_signer(env)?;
         // TODO: if caller != &admin && caller != &relay {
@@ -45,7 +43,8 @@ impl AdminClient {
     /// Assert that `caller` is specifically the relay signer (not the admin).
     ///
     /// Used by `register_callback` — only the relay may ingest callbacks.
-    pub fn require_relay_signer(env: &Env, caller: &Address) -> Result<(), ContractError> {
+    #[allow(dead_code)]
+    pub fn require_relay_signer(_env: &Env, _caller: &Address) -> Result<(), ContractError> {
         // TODO: let relay = StorageClient::get_relay_signer(env)?;
         // TODO: if caller != &relay { return Err(ContractError::NotRelaySigner) }
         // TODO: caller.require_auth();
