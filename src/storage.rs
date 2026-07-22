@@ -31,14 +31,14 @@ impl StorageClient {
 
     /// Returns `true` if [`crate::SynapseCoreContract::initialize`] has been called.
     pub fn is_initialised(env: &Env) -> bool {
-        env.storage()
-            .instance()
-            .has(&StorageKey::Initialised)
+        env.storage().instance().has(&StorageKey::Initialised)
     }
 
     /// Persist the initialised flag.  Called exactly once during `initialize()`.
     pub fn set_initialised(env: &Env) {
-        env.storage().instance().set(&StorageKey::Initialised, &true);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Initialised, &true);
     }
 
     // ── Pause / circuit breaker ───────────────────────────────────────────────

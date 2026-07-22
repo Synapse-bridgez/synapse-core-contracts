@@ -14,6 +14,11 @@
 //!
 //! This two-topic convention is consistent with the Stellar Asset Contract
 //! standard and makes event filtering straightforward in Horizon / RPC queries.
+//!
+//! **Public API:** topic names, payload fields/types/order, and multi-event
+//! emission order are versioned for Phase 2 / Phase 3 subscribers. See
+//! [`EVENTS.md`](../EVENTS.md) (catalogue + semver) and
+//! [`CHANGELOG.md`](../CHANGELOG.md#event-schema).
 
 use soroban_sdk::{contracttype, symbol_short, Env, String};
 

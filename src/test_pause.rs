@@ -206,6 +206,10 @@ fn test_upgrade_rejects_non_admin() {
     let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
 
     // A non-admin cannot upgrade — only the attacker's auth is supplied.
+    // Successful upgrade also requires the WASM hash to exist in ledger storage;
+    // auth rejection is the acceptance criterion here. Topic assertions for the
+    // upgrade event live in `test_upgrade_emits_contract_upgraded_event` and
+    // are cross-checked against EVENTS.md.
     // (Successful upgrade also requires the WASM hash to exist in ledger
     // storage; that path is exercised via `EventEmitter` below + deploy-time
     // integration. Auth rejection is the acceptance criterion here.)
@@ -252,6 +256,7 @@ fn test_upgrade_emits_contract_upgraded_event() {
     let dummy_hash = BytesN::from_array(&env, &[0xabu8; 32]);
 
     // Publish inside a contract context so testutils `Events::all` records it.
+    // Topics must match EVENTS.md: synapse / upgrade.
     env.as_contract(&contract_id, || {
         crate::events::EventEmitter::contract_upgraded(&env, &admin, &dummy_hash);
     });
