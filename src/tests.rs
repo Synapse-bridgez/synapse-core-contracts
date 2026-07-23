@@ -91,7 +91,11 @@ fn default_payload(env: &Env) -> CallbackPayload {
 }
 
 /// Assert the last two topics of an event are `synapse`/`name`.
-fn assert_topics(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, name: soroban_sdk::Symbol) {
+fn assert_topics(
+    env: &Env,
+    topics: &soroban_sdk::Vec<soroban_sdk::Val>,
+    name: soroban_sdk::Symbol,
+) {
     assert_eq!(topics.len(), 2);
     let t0 = Symbol::try_from_val(env, &topics.get_unchecked(0)).unwrap();
     let t1 = Symbol::try_from_val(env, &topics.get_unchecked(1)).unwrap();
@@ -237,8 +241,7 @@ fn test_register_callback_rejects_string_too_long() {
     let (env, client, _admin, _relay) = setup();
     let mut payload = default_payload(&env);
     // MAX_CALLBACK_STATUS_LEN is 32; 40 chars exceeds the cap.
-    payload.callback_status =
-        String::from_str(&env, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    payload.callback_status = String::from_str(&env, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
     let result = client.try_register_callback(&payload);
     assert_eq!(result, Err(Ok(ContractError::StringTooLong)));
 }
@@ -425,8 +428,7 @@ fn test_fail_transaction_rejects_completed() {
     client.start_processing(&tx_id, &relay);
     client.complete_transaction(&tx_id, &String::from_str(&env, "hash-1"), &relay);
 
-    let result =
-        client.try_fail_transaction(&tx_id, &String::from_str(&env, "too_late"), &relay);
+    let result = client.try_fail_transaction(&tx_id, &String::from_str(&env, "too_late"), &relay);
     assert_eq!(result, Err(Ok(ContractError::InvalidStatusTransition)));
 }
 
@@ -437,7 +439,10 @@ fn test_get_transaction_rejects_unknown_id() {
     let (env, client, _admin, _relay) = setup();
     let missing = String::from_str(&env, "does-not-exist");
     let result = client.try_get_transaction(&missing);
-    assert!(matches!(result, Err(Ok(ContractError::TransactionNotFound))));
+    assert!(matches!(
+        result,
+        Err(Ok(ContractError::TransactionNotFound))
+    ));
 }
 
 #[test]

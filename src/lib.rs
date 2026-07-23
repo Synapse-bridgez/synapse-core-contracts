@@ -143,11 +143,7 @@ impl SynapseCoreContract {
     ///
     /// Called by the relay when the off-chain processor picks up the job.
     /// Enforces the state machine: only `Pending → Processing` is valid here.
-    pub fn start_processing(
-        env: Env,
-        tx_id: String,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn start_processing(env: Env, tx_id: String, caller: Address) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
