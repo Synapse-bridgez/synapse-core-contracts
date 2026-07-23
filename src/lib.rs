@@ -34,6 +34,8 @@ mod validation;
 
 #[cfg(test)]
 mod test_pause;
+#[cfg(test)]
+mod tests;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
 
@@ -142,18 +144,24 @@ impl SynapseCoreContract {
     /// Called by the relay when the off-chain processor picks up the job.
     /// Enforces the state machine: only `Pending → Processing` is valid here.
     pub fn start_processing(
-        _env: Env,
-        _tx_id: String,
-        _caller: Address,
+        env: Env,
+        tx_id: String,
+        caller: Address,
     ) -> Result<(), ContractError> {
-        // TODO: caller.require_auth()
-        // TODO: AdminClient::assert_is_relay_or_admin(&env, &caller)?
-        // TODO: StorageClient::get_transaction(&env, &tx_id)?
-        // TODO: assert status == Pending else Err(ContractError::InvalidStatusTransition)
-        // TODO: set status = Processing, updated_at = env.ledger().timestamp()
-        // TODO: StorageClient::save_transaction
-        // TODO: EventEmitter::status_changed(&env, &tx_id, Processing)
-        todo!()
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Pending {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Processing;
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Processing);
+
+        Ok(())
     }
 
     /// Mark a `Processing` transaction as `Completed` after on-chain verification.
@@ -161,17 +169,27 @@ impl SynapseCoreContract {
     /// `stellar_tx_hash` — the Stellar transaction hash confirming the deposit
     ///                     was settled on Horizon. Stored for auditability.
     pub fn complete_transaction(
-        _env: Env,
-        _tx_id: String,
-        _stellar_tx_hash: String,
-        _caller: Address,
+        env: Env,
+        tx_id: String,
+        stellar_tx_hash: String,
+        caller: Address,
     ) -> Result<(), ContractError> {
-        // TODO: caller.require_auth()
-        // TODO: AdminClient::assert_is_relay_or_admin(&env, &caller)?
-        // TODO: fetch tx, assert status == Processing
-        // TODO: set status = Completed, record stellar_tx_hash
-        // TODO: EventEmitter::transaction_completed — Phase 2 listens here
-        todo!()
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Processing {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Completed;
+        tx.stellar_tx_hash = stellar_tx_hash.clone();
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
+        EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
+
+        Ok(())
     }
 
     /// Mark a `Pending` or `Processing` transaction as `Failed`.
@@ -179,17 +197,27 @@ impl SynapseCoreContract {
     /// `reason` — short human-readable failure code (e.g. "horizon_timeout",
     ///            "invalid_account", "circuit_open").
     pub fn fail_transaction(
-        _env: Env,
-        _tx_id: String,
-        _reason: String,
-        _caller: Address,
+        env: Env,
+        tx_id: String,
+        reason: String,
+        caller: Address,
     ) -> Result<(), ContractError> {
-        // TODO: caller.require_auth()
-        // TODO: AdminClient::assert_is_relay_or_admin
-        // TODO: fetch tx, assert status in [Pending, Processing]
-        // TODO: set status = Failed, record reason
-        // TODO: EventEmitter::transaction_failed
-        todo!()
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Failed;
+        tx.failure_reason = reason.clone();
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
+        EventEmitter::transaction_failed(&env, &tx_id, &reason);
+
+        Ok(())
     }
 
     // ── Read-only queries ─────────────────────────────────────────────────────
@@ -203,32 +231,30 @@ impl SynapseCoreContract {
     }
 
     /// Return the current [`TransactionStatus`] without fetching the full record.
-    pub fn get_status(_env: Env, _tx_id: String) -> Result<TransactionStatus, ContractError> {
-        // TODO: fetch tx, return tx.status
-        todo!()
+    pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
+        StorageClient::get_transaction(&env, &tx_id).map(|tx| tx.status)
     }
 
     /// Check whether an idempotency key has already been processed.
-    pub fn is_duplicate(_env: Env, _idempotency_key: String) -> bool {
-        // TODO: StorageClient::get_idempotency_key(&env, &idempotency_key).is_some()
-        todo!()
+    pub fn is_duplicate(env: Env, idempotency_key: String) -> bool {
+        StorageClient::get_idempotency_key(&env, &idempotency_key).is_some()
     }
 
     // ── Admin ─────────────────────────────────────────────────────────────────
 
     /// Transfer the admin role to `new_admin`.  Requires existing admin auth.
-    pub fn transfer_admin(_env: Env, _new_admin: Address) -> Result<(), ContractError> {
-        // TODO: AdminClient::require_admin(&env)?
-        // TODO: StorageClient::set_admin(&env, &new_admin)
-        // TODO: EventEmitter::admin_transferred
-        todo!()
+    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        let old_admin = AdminClient::require_admin(&env)?;
+        StorageClient::set_admin(&env, &new_admin);
+        EventEmitter::admin_transferred(&env, &old_admin, &new_admin);
+        Ok(())
     }
 
     /// Rotate the trusted relay signer address.
-    pub fn set_relay_signer(_env: Env, _new_signer: Address) -> Result<(), ContractError> {
-        // TODO: AdminClient::require_admin(&env)?
-        // TODO: StorageClient::set_relay_signer(&env, &new_signer)
-        todo!()
+    pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_relay_signer(&env, &new_signer);
+        Ok(())
     }
 
     // ── Contract upgrade ───────────────────────────────────────────────────────
