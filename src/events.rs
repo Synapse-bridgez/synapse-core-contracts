@@ -178,60 +178,60 @@ impl EventEmitter {
     }
 
     /// Emit [`EventStatusChanged`].
-    #[allow(dead_code)]
     pub fn status_changed(
-        _env: &Env,
-        _tx_id: &String,
-        _old_status: TransactionStatus,
-        _new_status: TransactionStatus,
+        env: &Env,
+        tx_id: &String,
+        old_status: TransactionStatus,
+        new_status: TransactionStatus,
     ) {
-        // TODO:
-        // env.events().publish(
-        //     (symbol_short!("synapse"), symbol_short!("status")),
-        //     EventStatusChanged {
-        //         tx_id: tx_id.clone(),
-        //         old_status,
-        //         new_status,
-        //         ledger: env.ledger().sequence(),
-        //     },
-        // );
-        todo!()
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("status")),
+            EventStatusChanged {
+                tx_id: tx_id.clone(),
+                old_status,
+                new_status,
+                ledger: env.ledger().sequence(),
+            },
+        );
     }
 
     /// Emit [`EventTransactionCompleted`].
-    #[allow(dead_code)]
-    pub fn transaction_completed(_env: &Env, _tx_id: &String, _stellar_tx_hash: &String) {
-        // TODO:
-        // env.events().publish(
-        //     (symbol_short!("synapse"), symbol_short!("done")),
-        //     EventTransactionCompleted { ... },
-        // );
-        todo!()
+    pub fn transaction_completed(env: &Env, tx_id: &String, stellar_tx_hash: &String) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("done")),
+            EventTransactionCompleted {
+                tx_id: tx_id.clone(),
+                stellar_tx_hash: stellar_tx_hash.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
     }
 
     /// Emit [`EventTransactionFailed`].
-    #[allow(dead_code)]
-    pub fn transaction_failed(_env: &Env, _tx_id: &String, _reason: &String) {
-        // TODO:
-        // env.events().publish(
-        //     (symbol_short!("synapse"), symbol_short!("fail")),
-        //     EventTransactionFailed { ... },
-        // );
-        todo!()
+    pub fn transaction_failed(env: &Env, tx_id: &String, reason: &String) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("fail")),
+            EventTransactionFailed {
+                tx_id: tx_id.clone(),
+                reason: reason.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
     }
 
     /// Emit [`EventAdminTransferred`].
-    #[allow(dead_code)]
     pub fn admin_transferred(
-        _env: &Env,
-        _old_admin: &soroban_sdk::Address,
-        _new_admin: &soroban_sdk::Address,
+        env: &Env,
+        old_admin: &soroban_sdk::Address,
+        new_admin: &soroban_sdk::Address,
     ) {
-        // TODO:
-        // env.events().publish(
-        //     (symbol_short!("synapse"), symbol_short!("admin")),
-        //     EventAdminTransferred { ... },
-        // );
-        todo!()
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("admin")),
+            EventAdminTransferred {
+                old_admin: old_admin.clone(),
+                new_admin: new_admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
     }
 }
