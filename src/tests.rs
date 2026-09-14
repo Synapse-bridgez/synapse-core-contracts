@@ -247,6 +247,48 @@ fn test_register_callback_rejects_string_too_long() {
     assert_eq!(result, Err(Ok(ContractError::StringTooLong)));
 }
 
+#[test]
+fn test_register_callback_accepts_transaction_id_at_exact_cap() {
+    let (env, client, _admin, _relay) = setup();
+    let mut payload = default_payload(&env);
+    // MAX_TX_ID_LEN is 64; exactly 64 chars must be accepted.
+    payload.transaction_id = String::from_str(&env, &"t".repeat(64));
+    payload.idempotency_key = String::from_str(&env, "idem-boundary-tx-id");
+    let tx_id = client.register_callback(&payload);
+    assert_eq!(tx_id.len(), 64);
+}
+
+#[test]
+fn test_register_callback_rejects_transaction_id_one_over_cap() {
+    let (env, client, _admin, _relay) = setup();
+    let mut payload = default_payload(&env);
+    // MAX_TX_ID_LEN is 64; 65 chars must be rejected.
+    payload.transaction_id = String::from_str(&env, &"t".repeat(65));
+    let result = client.try_register_callback(&payload);
+    assert_eq!(result, Err(Ok(ContractError::StringTooLong)));
+}
+
+#[test]
+fn test_register_callback_accepts_anchor_transaction_id_at_exact_cap() {
+    let (env, client, _admin, _relay) = setup();
+    let mut payload = default_payload(&env);
+    // MAX_ANCHOR_TX_ID_LEN is 64; exactly 64 chars must be accepted.
+    payload.anchor_transaction_id = String::from_str(&env, &"a".repeat(64));
+    let tx_id = client.register_callback(&payload);
+    let tx = client.get_transaction(&tx_id);
+    assert_eq!(tx.anchor_transaction_id.len(), 64);
+}
+
+#[test]
+fn test_register_callback_rejects_anchor_transaction_id_one_over_cap() {
+    let (env, client, _admin, _relay) = setup();
+    let mut payload = default_payload(&env);
+    // MAX_ANCHOR_TX_ID_LEN is 64; 65 chars must be rejected.
+    payload.anchor_transaction_id = String::from_str(&env, &"a".repeat(65));
+    let result = client.try_register_callback(&payload);
+    assert_eq!(result, Err(Ok(ContractError::StringTooLong)));
+}
+
 // ─── start_processing() ───────────────────────────────────────────────────────
 
 #[test]
