@@ -237,17 +237,23 @@ stellar contract upload \
   --source <ADMIN_SECRET> \
   --network $NETWORK
 
-# 3. Invoke upgrade (replace <NEW_WASM_HASH> with the hash from step 2)
+# 3. Confirm the on-chain schema version you're about to pass matches
+stellar contract invoke --id $CONTRACT_ID --source <ANY_KEY_WITH_XLM> --network $NETWORK -- schema_version
+
+# 4. Invoke upgrade (replace <NEW_WASM_HASH> with the hash from step 2, and
+#    <EXPECTED_SCHEMA_VERSION> with the value read back in step 3 — a
+#    mismatch is rejected before contract WASM is touched)
 stellar contract invoke \
   --id $CONTRACT_ID \
   --source <ADMIN_SECRET> \
   --network $NETWORK \
   -- \
   upgrade \
-  --new_wasm_hash <NEW_WASM_HASH>
+  --new_wasm_hash <NEW_WASM_HASH> \
+  --expected_schema_version <EXPECTED_SCHEMA_VERSION>
 
-# 4. Update contract-ids.json with the new wasm_hash
-# 5. Run the full post-deployment smoke test to verify the upgrade
+# 5. Update contract-ids.json with the new wasm_hash
+# 6. Run the full post-deployment smoke test to verify the upgrade
 ```
 
 ---
