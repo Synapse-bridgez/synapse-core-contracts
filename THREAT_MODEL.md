@@ -76,7 +76,7 @@ Phase 2 (Swap Engine) / Phase 3 (Cross-Chain Bridge)
 |-------|----------|-------------|--------------|
 | **Admin** | Stellar address stored in `StorageKey::Admin` (persistent). Must be a ≥3-of-5 multisig or DAO. | **High — semi-trusted** | `pause`, `unpause`, `upgrade`, `transfer_admin`, `set_relay_signer`; also permitted to call status-transition methods. |
 | **Relay signer** | Stellar address stored in `StorageKey::RelaySigner` (persistent). Key held by the off-chain `synapse-core` service. | **High — semi-trusted** | `register_callback`; also permitted to call status-transition methods (`start_processing`, `complete_transaction`, `fail_transaction`). |
-| **Unauthenticated caller** | Any Stellar account that submits a transaction to this contract. | **Untrusted** | Read-only queries only: `get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`. |
+| **Unauthenticated caller** | Any Stellar account that submits a transaction to this contract. | **Untrusted** | Read-only queries only: `get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`, `admin`, `relay_signer`. |
 | **Deployer** | The account that ran `stellar contract deploy`. Distinct from the admin key (see `DEPLOYMENT.md`). | **One-time, then irrelevant** | None after `initialize()` is called. |
 | **Phase 2 / Phase 3** | Downstream off-chain or on-chain services that subscribe to events. | **Consumers only** | Read events from Horizon/RPC. Cannot mutate contract state. |
 
@@ -211,7 +211,7 @@ per-invocation fee metering mitigates this.
 | Status transitions proceeding while paused (draining is intentional) | `start_processing`, `complete_transaction`, `fail_transaction` are deliberately not gated by pause | ✅ By design — documented in `lib.rs` |
 | Attacker forcing a DoS via pause (requires admin-key compromise) | Mitigated by multisig admin requirement | ⚠️ Residual risk — requires admin compromise |
 
-### 4.7 Read-Only Queries (`get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`)
+### 4.7 Read-Only Queries (`get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`, `admin`, `relay_signer`)
 
 | Threat | Mitigation | Status |
 |--------|-----------|--------|
