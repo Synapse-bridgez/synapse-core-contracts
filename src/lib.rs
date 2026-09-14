@@ -254,6 +254,21 @@ impl SynapseCoreContract {
         StorageClient::get_idempotency_key(&env, &idempotency_key).is_some()
     }
 
+    /// Return the current admin address, or [`ContractError::NotInitialised`].
+    ///
+    /// Read-only: lets off-chain monitoring and deployment tooling verify the
+    /// on-chain admin against the value recorded in `contract-ids.json`
+    /// without needing to trust that record alone.
+    pub fn admin(env: Env) -> Result<Address, ContractError> {
+        StorageClient::get_admin(&env)
+    }
+
+    /// Return the current trusted relay signer address, or
+    /// [`ContractError::NotInitialised`].
+    pub fn relay_signer(env: Env) -> Result<Address, ContractError> {
+        StorageClient::get_relay_signer(&env)
+    }
+
     // ── Admin ─────────────────────────────────────────────────────────────────
 
     /// Transfer the admin role to `new_admin`.  Requires existing admin auth.

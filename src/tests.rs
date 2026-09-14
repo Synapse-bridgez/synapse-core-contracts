@@ -556,6 +556,35 @@ fn test_is_duplicate_reflects_idempotency_state() {
     assert!(client.is_duplicate(&payload.idempotency_key));
 }
 
+#[test]
+fn test_admin_and_relay_signer_queries_return_current_addresses() {
+    let (_env, client, admin, relay) = setup();
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.relay_signer(), relay);
+}
+
+#[test]
+fn test_admin_query_rejects_before_initialise() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let result = client.try_admin();
+    assert_eq!(result, Err(Ok(ContractError::NotInitialised)));
+}
+
+#[test]
+fn test_admin_and_relay_signer_queries_reflect_rotation() {
+    let (_env, client, _admin, _relay) = setup();
+    let new_admin = Address::generate(&_env);
+    let new_relay = Address::generate(&_env);
+
+    client.transfer_admin(&new_admin);
+    assert_eq!(client.admin(), new_admin);
+
+    client.set_relay_signer(&new_relay);
+    assert_eq!(client.relay_signer(), new_relay);
+}
+
 // ─── Admin ────────────────────────────────────────────────────────────────────
 
 #[test]
