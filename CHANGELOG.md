@@ -26,6 +26,11 @@ separately from general code changes. Full topic/field contracts live in
 - `EventRelaySignerRotated` — relay-signer rotation is now observable
   on-chain the same way admin transfer already is (see
   [`EVENTS.md`](./EVENTS.md#eventrelaysignerrotated)).
+- `admin()` / `relay_signer()` read-only query entry points. Every other
+  piece of contract state readable off-chain already had a query method;
+  these two let deployment tooling and monitoring verify the on-chain role
+  addresses against `contract-ids.json` instead of trusting that record
+  alone. See `DEPLOYMENT.md`'s post-deployment smoke test.
 
 ### Changed
 
