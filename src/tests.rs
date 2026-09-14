@@ -381,6 +381,21 @@ fn test_complete_transaction_happy_path() {
 }
 
 #[test]
+fn test_complete_transaction_rejects_string_too_long_hash() {
+    let (env, client, _admin, relay) = setup();
+    let payload = default_payload(&env);
+    let tx_id = client.register_callback(&payload);
+    client.start_processing(&tx_id, &relay);
+
+    // MAX_STELLAR_TX_HASH_LEN is 72; 80 chars exceeds the cap.
+    let oversized_hash = String::from_str(&env, &"a".repeat(80));
+    let result = client.try_complete_transaction(&tx_id, &oversized_hash, &relay);
+    assert_eq!(result, Err(Ok(ContractError::StringTooLong)));
+    // Rejected input must not have mutated the transaction.
+    assert_eq!(client.get_status(&tx_id), TransactionStatus::Processing);
+}
+
+#[test]
 fn test_complete_transaction_rejects_pending() {
     let (env, client, _admin, relay) = setup();
     let payload = default_payload(&env);
@@ -406,6 +421,20 @@ fn test_fail_transaction_from_pending() {
     let tx = client.get_transaction(&tx_id);
     assert_eq!(tx.status, TransactionStatus::Failed);
     assert_eq!(tx.failure_reason, reason);
+}
+
+#[test]
+fn test_fail_transaction_rejects_string_too_long_reason() {
+    let (env, client, _admin, relay) = setup();
+    let payload = default_payload(&env);
+    let tx_id = client.register_callback(&payload);
+
+    // MAX_FAILURE_REASON_LEN is 64; 70 chars exceeds the cap.
+    let oversized_reason = String::from_str(&env, &"x".repeat(70));
+    let result = client.try_fail_transaction(&tx_id, &oversized_reason, &relay);
+    assert_eq!(result, Err(Ok(ContractError::StringTooLong)));
+    // Rejected input must not have mutated the transaction.
+    assert_eq!(client.get_status(&tx_id), TransactionStatus::Pending);
 }
 
 #[test]

@@ -171,6 +171,7 @@ impl SynapseCoreContract {
         caller: Address,
     ) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
         if tx.status != TransactionStatus::Processing {
@@ -199,6 +200,7 @@ impl SynapseCoreContract {
         caller: Address,
     ) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_failure_reason(&reason)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
         if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {

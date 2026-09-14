@@ -44,10 +44,8 @@ const MAX_ANCHOR_TX_ID_LEN: u32 = 64;
 /// Maximum length for `callback_status` (short code, e.g. "pending_external").
 const MAX_CALLBACK_STATUS_LEN: u32 = 32;
 /// Maximum length for `stellar_tx_hash` (SHA-256 hex is 64 chars).
-#[allow(dead_code)]
 const MAX_STELLAR_TX_HASH_LEN: u32 = 72;
 /// Maximum length for `failure_reason` (short human-readable code).
-#[allow(dead_code)]
 const MAX_FAILURE_REASON_LEN: u32 = 64;
 
 /// Encoded ed25519 public-key strkey length (SEP-23).
@@ -224,13 +222,11 @@ impl Validator {
     }
 
     /// Stellar transaction hash: max length enforced for rent cost control.
-    #[allow(dead_code)]
     pub fn validate_stellar_tx_hash(hash: &String) -> Result<(), ContractError> {
         enforce_max_length(hash, MAX_STELLAR_TX_HASH_LEN)
     }
 
     /// Failure reason: max length enforced for rent cost control.
-    #[allow(dead_code)]
     pub fn validate_failure_reason(reason: &String) -> Result<(), ContractError> {
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
     }

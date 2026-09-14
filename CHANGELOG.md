@@ -25,6 +25,13 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Fixed
 
+- `complete_transaction` / `fail_transaction` now enforce the `stellar_tx_hash`
+  (72 B) and `failure_reason` (64 B) length caps documented in
+  [`COST_MODEL.md` §6](./COST_MODEL.md#6-string-length-cap-impact-enforced).
+  The validators existed but were never wired into the handlers, so an
+  oversized value from a compromised or buggy relay could bypass the
+  documented rent-cost protection.
+
 ---
 
 ## [0.1.0] — 2026-07-22
