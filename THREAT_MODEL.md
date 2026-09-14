@@ -74,7 +74,7 @@ Phase 2 (Swap Engine) / Phase 3 (Cross-Chain Bridge)
 
 | Actor | Identity | Trust Level | Capabilities |
 |-------|----------|-------------|--------------|
-| **Admin** | Stellar address stored in `StorageKey::Admin` (persistent). Must be a ≥3-of-5 multisig or DAO. | **High — semi-trusted** | `pause`, `unpause`, `upgrade`, `transfer_admin`, `set_relay_signer`; also permitted to call status-transition methods. |
+| **Admin** | Stellar address stored in `StorageKey::Admin` (persistent). Must be a ≥3-of-5 multisig or DAO. | **High — semi-trusted** | `pause`, `unpause`, `upgrade`, `propose_admin`, `set_relay_signer`; also permitted to call status-transition methods. Completing an admin transfer additionally requires `accept_admin` from the nominee. |
 | **Relay signer** | Stellar address stored in `StorageKey::RelaySigner` (persistent). Key held by the off-chain `synapse-core` service. | **High — semi-trusted** | `register_callback`; also permitted to call status-transition methods (`start_processing`, `complete_transaction`, `fail_transaction`). |
 | **Unauthenticated caller** | Any Stellar account that submits a transaction to this contract. | **Untrusted** | Read-only queries only: `get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`, `admin`, `relay_signer`. |
 | **Deployer** | The account that ran `stellar contract deploy`. Distinct from the admin key (see `DEPLOYMENT.md`). | **One-time, then irrelevant** | None after `initialize()` is called. |
@@ -124,7 +124,7 @@ per-invocation fee metering mitigates this.
 ┌────────────────────▼────────────────────────────────────────────┐
 │  SEMI-TRUSTED ZONE B: admin (must be multisig / DAO)            │
 │  All relay_signer capabilities PLUS:                            │
-│  pause, unpause, upgrade, transfer_admin, set_relay_signer      │
+│  pause, unpause, upgrade, propose_admin, set_relay_signer       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -182,22 +182,22 @@ per-invocation fee metering mitigates this.
 
 ---
 
-### 4.4 `transfer_admin(new_admin)` / `set_relay_signer(new_signer)`
+### 4.4 `propose_admin(new_admin)` / `accept_admin(caller)` / `set_relay_signer(new_signer)`
 
 | Threat | Mitigation | Status |
 |--------|-----------|--------|
-| Non-admin rotating admin or relay | `AdminClient::require_admin()` called first in both entry points | ✅ Implemented |
-| Admin transferring to an attacker-controlled address (key-compromise scenario) | No on-chain prevention; mitigated by multisig — any single-key compromise cannot unilaterally rotate | ⚠️ Operational control |
-| Admin transferred to zero/null address (bricking the contract) | No on-chain guard; recommend adding a check that `new_admin` is not the zero address | 🔲 Open finding — see **F-02** |
-| No two-step confirmation for admin transfer | Single-step transfer accepted in Phase 1; two-step pattern is a recommended enhancement | ⚠️ Accepted risk — see **F-03** |
+| Non-admin proposing an admin transfer, or rotating relay | `AdminClient::require_admin()` called first in `propose_admin` / `set_relay_signer` | ✅ Implemented |
+| A single compromised or mistaken admin call unilaterally finalising an admin transfer | Two-step transfer: `propose_admin` only nominates; the transfer completes solely via `accept_admin`, requiring the nominee's own auth to prove key control | ✅ Implemented — **F-03 fixed** |
+| Wrong address accepting a pending transfer | `accept_admin` checks `caller == pending_admin` before `caller.require_auth()`, returning `Unauthorised` otherwise | ✅ Implemented |
+| Admin nominated to the contract's own address (bricking privileged operations) | `Validator::validate_admin_nominee()` rejects `new_admin == env.current_contract_address()` in `propose_admin` | ✅ Implemented — **F-02 fixed**. Residual: a nominee that is a syntactically valid G-address but whose private key is lost cannot be detected on-chain — Soroban has no other "invalid address" sentinel to check against. |
 | `set_relay_signer` does not emit an event | `EventEmitter::relay_signer_rotated()` mirrors the `admin_transferred` pattern | ✅ Implemented — **F-08 fixed** |
 
-### 4.5 `upgrade(new_wasm_hash)`
+### 4.5 `upgrade(new_wasm_hash, expected_schema_version)`
 
 | Threat | Mitigation | Status |
 |--------|-----------|--------|
 | Non-admin deploying arbitrary WASM | `AdminClient::require_admin()` + `require_auth()` enforced before `update_current_contract_wasm()` | ✅ Implemented |
-| Storage-schema-breaking upgrade corrupting persistent records | Documented requirement only — no on-chain schema version check | ⚠️ Operational control — see **F-04** |
+| Storage-schema-breaking upgrade corrupting persistent records | `upgrade()` requires `expected_schema_version` to match the on-chain `SchemaVersion`, rejecting the call with `SchemaVersionMismatch` before touching WASM if it doesn't. **Residual:** this cannot validate the *new* WASM's schema — Soroban gives running code no way to introspect an uploaded-but-not-installed WASM blob — it only catches invoking `upgrade()` against unexpected on-chain state. | ✅ Implemented — **F-04 fixed** |
 | Upgrade without pausing, racing with in-flight callbacks | No forced-pause pre-condition on upgrade; documented as future enhancement in `DECISIONS.md` | ⚠️ Accepted risk — see **F-05** |
 | Upgrade event not emitted, hiding the action | `EventEmitter::contract_upgraded()` always called on success | ✅ Implemented |
 | Admin upgrades to WASM that removes the `upgrade()` entry point (bricking upgradability) | No on-chain prevention; admin is the sole trust anchor | ⚠️ Operational control |
@@ -254,11 +254,13 @@ Pending ──► Processing ──► Completed
 | Key | Tier | Risk |
 |-----|------|------|
 | `StorageKey::Initialised` | Instance | Lost if contract instance is restored from archive — but `set_initialised` is called during `initialize()`, so restore would require re-initialisation. **Risk: none** (instance storage survives same-schema upgrades). |
-| `StorageKey::Admin` | Persistent | Survives upgrades; only writable by `initialize()` and `transfer_admin()`. **Risk: admin key compromise** — mitigated by multisig. |
+| `StorageKey::Admin` | Persistent | Survives upgrades; only writable by `initialize()` and `accept_admin()`. **Risk: admin key compromise** — mitigated by multisig. |
 | `StorageKey::RelaySigner` | Persistent | Same as Admin. |
 | `StorageKey::Paused` | Instance | Survives upgrades. A paused contract that is upgraded remains paused. **Risk: none**. |
 | `StorageKey::Transaction(id)` | Persistent | TTL extended on every read and write; bounded to `TRANSACTION_MIN_TTL_LEDGERS` (100 000 ledgers ≈ 1 week). If a record's TTL expires and is not extended, the record becomes unreadable (archived). **Risk: data availability** — active relay must regularly read/update active transactions. |
 | `StorageKey::IdempotencyKey(key)` | Temporary | TTL of 18 000 ledgers (~24 h). After expiry, the key is invisible — a relay replaying a message after 24 h will not be deduplicated by the idempotency key alone. **Risk: late replay** — mitigated by `StorageClient::transaction_exists()` (F-07, fixed). |
+| `StorageKey::PendingAdmin` | Persistent | Set by `propose_admin`, cleared by `accept_admin`. **Risk: none** — an attacker who cannot forge the nominee's auth cannot accept, and re-proposing overwrites any stale pending value. |
+| `StorageKey::SchemaVersion` | Persistent | Set once at `initialize()`, read (not written) by `upgrade()`. **Risk: none** — read-only after init; see F-04. |
 
 ### Storage manipulation threats
 
@@ -289,7 +291,8 @@ is consistent across all emitters.
 | `EventStatusChanged` | `(synapse, status)` | status transitions | ✅ Implemented |
 | `EventTransactionCompleted` | `(synapse, done)` | `complete_transaction()` | ✅ Implemented |
 | `EventTransactionFailed` | `(synapse, fail)` | `fail_transaction()` | ✅ Implemented |
-| `EventAdminTransferred` | `(synapse, admin)` | `transfer_admin()` | ✅ Implemented |
+| `EventAdminTransferProposed` | `(synapse, propose)` | `propose_admin()` | ✅ Implemented |
+| `EventAdminTransferred` | `(synapse, admin)` | `accept_admin()` | ✅ Implemented |
 | `EventRelaySignerRotated` | `(synapse, relay)` | `set_relay_signer()` | ✅ Implemented — **F-08 fixed** |
 
 **Event security considerations:**
@@ -331,7 +334,7 @@ arbitrary status transitions.
 
 ### R-02: Admin-key is the root of all trust
 
-**Risk:** The admin key controls `upgrade()`, `pause()`, `transfer_admin()`,
+**Risk:** The admin key controls `upgrade()`, `pause()`, `propose_admin()`,
 and `set_relay_signer()`. A compromised admin key allows arbitrary WASM
 deployment (full contract replacement), making this the highest-severity
 single point of failure.
@@ -404,15 +407,16 @@ WASM immediately, without a delay that would allow users to exit.
 
 The following findings were identified during this self-review. Each is either
 an implementation gap or a specific correctness/security design issue. Each
-finding is rated by severity and linked to a follow-up action; five (F-01,
-F-06, F-07, F-08, F-09) have since been fixed.
+finding is rated by severity and linked to a follow-up action; eight (F-01,
+F-02, F-03, F-04, F-06, F-07, F-08, F-09) have since been fixed. F-05 and
+F-10 remain accepted risks for Phase 1.
 
 | ID | Severity | Title | Description | Status |
 |----|----------|-------|-------------|--------|
 | **F-01** | Low | G-address validation is format-only | Originally: `validate_stellar_account` checked only length == 56 and first byte == `G`. **Now implemented as full SEP-23 base32 decode + CRC16-XModem checksum verification** (see `validation.rs`); a well-shaped string with an invalid checksum is rejected. Covered by `validation::tests::fixture_checksum_invalid_is_rejected`. | Fixed |
-| **F-02** | Medium | No guard against transferring admin to zero/uncontrolled address | `transfer_admin` is implemented but has no on-chain check that `new_admin` is a valid, non-null address. Transferring admin to an uncontrolled address permanently bricks privileged operations. | Open — add guard in implementation |
-| **F-03** | Low | Single-step admin transfer | Admin transfer is a single atomic operation. A two-step pattern (nominate → accept) would require the new admin to prove key control before the transfer is finalised, preventing accidental or malicious mis-transfer. | Accepted risk for Phase 1; recommend follow-up issue for Phase 2 |
-| **F-04** | Medium | No storage schema version for upgrade safety | There is no on-chain schema version stored. An upgrade that inadvertently changes `Transaction` struct layout or `StorageKey` variants will silently corrupt persistent storage. | Open — recommend adding a `SCHEMA_VERSION` constant checked by `upgrade()` |
+| **F-02** | Medium | No guard against transferring admin to zero/uncontrolled address | `Validator::validate_admin_nominee()` rejects nominating the contract's own address in `propose_admin`, the one "invalid address" Soroban actually lets this check for — there is no zero-address sentinel to compare against the way EVM chains have. A syntactically valid G-address whose key is lost remains undetectable on-chain; that residual risk is inherent to any key-based auth system, not specific to this contract. Covered by `tests::test_propose_admin_rejects_self_nomination`. | Fixed |
+| **F-03** | Low | Single-step admin transfer | Replaced by a two-step `propose_admin` → `accept_admin` flow: the current admin alone can no longer finalise a transfer, only nominate one; the nominee must prove key control via its own `require_auth()`. Covered by `tests::test_admin_transfer_two_step_happy_path` and the wrong-caller / overwrite-nominee tests alongside it. | Fixed |
+| **F-04** | Medium | No storage schema version for upgrade safety | `upgrade()` now requires an `expected_schema_version` argument checked against on-chain `SchemaVersion`, rejecting mismatches with `SchemaVersionMismatch` before touching WASM. This detects invoking `upgrade()` against unexpected on-chain state; it cannot validate the *new* WASM's schema compatibility, since Soroban gives running code no way to introspect an uploaded-but-not-installed WASM blob. Covered by `test_pause::test_upgrade_rejects_schema_version_mismatch`. | Fixed |
 | **F-05** | Low | Upgrade does not require contract to be paused | An upgrade can execute while `register_callback` calls are in-flight, creating a race condition if the new WASM changes callback processing semantics mid-flight. | Accepted risk for Phase 1; documented in `DECISIONS.md §7` |
 | **F-06** | High | `get_status`, `is_duplicate`, and all status-transition methods are unimplemented | All entry points are implemented and covered by the 52-test suite (`cargo test`). No longer a blocker for audit readiness. | Fixed |
 | **F-07** | High | No persistent guard against `transaction_id` reuse after idempotency TTL expiry | `register_callback` now checks `StorageClient::transaction_exists()` and returns `DuplicateRequest` on reuse, independent of idempotency-key state. Covered by `tests::test_register_callback_rejects_duplicate_transaction_id_after_idempotency_expiry`. | Fixed |
