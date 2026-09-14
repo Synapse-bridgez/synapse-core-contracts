@@ -10,9 +10,9 @@ check: fmt clippy test wasm
 fmt:
 	cargo fmt --all -- --check
 
-## Lint with clippy; deny all warnings except todo! placeholders.
+## Lint with clippy; deny all warnings.
 clippy:
-	cargo clippy --all-targets -- -D warnings -A clippy::todo
+	cargo clippy --all-targets -- -D warnings
 
 ## Run the test suite (native host, not wasm).
 test:

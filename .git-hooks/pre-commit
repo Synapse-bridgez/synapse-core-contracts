@@ -14,6 +14,6 @@ echo "==> cargo fmt --check"
 cargo fmt --all -- --check
 
 echo "==> cargo clippy"
-cargo clippy --all-targets -- -D warnings -A clippy::todo
+cargo clippy --all-targets -- -D warnings
 
 echo "Pre-commit checks passed."

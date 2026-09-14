@@ -119,7 +119,7 @@ means the same commit will pass CI.
 | Target | Command it runs |
 |---|---|
 | `make fmt` | `cargo fmt --all -- --check` |
-| `make clippy` | `cargo clippy --all-targets -- -D warnings -A clippy::todo` |
+| `make clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `make test` | `cargo test --verbose` |
 | `make wasm` | `cargo build --target wasm32-unknown-unknown --release` |
 | `make build` | `cargo build --verbose` (quick debug build) |

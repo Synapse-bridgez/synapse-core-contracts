@@ -84,7 +84,7 @@ make check
 | Target       | What it runs                                                    |
 |--------------|-----------------------------------------------------------------|
 | `make fmt`   | `cargo fmt --all -- --check`                                    |
-| `make clippy`| `cargo clippy --all-targets -- -D warnings -A clippy::todo`     |
+| `make clippy`| `cargo clippy --all-targets -- -D warnings`                     |
 | `make test`  | `cargo test --verbose`                                          |
 | `make wasm`  | `cargo build --target wasm32-unknown-unknown --release`         |
 | `make build` | `cargo build --verbose` (quick debug build)                     |
@@ -103,8 +103,7 @@ Run this before committing if `make fmt` fails.
 ## Code style
 
 - Follow `rustfmt.toml` settings; `make fmt` is the arbiter.
-- No `clippy` warnings — `-D warnings` is enforced. The only exception is
-  `clippy::todo`, which is allowed while scaffolded bodies are being filled in.
+- No `clippy` warnings — `-D warnings` is enforced, with no exceptions.
 - Prefer `?` for error propagation over explicit `match` on `Result`.
 - Keep `lib.rs` entry-points thin — delegate to the relevant module
   (`storage.rs`, `validation.rs`, `admin.rs`, `events.rs`).
