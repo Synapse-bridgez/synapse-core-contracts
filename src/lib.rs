@@ -341,7 +341,7 @@ impl SynapseCoreContract {
     ///
     /// # Events
     /// Emits [`events::EventRelaySignerRotated`] so off-chain monitoring can
-    /// observe the rotation the same way it does [`Self::transfer_admin`].
+    /// observe the rotation the same way it does [`Self::accept_admin`].
     pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
         AdminClient::require_admin(&env)?;
         let old_signer = StorageClient::get_relay_signer(&env)?;
