@@ -4,7 +4,7 @@
 //!
 //! | Role          | Storage key       | Capabilities                              |
 //! |---------------|-------------------|-------------------------------------------|
-//! | `admin`       | `StorageKey::Admin`       | Transfer admin, rotate relay signer, pause/unpause, upgrade; also permitted to drive status transitions |
+//! | `admin`       | `StorageKey::Admin`       | Propose/accept admin transfer, rotate relay signer, pause/unpause, upgrade; also permitted to drive status transitions |
 //! | `relay_signer`| `StorageKey::RelaySigner` | Register callbacks, drive status transitions |
 //!
 //! Both roles are initialised once and can be rotated by the admin.
