@@ -161,7 +161,7 @@ per-invocation fee metering mitigates this.
 |--------|-----------|--------|
 | Unauthenticated callback injection | `relay.require_auth()` enforced before any write | ✅ Implemented |
 | Replay / duplicate delivery | Idempotency key checked in temporary storage; duplicate returns original `tx_id` | ✅ Implemented |
-| Idempotency TTL expiry enabling re-registration of the same key | Idempotency TTL is ~24 h; after expiry, the same key could re-register. The contract will still reject it if a `Transaction` record already exists with the same `transaction_id` (TransactionNotFound check is implicit on duplicate payload). **Note: this second guard relies on `transaction_id` uniqueness being enforced off-chain.** | ⚠️ Partial — relies on off-chain UUID uniqueness |
+| Idempotency TTL expiry enabling re-registration of the same key | Idempotency TTL is ~24 h; after expiry, a replay with a fresh `idempotency_key` but the same `transaction_id` is rejected by `StorageClient::transaction_exists()` with `DuplicateRequest`, independent of idempotency-key state | ✅ Implemented — see **F-07** (fixed) |
 | Oversized string fields causing unbounded storage rent | `validation.rs` caps: `tx_id` ≤ 64 B, `anchor_tx_id` ≤ 64 B, `callback_status` ≤ 32 B | ✅ Implemented |
 | Malformed `stellar_account` / `asset_issuer` (non-G address) | Length == 56 and first byte == `G` check in `Validator::validate_stellar_account` | ✅ Implemented — **see Finding F-01** |
 | Zero or negative `amount` | `validate_amount` rejects `amount <= 0` | ✅ Implemented |
@@ -171,31 +171,26 @@ per-invocation fee metering mitigates this.
 
 ### 4.3 `start_processing(tx_id, caller)` / `complete_transaction(tx_id, stellar_tx_hash, caller)` / `fail_transaction(tx_id, reason, caller)`
 
-> **Note:** These three entry points are **not yet implemented** (bodies are `todo!()`).  
-> The threats below represent requirements the implementation MUST satisfy.
-
-| Threat | Required Mitigation | Status |
-|--------|---------------------|--------|
-| Unauthenticated state transition | `caller.require_auth()` + `AdminClient::assert_is_relay_or_admin()` | ❌ Not yet implemented |
-| Invalid state transition (e.g., skip Pending → directly to Completed) | Guard: assert `tx.status == expected_prior_status` before writing | ❌ Not yet implemented |
-| Transition of non-existent transaction | `StorageClient::get_transaction()` returns `TransactionNotFound`; must propagate | ❌ Not yet implemented |
-| `stellar_tx_hash` not validated in `complete_transaction` | `Validator::validate_stellar_tx_hash()` exists (max 72 B) — must be called | ❌ Not yet implemented |
-| `reason` not validated in `fail_transaction` | `Validator::validate_failure_reason()` exists (max 64 B) — must be called | ❌ Not yet implemented |
-| Re-completing or re-failing a terminal transaction | Guard: `Completed` and `Failed` are terminal — must reject any transition from these states | ❌ Not yet implemented |
+| Threat | Mitigation | Status |
+|--------|-----------|--------|
+| Unauthenticated state transition | `AdminClient::assert_is_relay_or_admin()` checks role membership then calls `caller.require_auth()` | ✅ Implemented |
+| Invalid state transition (e.g., skip Pending → directly to Completed) | Guard: `tx.status == expected_prior_status` asserted before writing | ✅ Implemented |
+| Transition of non-existent transaction | `StorageClient::get_transaction()` returns `TransactionNotFound`, propagated via `?` | ✅ Implemented |
+| `stellar_tx_hash` not validated in `complete_transaction` | `Validator::validate_stellar_tx_hash()` (max 72 B) called before the write | ✅ Implemented |
+| `reason` not validated in `fail_transaction` | `Validator::validate_failure_reason()` (max 64 B) called before the write | ✅ Implemented |
+| Re-completing or re-failing a terminal transaction | `Completed`/`Failed` are terminal: the `tx.status ==` guards above reject any transition out of them | ✅ Implemented |
 
 ---
 
 ### 4.4 `transfer_admin(new_admin)` / `set_relay_signer(new_signer)`
 
-> **Note:** Both entry points are **not yet implemented** (bodies are `todo!()`).
-
-| Threat | Required Mitigation | Status |
-|--------|---------------------|--------|
-| Non-admin rotating admin or relay | `AdminClient::require_admin()` must be called first | ❌ Not yet implemented |
+| Threat | Mitigation | Status |
+|--------|-----------|--------|
+| Non-admin rotating admin or relay | `AdminClient::require_admin()` called first in both entry points | ✅ Implemented |
 | Admin transferring to an attacker-controlled address (key-compromise scenario) | No on-chain prevention; mitigated by multisig — any single-key compromise cannot unilaterally rotate | ⚠️ Operational control |
 | Admin transferred to zero/null address (bricking the contract) | No on-chain guard; recommend adding a check that `new_admin` is not the zero address | 🔲 Open finding — see **F-02** |
 | No two-step confirmation for admin transfer | Single-step transfer accepted in Phase 1; two-step pattern is a recommended enhancement | ⚠️ Accepted risk — see **F-03** |
-| `set_relay_signer` does not emit an event | `EventEmitter::admin_transferred` pattern must be extended for relay rotation | ❌ Not yet implemented |
+| `set_relay_signer` does not emit an event | `EventEmitter::relay_signer_rotated()` mirrors the `admin_transferred` pattern | ✅ Implemented — **F-08 fixed** |
 
 ### 4.5 `upgrade(new_wasm_hash)`
 
@@ -221,7 +216,7 @@ per-invocation fee metering mitigates this.
 | Threat | Mitigation | Status |
 |--------|-----------|--------|
 | Unauthenticated reads leaking sensitive data | Transaction data is public on-chain by nature; no PII expected in stored fields | ✅ Acceptable — Stellar ledger is public |
-| `get_transaction` and `get_status` not yet fully implemented (`get_status`, `is_duplicate` are `todo!()`) | Tracked as implementation gap — see **F-06** | ❌ Not yet implemented |
+| `get_transaction`, `get_status`, `is_duplicate` correctness | All three are implemented and covered by tests (`tests::test_get_transaction_rejects_unknown_id`, `tests::test_is_duplicate_reflects_idempotency_state`, full-lifecycle tests) | ✅ Implemented — **F-06 fixed** |
 | TTL extension in `get_transaction` allowing an attacker to indefinitely extend storage rent on a record | TTL extension is bounded and is the intended behaviour for active records; not exploitable beyond keeping legitimate data alive | ✅ Acceptable |
 
 ---
@@ -239,16 +234,16 @@ Pending ──► Processing ──► Completed
 | # | Invariant | Enforced By | Status |
 |---|-----------|-------------|--------|
 | I-01 | A transaction can only be created in `Pending` state | `register_callback` always sets `status: TransactionStatus::Pending` | ✅ Implemented |
-| I-02 | `Pending → Processing` is the only valid transition for `start_processing` | Guard: `tx.status == Pending` | ❌ Not yet implemented |
-| I-03 | `Processing → Completed` is the only valid transition for `complete_transaction` | Guard: `tx.status == Processing` | ❌ Not yet implemented |
-| I-04 | `Pending → Failed` and `Processing → Failed` are the only valid transitions for `fail_transaction` | Guard: `tx.status in [Pending, Processing]` | ❌ Not yet implemented |
-| I-05 | `Completed` is a terminal state — no further transitions are permitted | Guard in all transition methods | ❌ Not yet implemented |
-| I-06 | `Failed` is a terminal state — no further transitions are permitted | Guard in all transition methods | ❌ Not yet implemented |
-| I-07 | `transaction_id` uniqueness — a second `register_callback` with the same `transaction_id` but a different `idempotency_key` must NOT overwrite the existing record | Idempotency key check; storage key is `StorageKey::Transaction(tx_id)` — a second write would overwrite. **Requires explicit duplicate `transaction_id` guard.** | ⚠️ Gap — see **F-07** |
+| I-02 | `Pending → Processing` is the only valid transition for `start_processing` | Guard: `tx.status == Pending` | ✅ Implemented |
+| I-03 | `Processing → Completed` is the only valid transition for `complete_transaction` | Guard: `tx.status == Processing` | ✅ Implemented |
+| I-04 | `Pending → Failed` and `Processing → Failed` are the only valid transitions for `fail_transaction` | Guard: `tx.status in [Pending, Processing]` | ✅ Implemented |
+| I-05 | `Completed` is a terminal state — no further transitions are permitted | Guard in all transition methods | ✅ Implemented |
+| I-06 | `Failed` is a terminal state — no further transitions are permitted | Guard in all transition methods | ✅ Implemented |
+| I-07 | `transaction_id` uniqueness — a second `register_callback` with the same `transaction_id` but a different `idempotency_key` must NOT overwrite the existing record | `StorageClient::transaction_exists()` guard rejects reuse with `DuplicateRequest`, independent of idempotency-key state | ✅ Implemented — **F-07 fixed** |
 | I-08 | The contract must be initialised before any state-mutating method can succeed | `is_initialised()` implicitly enforced via `get_admin()` / `get_relay_signer()` returning `NotInitialised` | ✅ Implicitly enforced |
 | I-09 | `updated_at_ledger` must always be ≥ `created_at_ledger` | Ledger sequence is monotonically increasing | ✅ Guaranteed by Soroban runtime |
-| I-10 | `stellar_tx_hash` must be empty string until `Completed` | Set in `register_callback`; populated only in `complete_transaction` | ❌ Not yet implemented (for completion half) |
-| I-11 | `failure_reason` must be empty string until `Failed` | Set in `register_callback`; populated only in `fail_transaction` | ❌ Not yet implemented (for failure half) |
+| I-10 | `stellar_tx_hash` must be empty string until `Completed` | Set in `register_callback`; populated only in `complete_transaction` | ✅ Implemented |
+| I-11 | `failure_reason` must be empty string until `Failed` | Set in `register_callback`; populated only in `fail_transaction` | ✅ Implemented |
 
 ---
 
@@ -259,11 +254,11 @@ Pending ──► Processing ──► Completed
 | Key | Tier | Risk |
 |-----|------|------|
 | `StorageKey::Initialised` | Instance | Lost if contract instance is restored from archive — but `set_initialised` is called during `initialize()`, so restore would require re-initialisation. **Risk: none** (instance storage survives same-schema upgrades). |
-| `StorageKey::Admin` | Persistent | Survives upgrades; only writable by `initialize()` and (TODO) `transfer_admin()`. **Risk: admin key compromise** — mitigated by multisig. |
+| `StorageKey::Admin` | Persistent | Survives upgrades; only writable by `initialize()` and `transfer_admin()`. **Risk: admin key compromise** — mitigated by multisig. |
 | `StorageKey::RelaySigner` | Persistent | Same as Admin. |
 | `StorageKey::Paused` | Instance | Survives upgrades. A paused contract that is upgraded remains paused. **Risk: none**. |
 | `StorageKey::Transaction(id)` | Persistent | TTL extended on every read and write; bounded to `TRANSACTION_MIN_TTL_LEDGERS` (100 000 ledgers ≈ 1 week). If a record's TTL expires and is not extended, the record becomes unreadable (archived). **Risk: data availability** — active relay must regularly read/update active transactions. |
-| `StorageKey::IdempotencyKey(key)` | Temporary | TTL of 18 000 ledgers (~24 h). After expiry, the key is invisible — a relay replaying a message after 24 h will not be deduplicated by the idempotency key alone. **Risk: late replay** — mitigated by transaction ID uniqueness (F-07 must be fixed). |
+| `StorageKey::IdempotencyKey(key)` | Temporary | TTL of 18 000 ledgers (~24 h). After expiry, the key is invisible — a relay replaying a message after 24 h will not be deduplicated by the idempotency key alone. **Risk: late replay** — mitigated by `StorageClient::transaction_exists()` (F-07, fixed). |
 
 ### Storage manipulation threats
 
@@ -291,15 +286,16 @@ is consistent across all emitters.
 | `EventTransactionRegistered` | `(synapse, reg)` | `register_callback()` | ✅ Implemented |
 | `EventContractUpgraded` | `(synapse, upgrade)` | `upgrade()` | ✅ Implemented |
 | `EventPauseToggled` | `(synapse, pause)` | `pause()` / `unpause()` | ✅ Implemented |
-| `EventStatusChanged` | `(synapse, status)` | status transitions | ❌ Not yet implemented |
-| `EventTransactionCompleted` | `(synapse, done)` | `complete_transaction()` | ❌ Not yet implemented |
-| `EventTransactionFailed` | `(synapse, fail)` | `fail_transaction()` | ❌ Not yet implemented |
-| `EventAdminTransferred` | `(synapse, admin)` | `transfer_admin()` | ❌ Not yet implemented |
+| `EventStatusChanged` | `(synapse, status)` | status transitions | ✅ Implemented |
+| `EventTransactionCompleted` | `(synapse, done)` | `complete_transaction()` | ✅ Implemented |
+| `EventTransactionFailed` | `(synapse, fail)` | `fail_transaction()` | ✅ Implemented |
+| `EventAdminTransferred` | `(synapse, admin)` | `transfer_admin()` | ✅ Implemented |
+| `EventRelaySignerRotated` | `(synapse, relay)` | `set_relay_signer()` | ✅ Implemented — **F-08 fixed** |
 
 **Event security considerations:**
 
-- Missing events on state transitions are a silent-failure risk for Phase 2/3
-  subscribers. All `todo!()` event emitters must be implemented before audit.
+- All state transitions now emit an event; see [`EVENTS.md`](./EVENTS.md) for
+  the full catalogue and semver policy.
 - The `EventTransactionRegistered` event intentionally omits the
   `idempotency_key` to avoid leaking it on-chain. ✅ Correct by design.
 - The `EventContractUpgraded` event includes the `new_wasm_hash`. Off-chain
@@ -381,10 +377,10 @@ by the idempotency key alone.
 **Compensating controls:**
 - The off-chain relay's Redis-based deduplication provides a first line of
   defence for duplicates arriving within the relay's own window.
-- Fix **F-07** (transaction ID uniqueness guard) provides a persistent
-  second-line defence on-chain regardless of TTL expiry.
+- **F-07** (transaction ID uniqueness guard) provides a persistent
+  second-line defence on-chain regardless of TTL expiry — fixed.
 
-**Residual risk:** Low after F-07 is fixed. Medium until then.
+**Residual risk:** Low. F-07 is fixed.
 
 ---
 
@@ -407,21 +403,21 @@ WASM immediately, without a delay that would allow users to exit.
 ## 9. Self-Review Findings
 
 The following findings were identified during this self-review. Each is either
-a known implementation gap (marked ❌ in sections above) or a specific
-correctness/security issue. Each finding is rated by severity and linked to a
-follow-up action.
+an implementation gap or a specific correctness/security design issue. Each
+finding is rated by severity and linked to a follow-up action; five (F-01,
+F-06, F-07, F-08, F-09) have since been fixed.
 
 | ID | Severity | Title | Description | Status |
 |----|----------|-------|-------------|--------|
-| **F-01** | Low | G-address validation is format-only | `validate_stellar_account` checks length == 56 and first byte == `G`. It does not validate the base32 checksum (last 2 bytes of a StrKey-decoded address). A carefully crafted 56-char string starting with `G` with an invalid checksum will pass. | Open — follow-up issue recommended |
-| **F-02** | Medium | No guard against transferring admin to zero/uncontrolled address | `transfer_admin` (TODO) has no on-chain check that `new_admin` is a valid, non-null address. Transferring admin to an uncontrolled address permanently bricks privileged operations. | Open — add guard in implementation |
+| **F-01** | Low | G-address validation is format-only | Originally: `validate_stellar_account` checked only length == 56 and first byte == `G`. **Now implemented as full SEP-23 base32 decode + CRC16-XModem checksum verification** (see `validation.rs`); a well-shaped string with an invalid checksum is rejected. Covered by `validation::tests::fixture_checksum_invalid_is_rejected`. | Fixed |
+| **F-02** | Medium | No guard against transferring admin to zero/uncontrolled address | `transfer_admin` is implemented but has no on-chain check that `new_admin` is a valid, non-null address. Transferring admin to an uncontrolled address permanently bricks privileged operations. | Open — add guard in implementation |
 | **F-03** | Low | Single-step admin transfer | Admin transfer is a single atomic operation. A two-step pattern (nominate → accept) would require the new admin to prove key control before the transfer is finalised, preventing accidental or malicious mis-transfer. | Accepted risk for Phase 1; recommend follow-up issue for Phase 2 |
 | **F-04** | Medium | No storage schema version for upgrade safety | There is no on-chain schema version stored. An upgrade that inadvertently changes `Transaction` struct layout or `StorageKey` variants will silently corrupt persistent storage. | Open — recommend adding a `SCHEMA_VERSION` constant checked by `upgrade()` |
 | **F-05** | Low | Upgrade does not require contract to be paused | An upgrade can execute while `register_callback` calls are in-flight, creating a race condition if the new WASM changes callback processing semantics mid-flight. | Accepted risk for Phase 1; documented in `DECISIONS.md §7` |
-| **F-06** | High | `get_status`, `is_duplicate`, and all status-transition methods are unimplemented | Five public entry points are `todo!()` stubs. The contract is not production-ready until these are implemented and tested. This is the primary implementation blocker for audit readiness. | Open — tracked by `TODO.md` |
-| **F-07** | High | No persistent guard against `transaction_id` reuse after idempotency TTL expiry | If the same `transaction_id` is submitted with a different `idempotency_key` after the ~24 h idempotency window, `StorageClient::save_transaction` will overwrite the existing record. This violates the audit immutability guarantee. | Open — `register_callback` must check for an existing `StorageKey::Transaction(tx_id)` and return `DuplicateRequest` if present, regardless of idempotency key state. |
-| **F-08** | Medium | `set_relay_signer` does not emit an event | Relay signer rotation is a sensitive operation (R-01). Without an on-chain event, monitoring systems cannot detect an unexpected rotation. | Open — must emit event in implementation |
-| **F-09** | Low | `start_processing`, `complete_transaction`, `fail_transaction` accept an explicit `caller` argument | The caller address is passed in as a function argument rather than being derived from the signed transaction. The implementation must call `caller.require_auth()` to ensure the `caller` argument matches the actual transaction signer. Failing to do so would allow any `caller` address to be spoofed. | Open — critical to get right in implementation |
+| **F-06** | High | `get_status`, `is_duplicate`, and all status-transition methods are unimplemented | All entry points are implemented and covered by the 52-test suite (`cargo test`). No longer a blocker for audit readiness. | Fixed |
+| **F-07** | High | No persistent guard against `transaction_id` reuse after idempotency TTL expiry | `register_callback` now checks `StorageClient::transaction_exists()` and returns `DuplicateRequest` on reuse, independent of idempotency-key state. Covered by `tests::test_register_callback_rejects_duplicate_transaction_id_after_idempotency_expiry`. | Fixed |
+| **F-08** | Medium | `set_relay_signer` does not emit an event | `EventEmitter::relay_signer_rotated()` (topic `relay`) is emitted on every rotation, mirroring `EventAdminTransferred`. Covered by `tests::test_set_relay_signer_emits_relay_signer_rotated_event`. Documented in `EVENTS.md`. | Fixed |
+| **F-09** | Low | `start_processing`, `complete_transaction`, `fail_transaction` accept an explicit `caller` argument | `AdminClient::assert_is_relay_or_admin()` checks `caller` against the stored admin/relay addresses and then calls `caller.require_auth()`, so the argument cannot be spoofed to a non-signing address. Covered by `tests::test_start_processing_rejects_when_wrong_address_authorised`. | Fixed |
 | **F-10** | Low | Asset issuer not validated against known trusted issuers | The contract validates that `asset_issuer` is a valid G-address but does not check it against an allowlist of trusted issuers. A relay could register callbacks for any asset. | Accepted risk for Phase 1 — asset filtering is an off-chain relay responsibility |
 
 ---
