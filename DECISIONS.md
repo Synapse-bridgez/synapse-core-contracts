@@ -109,6 +109,11 @@ In these cases, the immutable-with-migration path is still available as a fallba
 
 ### Entry point (`lib.rs`)
 
+> **Updated:** the original single-argument `upgrade()` shown when this
+> decision was written has since gained an `expected_schema_version` guard
+> (THREAT_MODEL.md finding F-04, see [`CHANGELOG.md`](./CHANGELOG.md)). The
+> snippet below reflects current code.
+
 ```rust
 /// Upgrade the contract WASM in-place.
 ///
@@ -116,12 +121,23 @@ In these cases, the immutable-with-migration path is still available as a fallba
 /// the existing storage schema. Persistent and instance storage are preserved
 /// across the upgrade; temporary storage (idempotency keys) is evicted.
 ///
+/// `expected_schema_version` must match the on-chain schema version or the
+/// call is rejected before contract WASM is touched.
+///
 /// # Events
 /// Emits [`EventContractUpgraded`] on success.
-pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+pub fn upgrade(
+    env: Env,
+    new_wasm_hash: BytesN<32>,
+    expected_schema_version: u32,
+) -> Result<(), ContractError> {
     let admin = AdminClient::require_admin(&env)?;
-    env.deployer().update_current_contract_wasm(new_wasm_hash);
-    EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash);
+    let schema_version = StorageClient::get_schema_version(&env)?;
+    if schema_version != expected_schema_version {
+        return Err(ContractError::SchemaVersionMismatch);
+    }
+    env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+    EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
     Ok(())
 }
 ```
@@ -134,6 +150,7 @@ pub struct EventContractUpgraded {
     pub admin: soroban_sdk::Address,
     pub new_wasm_hash: soroban_sdk::BytesN<32>,
     pub ledger: u32,
+    pub schema_version: u32,
 }
 ```
 
