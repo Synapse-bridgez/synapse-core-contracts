@@ -71,10 +71,10 @@ DECISIONS.md        ← architectural decision records
 | `types.rs`        | ✅ Complete | All structs, enums, error codes defined                     |
 | `lib.rs`          | ✅ Complete | All `#[contractimpl]` entry points implemented               |
 | `storage.rs`      | ✅ Complete | Persistent/temporary/instance read-write helpers, TTL extension |
-| `events.rs`       | ✅ Complete | All 9 events wired; see [`EVENTS.md`](./EVENTS.md)           |
+| `events.rs`       | ✅ Complete | All 10 events wired; see [`EVENTS.md`](./EVENTS.md)          |
 | `validation.rs`   | ✅ Complete | Full SEP-23 strkey CRC16 check + length caps on all string fields |
 | `admin.rs`        | ✅ Complete | Role-based access control (admin / relay signer)             |
-| `tests.rs` / `test_pause.rs` | ✅ Complete | 52 tests covering happy paths, auth failures, invalid input, idempotency, state-machine guards, pause/upgrade |
+| `tests.rs` / `test_pause.rs` | ✅ Complete | 68 tests covering happy paths, auth failures, invalid input, idempotency, state-machine guards, pause/upgrade |
 
 See [`THREAT_MODEL.md`](./THREAT_MODEL.md) for the pre-audit self-review and
 remaining open (accepted-risk or design-level) findings.
@@ -204,9 +204,11 @@ existing (possibly `Completed`/`Failed`) transaction.
 
 **Status:** ✅ Supported
 
-This contract includes an `upgrade(new_wasm_hash)` entry point gated by the admin
-role.  The full rationale, trade-off analysis, and upgrade-boundary guarantees
-are documented in [`DECISIONS.md`](./DECISIONS.md).
+This contract includes an `upgrade(new_wasm_hash, expected_schema_version)`
+entry point gated by the admin role — the `expected_schema_version` argument
+must match the on-chain schema version (`schema_version()`) or the call is
+rejected before touching WASM.  The full rationale, trade-off analysis, and
+upgrade-boundary guarantees are documented in [`DECISIONS.md`](./DECISIONS.md).
 
 **Key guarantee:** Persistent and instance storage survive a same-schema upgrade.
 Only temporary storage (idempotency keys) is evicted — acceptable because their
@@ -246,5 +248,6 @@ PR review or release cadence.
 - **Subscriber-facing diffs:** [`CHANGELOG.md` → Event schema](./CHANGELOG.md#event-schema)
   only — separate from general code notes.
 
-Live emitters today: `init`, `reg`, `status`, `done`, `fail`, `admin`, `relay`,
-`pause`, `upgrade` — the full catalogue in `EVENTS.md` is wired.
+Live emitters today: `init`, `reg`, `status`, `done`, `fail`, `propose`,
+`admin`, `relay`, `pause`, `upgrade` — the full catalogue in `EVENTS.md` is
+wired.
