@@ -48,7 +48,8 @@ supported.
 | [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Live** |
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
 | [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
-| [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `transfer_admin` | **Live** |
+| [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
+| [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
 | [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
@@ -151,14 +152,30 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `reason` | `String` | Short failure code |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventAdminTransferProposed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `propose` |
+| **Struct** | `EventAdminTransferProposed` |
+| **Emitted by** | `propose_admin` |
+| **When** | Current admin nominates a new admin. Not yet effective — see [`EventAdminTransferred`](#eventadmintransferred), emitted only once the nominee calls `accept_admin`. |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `current_admin` | `Address` | Admin making the proposal |
+| `proposed_admin` | `Address` | Nominated address |
+| `ledger` | `u32` | Ledger sequence at emit |
+
 ### EventAdminTransferred
 
 | | |
 |--|--|
 | **Topics** | `synapse`, `admin` |
 | **Struct** | `EventAdminTransferred` |
-| **Emitted by** | `transfer_admin` |
-| **When** | Admin role successfully transferred |
+| **Emitted by** | `accept_admin` |
+| **When** | Nominee accepts a pending admin transfer, completing it |
 | **Status** | Live |
 
 | Field | Type | Meaning |
@@ -198,6 +215,7 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `admin` | `Address` | Admin that authorised the upgrade |
 | `new_wasm_hash` | `BytesN<32>` | SHA-256 of the new WASM |
 | `ledger` | `u32` | Ledger sequence at emit |
+| `schema_version` | `u32` | On-chain schema version `expected_schema_version` was checked against (F-04). Additive trailing field, added after the initial 0.1.0 lock — Minor bump. |
 
 Verified by snapshot-style test
 `test_pause::test_upgrade_emits_contract_upgraded_event`
@@ -235,7 +253,8 @@ invocation / transaction.
 | `start_processing` | 1. `status` (`Pending` → `Processing`) |
 | `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
 | `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
-| `transfer_admin` | 1. `admin` |
+| `propose_admin` | 1. `propose` |
+| `accept_admin` | 1. `admin` |
 | `set_relay_signer` | 1. `relay` |
 | `upgrade` | 1. `upgrade` |
 | `pause` / `unpause` | 1. `pause` |
@@ -290,7 +309,7 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 
 1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
 2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
-   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`).
+   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`).
 3. Confirm multi-event order in §4 still matches the call sites.
 4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
    and any new event tests; topics in assertions must match §3.
