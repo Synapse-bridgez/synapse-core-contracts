@@ -122,10 +122,10 @@ internals). This makes the error index self-documenting and surfaces context
 that would otherwise live only in PR threads.
 
 ```rust
-/// Returned by `register_callback` when the idempotency key already exists
-/// in temporary storage. The original `tx_id` is returned to the caller
-/// instead of creating a duplicate record.
-AlreadyRegistered = 2,
+/// Returned by `register_callback` when a transaction record already exists
+/// for the given `transaction_id`, regardless of idempotency-key state (this
+/// guards against replay after the idempotency key's own TTL has expired).
+DuplicateRequest = 40,
 ```
 
 ### Every event struct must have a doc comment
@@ -134,12 +134,15 @@ Explain *which entry-point* emits the event and the *minimum condition*
 required for emission.
 
 ```rust
-/// Emitted by `register_callback` when a new transaction is successfully
-/// written to persistent storage. Not emitted for duplicate (idempotent)
-/// calls that return an existing `tx_id`.
-pub struct EventCallbackRegistered {
+/// Emitted by [`SynapseCoreContract::register_callback`] when a new
+/// [`Transaction`] is persisted for the first time.
+#[contracttype]
+pub struct EventTransactionRegistered {
     pub tx_id: String,
-    pub stellar_account: Address,
+    pub stellar_account: String,
+    pub amount: i128,
+    pub asset_code: String,
+    pub anchor_transaction_id: String,
     pub ledger: u32,
 }
 ```
