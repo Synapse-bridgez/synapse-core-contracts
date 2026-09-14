@@ -54,7 +54,8 @@ src/
 ├── events.rs       ← typed event structs + EventEmitter
 ├── validation.rs   ← stateless input guards
 ├── admin.rs        ← role-based access control (admin + relay_signer)
-└── tests.rs        ← integration test skeletons (one per entry-point)
+├── tests.rs        ← integration tests (one or more per entry-point)
+└── test_pause.rs   ← pause/circuit-breaker + upgrade tests
 
 EVENTS.md           ← locked event schema (topics, payloads, ordering, semver)
 CHANGELOG.md        ← release notes; Event schema section for subscribers
@@ -63,17 +64,20 @@ DECISIONS.md        ← architectural decision records
 
 ---
 
-## What is implemented (~10%)
+## What is implemented
 
-| Component        | Status      | Notes                                              |
-|------------------|-------------|----------------------------------------------------|
-| `types.rs`       | ✅ Complete  | All structs, enums, error codes defined            |
-| `lib.rs`         | 🔲 Scaffold | Function signatures + doc comments + `TODO` bodies |
-| `storage.rs`     | 🔲 Scaffold | `is_initialised()` works; all writes are `todo!()` |
-| `events.rs`      | 🔲 Scaffold | Event structs defined; emit calls are `todo!()`    |
-| `validation.rs`  | 🔲 Scaffold | Function signatures + logic outline in comments    |
-| `admin.rs`       | 🔲 Scaffold | Access-control logic outlined in `TODO` comments   |
-| `tests.rs`       | 🔲 Scaffold | Full test matrix defined; bodies are `todo!()`     |
+| Component        | Status      | Notes                                                      |
+|------------------|-------------|-------------------------------------------------------------|
+| `types.rs`        | ✅ Complete | All structs, enums, error codes defined                     |
+| `lib.rs`          | ✅ Complete | All `#[contractimpl]` entry points implemented               |
+| `storage.rs`      | ✅ Complete | Persistent/temporary/instance read-write helpers, TTL extension |
+| `events.rs`       | ✅ Complete | All 9 events wired; see [`EVENTS.md`](./EVENTS.md)           |
+| `validation.rs`   | ✅ Complete | Full SEP-23 strkey CRC16 check + length caps on all string fields |
+| `admin.rs`        | ✅ Complete | Role-based access control (admin / relay signer)             |
+| `tests.rs` / `test_pause.rs` | ✅ Complete | 52 tests covering happy paths, auth failures, invalid input, idempotency, state-machine guards, pause/upgrade |
+
+See [`THREAT_MODEL.md`](./THREAT_MODEL.md) for the pre-audit self-review and
+remaining open (accepted-risk or design-level) findings.
 
 ---
 
@@ -182,6 +186,11 @@ Idempotency keys are stored in **temporary** ledger storage (~24 h TTL), mirrori
 the Redis-based deduplication in the off-chain service. Duplicate `register_callback`  
 calls within the window return the original `tx_id` without re-writing.
 
+A second, durable guard also rejects any `register_callback` whose
+`transaction_id` already has a stored record — regardless of idempotency-key
+state — so a replay arriving after the 24h window still cannot overwrite an
+existing (possibly `Completed`/`Failed`) transaction.
+
 ### Storage tiers
 
 | Data             | Tier        | Reason                                  |
@@ -237,6 +246,5 @@ PR review or release cadence.
 - **Subscriber-facing diffs:** [`CHANGELOG.md` → Event schema](./CHANGELOG.md#event-schema)
   only — separate from general code notes.
 
-Live emitters today: `init`, `reg`, `pause`, `upgrade`. Remaining lifecycle /
-admin events are schema-locked in `EVENTS.md` and `src/events.rs` pending
-emitter wiring.
+Live emitters today: `init`, `reg`, `status`, `done`, `fail`, `admin`, `relay`,
+`pause`, `upgrade` — the full catalogue in `EVENTS.md` is wired.
