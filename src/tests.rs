@@ -220,6 +220,36 @@ fn test_register_callback_rejects_invalid_asset_code() {
 }
 
 #[test]
+fn test_register_callback_rejects_empty_asset_code() {
+    let (env, client, _admin, _relay) = setup();
+    let mut payload = default_payload(&env);
+    payload.asset_code = String::from_str(&env, "");
+    let result = client.try_register_callback(&payload);
+    assert_eq!(result, Err(Ok(ContractError::InvalidAssetCode)));
+}
+
+#[test]
+fn test_register_callback_accepts_asset_code_at_exact_cap() {
+    let (env, client, _admin, _relay) = setup();
+    let mut payload = default_payload(&env);
+    // SEP-11 allows up to 12 uppercase ASCII chars; exactly 12 must be accepted.
+    payload.asset_code = String::from_str(&env, "ABCDEFGHIJKL");
+    let tx_id = client.register_callback(&payload);
+    let tx = client.get_transaction(&tx_id);
+    assert_eq!(tx.asset_code, String::from_str(&env, "ABCDEFGHIJKL"));
+}
+
+#[test]
+fn test_register_callback_rejects_asset_code_one_over_cap() {
+    let (env, client, _admin, _relay) = setup();
+    let mut payload = default_payload(&env);
+    // 13 uppercase ASCII chars exceeds the 12-char SEP-11 cap.
+    payload.asset_code = String::from_str(&env, "ABCDEFGHIJKLM");
+    let result = client.try_register_callback(&payload);
+    assert_eq!(result, Err(Ok(ContractError::InvalidAssetCode)));
+}
+
+#[test]
 fn test_register_callback_rejects_invalid_asset_issuer() {
     let (env, client, _admin, _relay) = setup();
     let mut payload = default_payload(&env);
