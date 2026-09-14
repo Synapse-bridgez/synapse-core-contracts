@@ -150,7 +150,18 @@ stellar contract invoke \
 ```
 Should return `true`, indicating the contract is properly initialized. A fresh, uninitialized contract would return `false`.
 
-### 2. Test register_callback round-trip
+### 2. Verify admin and relay_signer on-chain
+
+Cross-check the addresses `initialize()` actually stored against what
+`contract-ids.json` claims — don't rely on the recorded value alone:
+```bash
+stellar contract invoke --id $CONTRACT_ID --source <ANY_KEY_WITH_XLM> --network <network> -- admin
+stellar contract invoke --id $CONTRACT_ID --source <ANY_KEY_WITH_XLM> --network <network> -- relay_signer
+```
+Both must exactly match `contract-ids.json`'s `admin_address` and
+`relay_signer_address` for the target network.
+
+### 3. Test register_callback round-trip
 Create a minimal test callback payload and call `register_callback` as the relay signer. The payload must include all required fields from the [`CallbackPayload`](./src/types.rs) struct:
 ```bash
 # Example test payload (adjust fields as needed for your network)
@@ -173,7 +184,7 @@ stellar contract invoke \
   }'
 ```
 
-### 3. Read back the transaction
+### 4. Read back the transaction
 ```bash
 stellar contract invoke \
   --id $CONTRACT_ID \
