@@ -20,6 +20,19 @@ separately from general code changes. Full topic/field contracts live in
 - Added `EventRelaySignerRotated` (topic `relay`), emitted by
   `set_relay_signer`. Additive new event per
   [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy) — Minor bump.
+- Added `EventAdminTransferProposed` (topic `propose`), emitted by the new
+  `propose_admin`. Additive new event — Minor bump.
+- **Breaking:** `EventAdminTransferred` (topic `admin`) is now emitted by
+  `accept_admin` instead of the removed `transfer_admin`. The event's own
+  topic/fields/order are unchanged, but which entry-point triggers it — and
+  how many calls that takes — has changed; per
+  [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy) this is a
+  **Major** change. Subscriber teams: expect `admin` no longer immediately
+  after a single admin-initiated call — it now follows a separate
+  `accept_admin` call from the nominee, which may arrive in a later ledger
+  or not at all if never accepted.
+- `EventContractUpgraded` gains an additive trailing `schema_version` field
+  — Minor bump per the same policy.
 
 ### Added
 
@@ -31,10 +44,31 @@ separately from general code changes. Full topic/field contracts live in
   these two let deployment tooling and monitoring verify the on-chain role
   addresses against `contract-ids.json` instead of trusting that record
   alone. See `DEPLOYMENT.md`'s post-deployment smoke test.
+- `schema_version()` / `pending_admin()` read-only query entry points.
 
 ### Changed
 
+- **Breaking:** `transfer_admin(new_admin)` is replaced by
+  `propose_admin(new_admin)` + `accept_admin(caller)`. A single call from
+  the current admin can no longer finalise a transfer on its own — the
+  nominee must call `accept_admin` itself, proving key control via its own
+  auth. Fixes THREAT_MODEL.md finding F-03. Integrators calling
+  `transfer_admin` directly (not through this repo's SDK client) must
+  switch to the two-step flow.
+- **Breaking:** `upgrade(new_wasm_hash)` is now
+  `upgrade(new_wasm_hash, expected_schema_version)`. The extra argument must
+  match the on-chain `schema_version()` or the call is rejected with
+  `SchemaVersionMismatch` before contract WASM is touched. Fixes
+  THREAT_MODEL.md finding F-04.
+
 ### Fixed
+
+- **Security:** `propose_admin` rejects nominating the contract's own
+  address, which could not practically call `accept_admin` back and would
+  have permanently bricked every admin-gated operation. Fixes
+  THREAT_MODEL.md finding F-02 (Medium severity). Soroban has no "zero
+  address" sentinel to check a nominee against generally — the contract's
+  own address is the only "invalid address" this can detect on-chain.
 
 - **Security:** `register_callback` no longer overwrites an existing
   transaction record on a late replay. Previously, once the ~24h idempotency
