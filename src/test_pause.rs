@@ -219,12 +219,28 @@ fn test_upgrade_rejects_non_admin() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "upgrade",
-                args: (dummy_hash.clone(),).into_val(&env),
+                args: (dummy_hash.clone(), 1u32).into_val(&env),
                 sub_invokes: &[],
             },
         }])
-        .try_upgrade(&dummy_hash);
+        .try_upgrade(&dummy_hash, &1);
     assert!(attacker_attempt.is_err());
+}
+
+#[test]
+fn test_upgrade_rejects_schema_version_mismatch() {
+    // F-04: the mismatch check runs before update_current_contract_wasm, so
+    // this is testable without a real uploaded WASM hash.
+    let (env, client, _admin, _relay) = setup();
+    let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
+    let result = client.try_upgrade(&dummy_hash, &999);
+    assert_eq!(result, Err(Ok(ContractError::SchemaVersionMismatch)));
+}
+
+#[test]
+fn test_schema_version_query_returns_current_version() {
+    let (_env, client, _admin, _relay) = setup();
+    assert_eq!(client.schema_version(), 1);
 }
 
 #[test]
@@ -258,7 +274,7 @@ fn test_upgrade_emits_contract_upgraded_event() {
     // Publish inside a contract context so testutils `Events::all` records it.
     // Topics must match EVENTS.md: synapse / upgrade.
     env.as_contract(&contract_id, || {
-        crate::events::EventEmitter::contract_upgraded(&env, &admin, &dummy_hash);
+        crate::events::EventEmitter::contract_upgraded(&env, &admin, &dummy_hash, 1);
     });
 
     let events = env.events().all();

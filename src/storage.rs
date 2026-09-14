@@ -91,6 +91,42 @@ impl StorageClient {
             .set(&StorageKey::RelaySigner, signer);
     }
 
+    // ── Admin transfer (two-step) ─────────────────────────────────────────────
+
+    /// Read the pending admin nominee, if a transfer is in progress.
+    pub fn get_pending_admin(env: &Env) -> Option<Address> {
+        env.storage().persistent().get(&StorageKey::PendingAdmin)
+    }
+
+    /// Persist the pending admin nominee, overwriting any existing proposal.
+    pub fn set_pending_admin(env: &Env, nominee: &Address) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PendingAdmin, nominee);
+    }
+
+    /// Clear the pending admin nominee after a transfer is accepted.
+    pub fn clear_pending_admin(env: &Env) {
+        env.storage().persistent().remove(&StorageKey::PendingAdmin);
+    }
+
+    // ── Schema version ────────────────────────────────────────────────────────
+
+    /// Read the on-chain storage schema version.
+    pub fn get_schema_version(env: &Env) -> Result<u32, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::SchemaVersion)
+            .ok_or(ContractError::NotInitialised)
+    }
+
+    /// Persist the storage schema version. Called once during `initialize()`.
+    pub fn set_schema_version(env: &Env, version: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::SchemaVersion, &version);
+    }
+
     // ── Transactions ──────────────────────────────────────────────────────────
 
     /// Returns `true` if a transaction record already exists for `tx_id`.

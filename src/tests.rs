@@ -578,7 +578,8 @@ fn test_admin_and_relay_signer_queries_reflect_rotation() {
     let new_admin = Address::generate(&_env);
     let new_relay = Address::generate(&_env);
 
-    client.transfer_admin(&new_admin);
+    client.propose_admin(&new_admin);
+    client.accept_admin(&new_admin);
     assert_eq!(client.admin(), new_admin);
 
     client.set_relay_signer(&new_relay);
@@ -588,7 +589,7 @@ fn test_admin_and_relay_signer_queries_reflect_rotation() {
 // ─── Admin ────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_transfer_admin_happy_path() {
+fn test_admin_transfer_two_step_happy_path() {
     let env = Env::default();
     let contract_id = env.register(SynapseCoreContract, ());
     let client = SynapseCoreContractClient::new(&env, &contract_id);
@@ -597,17 +598,36 @@ fn test_transfer_admin_happy_path() {
     client.initialize(&admin, &relay);
 
     let new_admin = Address::generate(&env);
+
+    // Step 1: current admin proposes. Not yet effective.
     client
         .mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "transfer_admin",
+                fn_name: "propose_admin",
                 args: (new_admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }])
-        .transfer_admin(&new_admin);
+        .propose_admin(&new_admin);
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+
+    // Step 2: only the nominee's own auth can finalise it.
+    client
+        .mock_auths(&[MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .accept_admin(&new_admin);
+    assert_eq!(client.admin(), new_admin);
+    assert_eq!(client.pending_admin(), None);
 
     let new_relay = Address::generate(&env);
 
@@ -640,7 +660,7 @@ fn test_transfer_admin_happy_path() {
 }
 
 #[test]
-fn test_transfer_admin_rejects_non_admin() {
+fn test_propose_admin_rejects_non_admin() {
     let env = Env::default();
     let contract_id = env.register(SynapseCoreContract, ());
     let client = SynapseCoreContractClient::new(&env, &contract_id);
@@ -656,13 +676,92 @@ fn test_transfer_admin_rejects_non_admin() {
             address: &attacker,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "transfer_admin",
+                fn_name: "propose_admin",
                 args: (new_admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }])
-        .try_transfer_admin(&new_admin);
+        .try_propose_admin(&new_admin);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_propose_admin_rejects_self_nomination() {
+    // F-02: nominating the contract's own address would permanently brick
+    // every admin-gated operation, since a plain contract address cannot
+    // practically call accept_admin back.
+    let (_env, client, _admin, _relay) = setup();
+    let result = client.try_propose_admin(&client.address);
+    assert_eq!(result, Err(Ok(ContractError::InvalidAdminNominee)));
+}
+
+#[test]
+fn test_accept_admin_rejects_when_none_pending() {
+    let (_env, client, _admin, _relay) = setup();
+    let someone = Address::generate(&_env);
+    let result = client.try_accept_admin(&someone);
+    assert_eq!(result, Err(Ok(ContractError::NoPendingAdminTransfer)));
+}
+
+#[test]
+fn test_accept_admin_rejects_wrong_caller() {
+    // caller is a plausible-looking argument, but only the pending nominee's
+    // own auth may finalise the transfer — mirrors the same
+    // "authorised the wrong address" concern already covered for relay
+    // rotation in start_processing's tests.
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let relay = Address::generate(&env);
+    client.initialize(&admin, &relay);
+
+    let new_admin = Address::generate(&env);
+    let bystander = Address::generate(&env);
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .propose_admin(&new_admin);
+
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &bystander,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: (bystander.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_accept_admin(&bystander);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
+    assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn test_propose_admin_overwrites_prior_pending_nominee() {
+    let (env, client, admin, _relay) = setup();
+    let first_nominee = Address::generate(&env);
+    let second_nominee = Address::generate(&env);
+
+    client.propose_admin(&first_nominee);
+    assert_eq!(client.pending_admin(), Some(first_nominee.clone()));
+
+    client.propose_admin(&second_nominee);
+    assert_eq!(client.pending_admin(), Some(second_nominee.clone()));
+
+    // The superseded first nominee can no longer accept.
+    let result = client.try_accept_admin(&first_nominee);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
+    assert_eq!(client.admin(), admin);
 }
 
 #[test]

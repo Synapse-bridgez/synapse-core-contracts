@@ -42,7 +42,9 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
-use crate::types::{CallbackPayload, ContractError, Transaction, TransactionStatus};
+use crate::types::{
+    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+};
 use crate::validation::Validator;
 
 // ─── Public contract interface ───────────────────────────────────────────────
@@ -71,6 +73,7 @@ impl SynapseCoreContract {
         StorageClient::set_relay_signer(&env, &relay_signer);
         // Start unpaused so a freshly deployed contract accepts callbacks.
         StorageClient::set_paused(&env, false);
+        StorageClient::set_schema_version(&env, SCHEMA_VERSION);
         StorageClient::set_initialised(&env);
         EventEmitter::initialised(&env, &admin, &relay_signer);
         Ok(())
@@ -269,13 +272,68 @@ impl SynapseCoreContract {
         StorageClient::get_relay_signer(&env)
     }
 
-    // ── Admin ─────────────────────────────────────────────────────────────────
+    /// Return the current on-chain storage schema version, or
+    /// [`ContractError::NotInitialised`]. The value `upgrade()` requires
+    /// callers to pass as `expected_schema_version`.
+    pub fn schema_version(env: Env) -> Result<u32, ContractError> {
+        StorageClient::get_schema_version(&env)
+    }
 
-    /// Transfer the admin role to `new_admin`.  Requires existing admin auth.
-    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
-        let old_admin = AdminClient::require_admin(&env)?;
-        StorageClient::set_admin(&env, &new_admin);
-        EventEmitter::admin_transferred(&env, &old_admin, &new_admin);
+    /// Return the pending admin nominee, if an admin transfer is in
+    /// progress. `None` once accepted or if none was ever proposed.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        StorageClient::get_pending_admin(&env)
+    }
+
+    // ── Admin (two-step transfer) ────────────────────────────────────────────
+
+    /// Nominate `new_admin` as the next admin.  Requires existing admin auth.
+    ///
+    /// The transfer does not take effect here — it only completes once
+    /// `new_admin` itself calls [`Self::accept_admin`], proving it controls
+    /// the corresponding key. A single call from the current admin can no
+    /// longer finalise a transfer on its own (THREAT_MODEL.md finding F-03),
+    /// which also rules out the classic mis-typed-address failure mode: a
+    /// wrong address can never accept, so the current admin simply stays in
+    /// control and can propose again.
+    ///
+    /// Rejects nominating the contract's own address (F-02) — see
+    /// [`Validator::validate_admin_nominee`] for why that is the only
+    /// "invalid address" Soroban lets this check for on-chain.
+    ///
+    /// # Events
+    /// Emits [`events::EventAdminTransferProposed`].
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        let current_admin = AdminClient::require_admin(&env)?;
+        Validator::validate_admin_nominee(&env, &new_admin)?;
+        StorageClient::set_pending_admin(&env, &new_admin);
+        EventEmitter::admin_transfer_proposed(&env, &current_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Complete a pending admin transfer nominated via [`Self::propose_admin`].
+    ///
+    /// `caller` must be the pending nominee; the call requires `caller`'s own
+    /// auth, which is what proves key control and finalises the transfer.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingAdminTransfer`] if no transfer is pending.
+    /// - [`ContractError::Unauthorised`] if `caller` is not the pending nominee.
+    ///
+    /// # Events
+    /// Emits [`events::EventAdminTransferred`].
+    pub fn accept_admin(env: Env, caller: Address) -> Result<(), ContractError> {
+        let pending =
+            StorageClient::get_pending_admin(&env).ok_or(ContractError::NoPendingAdminTransfer)?;
+        if caller != pending {
+            return Err(ContractError::Unauthorised);
+        }
+        caller.require_auth();
+
+        let old_admin = StorageClient::get_admin(&env)?;
+        StorageClient::set_admin(&env, &caller);
+        StorageClient::clear_pending_admin(&env);
+        EventEmitter::admin_transferred(&env, &old_admin, &caller);
         Ok(())
     }
 
@@ -302,6 +360,13 @@ impl SynapseCoreContract {
     /// and instance storage (init flag, pause flag) survive intact; temporary
     /// storage (idempotency keys) is evicted.
     ///
+    /// `expected_schema_version` must match the on-chain `SchemaVersion`
+    /// (THREAT_MODEL.md finding F-04). This cannot validate that the *new*
+    /// WASM is actually compatible — Soroban gives the running code no way to
+    /// introspect an uploaded-but-not-yet-installed WASM blob — but it does
+    /// guard against invoking `upgrade()` against a contract instance whose
+    /// on-chain state isn't what the caller believes it is.
+    ///
     /// # Events
     /// Emits [`events::EventContractUpgraded`] on success.
     ///
@@ -309,11 +374,19 @@ impl SynapseCoreContract {
     /// Because this entry point allows the admin to deploy arbitrary WASM, the
     /// admin key **MUST** be held by a multisig or DAO.  See `DECISIONS.md` for
     /// the full rationale and `README.md` for operational requirements.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn upgrade(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+    ) -> Result<(), ContractError> {
         let admin = AdminClient::require_admin(&env)?;
+        let schema_version = StorageClient::get_schema_version(&env)?;
+        if schema_version != expected_schema_version {
+            return Err(ContractError::SchemaVersionMismatch);
+        }
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
-        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash);
+        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
         Ok(())
     }
 

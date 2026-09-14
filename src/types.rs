@@ -5,6 +5,18 @@
 
 use soroban_sdk::{contracterror, contracttype, String};
 
+/// Current on-chain storage schema version.
+///
+/// Bump this whenever [`Transaction`] or [`StorageKey`] layout changes in a
+/// way that a running upgrade needs to be aware of. `initialize()` stores it;
+/// `SynapseCoreContract::upgrade()` requires the caller to pass the value it
+/// currently expects on-chain before proceeding (THREAT_MODEL.md finding
+/// F-04). This cannot validate the *new* WASM's schema — Soroban gives the
+/// currently-running code no way to introspect an uploaded-but-not-yet-
+/// installed WASM blob — so it guards against upgrading the wrong deployment
+/// or an unexpected on-chain state, not against an incompatible new binary.
+pub const SCHEMA_VERSION: u32 = 1;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -154,6 +166,12 @@ pub enum StorageKey {
     Transaction(String),
     /// Idempotency key → cached response ledger; keyed by idempotency key.
     IdempotencyKey(String),
+    /// Singleton: address nominated to become admin, pending its own
+    /// `accept_admin()` call. Absent when no transfer is in progress.
+    PendingAdmin,
+    /// Singleton: on-chain storage schema version, set at `initialize()`.
+    /// See [`SCHEMA_VERSION`].
+    SchemaVersion,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -180,6 +198,12 @@ pub enum ContractError {
     /// The contract is paused (emergency circuit breaker engaged); the
     /// requested operation is temporarily disabled.
     ContractPaused = 12,
+    /// `accept_admin` was called with no pending admin transfer in progress.
+    NoPendingAdminTransfer = 13,
+    /// `propose_admin` was called with the contract's own address as the
+    /// nominee, which cannot practically call `accept_admin` back and would
+    /// permanently brick every admin-gated operation.
+    InvalidAdminNominee = 14,
 
     // ── Payload validation ──────────────────────────────────────────────────
     /// `stellar_account` field is malformed.
@@ -208,4 +232,10 @@ pub enum ContractError {
     // ── Storage ─────────────────────────────────────────────────────────────
     /// A ledger read/write produced an unexpected result.
     StorageError = 50,
+
+    // ── Upgrade safety ──────────────────────────────────────────────────────
+    /// `upgrade()`'s `expected_schema_version` argument did not match the
+    /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
+    /// aborted before touching contract WASM.
+    SchemaVersionMismatch = 60,
 }

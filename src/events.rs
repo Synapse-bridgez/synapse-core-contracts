@@ -85,6 +85,17 @@ pub struct EventAdminTransferred {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::propose_admin`] when a new admin is
+/// nominated. The transfer is not yet effective at this point — see
+/// [`EventAdminTransferred`], emitted only once the nominee itself calls
+/// `accept_admin` (two-step transfer, THREAT_MODEL.md finding F-03).
+#[contracttype]
+pub struct EventAdminTransferProposed {
+    pub current_admin: soroban_sdk::Address,
+    pub proposed_admin: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 /// Emitted when the trusted relay signer is rotated.
 ///
 /// Relay-signer compromise lets an attacker register forged callbacks and
@@ -109,6 +120,10 @@ pub struct EventContractUpgraded {
     /// The new WASM hash (SHA-256 of the deployed `.wasm`).
     pub new_wasm_hash: soroban_sdk::BytesN<32>,
     pub ledger: u32,
+    /// The on-chain schema version that `expected_schema_version` was
+    /// checked against before this upgrade proceeded (THREAT_MODEL.md
+    /// finding F-04). Additive trailing field — see EVENTS.md semver policy.
+    pub schema_version: u32,
 }
 
 /// Emitted by [`SynapseCoreContract::pause`] / [`SynapseCoreContract::unpause`]
@@ -166,12 +181,30 @@ impl EventEmitter {
         env: &Env,
         admin: &soroban_sdk::Address,
         new_wasm_hash: &soroban_sdk::BytesN<32>,
+        schema_version: u32,
     ) {
         env.events().publish(
             (symbol_short!("synapse"), symbol_short!("upgrade")),
             EventContractUpgraded {
                 admin: admin.clone(),
                 new_wasm_hash: new_wasm_hash.clone(),
+                ledger: env.ledger().sequence(),
+                schema_version,
+            },
+        );
+    }
+
+    /// Emit [`EventAdminTransferProposed`].
+    pub fn admin_transfer_proposed(
+        env: &Env,
+        current_admin: &soroban_sdk::Address,
+        proposed_admin: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("propose")),
+            EventAdminTransferProposed {
+                current_admin: current_admin.clone(),
+                proposed_admin: proposed_admin.clone(),
                 ledger: env.ledger().sequence(),
             },
         );

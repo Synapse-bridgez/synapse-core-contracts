@@ -33,7 +33,7 @@
 //! Implementation is hand-rolled (no external crate) to stay within the
 //! no_std / wasm-size budget.  See fixtures in the unit tests below.
 
-use soroban_sdk::{Env, String};
+use soroban_sdk::{Address, Env, String};
 
 use crate::types::{CallbackPayload, ContractError};
 
@@ -229,6 +229,22 @@ impl Validator {
     /// Failure reason: max length enforced for rent cost control.
     pub fn validate_failure_reason(reason: &String) -> Result<(), ContractError> {
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
+    }
+
+    /// Reject nominating the contract's own address as the next admin.
+    ///
+    /// Soroban has no "zero address" sentinel the way EVM chains do — any
+    /// well-formed G-address is indistinguishable on-chain from one whose
+    /// private key has been lost, so that class of mistake cannot be guarded
+    /// against here. What *is* checkable is the contract's own address: it
+    /// cannot practically sign a transaction to call `accept_admin`, so
+    /// nominating it would permanently brick every admin-gated operation
+    /// (THREAT_MODEL.md finding F-02).
+    pub fn validate_admin_nominee(env: &Env, nominee: &Address) -> Result<(), ContractError> {
+        if *nominee == env.current_contract_address() {
+            return Err(ContractError::InvalidAdminNominee);
+        }
+        Ok(())
     }
 }
 
