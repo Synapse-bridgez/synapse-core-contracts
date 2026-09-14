@@ -89,6 +89,14 @@ impl SynapseCoreContract {
     /// window the call returns `Ok(existing_tx_id)` without writing — matching
     /// the Redis idempotency behaviour of the off-chain service.
     ///
+    /// The idempotency key alone is not a durable enough guard: it lives in
+    /// *temporary* storage with a ~24h TTL, so a late replay with a fresh
+    /// `idempotency_key` but the same `transaction_id` would otherwise pass
+    /// the check above and reach the write below. To prevent that write from
+    /// silently overwriting an existing (possibly `Completed`/`Failed`)
+    /// record, `transaction_id` reuse is also rejected independently of
+    /// idempotency-key state (THREAT_MODEL.md finding F-07).
+    ///
     /// # Events
     /// Emits [`events::TransactionRegistered`] on first write.
     pub fn register_callback(env: Env, payload: CallbackPayload) -> Result<String, ContractError> {
@@ -111,6 +119,14 @@ impl SynapseCoreContract {
         // second write, mirroring the off-chain Redis idempotency behaviour.
         if StorageClient::get_idempotency_key(&env, &payload.idempotency_key).is_some() {
             return Ok(payload.transaction_id.clone());
+        }
+
+        // Second-line guard (F-07): the idempotency key's TTL is much shorter
+        // than a transaction record's, so a late replay past that window must
+        // still not be allowed to overwrite an existing record under the same
+        // transaction_id.
+        if StorageClient::transaction_exists(&env, &payload.transaction_id) {
+            return Err(ContractError::DuplicateRequest);
         }
 
         let ledger = env.ledger().sequence();

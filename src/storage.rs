@@ -93,6 +93,18 @@ impl StorageClient {
 
     // ── Transactions ──────────────────────────────────────────────────────────
 
+    /// Returns `true` if a transaction record already exists for `tx_id`.
+    ///
+    /// Existence-only check — unlike [`Self::get_transaction`] it does not
+    /// extend TTL, since it is used purely as a pre-write guard against
+    /// `transaction_id` reuse (see `register_callback`'s duplicate-tx-id
+    /// check, THREAT_MODEL.md finding F-07).
+    pub fn transaction_exists(env: &Env, tx_id: &String) -> bool {
+        env.storage()
+            .persistent()
+            .has(&StorageKey::Transaction(tx_id.clone()))
+    }
+
     /// Read a [`Transaction`] by its ID.
     ///
     /// Extends the ledger TTL on each access so active records are never evicted.

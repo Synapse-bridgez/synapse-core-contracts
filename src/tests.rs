@@ -32,10 +32,11 @@
 //!
 //! Every variant a handler can currently return is exercised below.
 //! `ContractError::ContractPaused` is covered in [`crate::test_pause`], not
-//! duplicated here. `NotRelaySigner`, `DuplicateRequest`, and `StorageError`
-//! are declared in [`crate::types`] but no handler returns them today
-//! (`AdminClient::require_relay_signer` is unused dead code) — nothing to
-//! test until a handler actually produces them.
+//! duplicated here. `DuplicateRequest` is exercised by
+//! `test_register_callback_rejects_duplicate_transaction_id_after_idempotency_expiry`.
+//! `NotRelaySigner` and `StorageError` are declared in [`crate::types`] but no
+//! handler returns them today (`AdminClient::require_relay_signer` is unused
+//! dead code) — nothing to test until a handler actually produces them.
 
 #![cfg(test)]
 
@@ -759,13 +760,53 @@ fn test_idempotency_key_expires_after_ttl() {
 
     assert!(!client.is_duplicate(&payload.idempotency_key));
 
-    // A replay after expiry is treated as fresh: same tx id, re-registers,
-    // and re-emits `reg` (proving it is no longer deduped).
+    // The idempotency key itself is no longer live, but the transaction_id
+    // guard (F-07) is a second, independent line of defence: replaying the
+    // exact same payload must still be rejected, not silently re-registered.
     let events_before = env.events().all().len();
-    let tx_id = client.register_callback(&payload);
-    assert_eq!(tx_id, payload.transaction_id);
+    let result = client.try_register_callback(&payload);
+    assert_eq!(result, Err(Ok(ContractError::DuplicateRequest)));
     let events_after = env.events().all().len();
-    assert_eq!(events_after, events_before + 1);
+    assert_eq!(
+        events_after, events_before,
+        "a rejected duplicate must not emit a `reg` event"
+    );
+}
+
+#[test]
+fn test_register_callback_rejects_duplicate_transaction_id_after_idempotency_expiry() {
+    // F-07: a late replay with a *different* idempotency_key but the same
+    // transaction_id must not be deduped by the (now-expired) idempotency
+    // key and fall through to overwriting the existing record — it must be
+    // rejected by the transaction_id guard instead.
+    let (env, client, _admin, relay) = setup();
+    let payload = default_payload(&env);
+    let tx_id = client.register_callback(&payload);
+    client.start_processing(&tx_id, &relay);
+    let hash = String::from_str(&env, "hash-before-replay");
+    client.complete_transaction(&tx_id, &hash, &relay);
+
+    env.as_contract(&client.address, || {
+        env.storage().instance().extend_ttl(100_000, 100_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&StorageKey::Admin, 100_000, 100_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&StorageKey::RelaySigner, 100_000, 100_000);
+    });
+    env.ledger().with_mut(|li| li.sequence_number += 18_001);
+
+    let mut replay = payload_with(&env, "tx-1", "idem-1-replay");
+    replay.transaction_id = String::from_str(&env, "tx-1");
+    let result = client.try_register_callback(&replay);
+    assert_eq!(result, Err(Ok(ContractError::DuplicateRequest)));
+
+    // The original Completed record — including its audit-trail fields —
+    // must be untouched by the rejected replay.
+    let tx = client.get_transaction(&tx_id);
+    assert_eq!(tx.status, TransactionStatus::Completed);
+    assert_eq!(tx.stellar_tx_hash, hash);
 }
 
 // ─── Full lifecycle ────────────────────────────────────────────────────────────
