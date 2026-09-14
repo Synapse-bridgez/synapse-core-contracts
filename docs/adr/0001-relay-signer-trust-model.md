@@ -141,7 +141,8 @@ contract upgrade.
 
 ## References
 
-- [`src/admin.rs`](../../src/admin.rs) — `relay_signer` storage and rotation logic
+- [`src/storage.rs`](../../src/storage.rs) — `relay_signer` storage helpers
+- [`src/admin.rs`](../../src/admin.rs) — role-based auth checks for privileged calls
 - [`src/lib.rs`](../../src/lib.rs) — `register_callback()` entry-point with `require_auth()` call
 - [`README.md`](../../README.md) — "Why relay_signer instead of direct Anchor Platform calls?"
 - [`DECISIONS.md`](../../DECISIONS.md) — §6 Trust Assumptions (admin key requirements)
