@@ -85,6 +85,18 @@ pub struct EventAdminTransferred {
     pub ledger: u32,
 }
 
+/// Emitted when the trusted relay signer is rotated.
+///
+/// Relay-signer compromise lets an attacker register forged callbacks and
+/// drive the lifecycle state machine, so off-chain monitoring subscribes to
+/// this the same way it does [`EventAdminTransferred`].
+#[contracttype]
+pub struct EventRelaySignerRotated {
+    pub old_signer: soroban_sdk::Address,
+    pub new_signer: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 /// Emitted by [`SynapseCoreContract::upgrade`] when the contract WASM is
 /// replaced in-place.
 ///
@@ -160,6 +172,22 @@ impl EventEmitter {
             EventContractUpgraded {
                 admin: admin.clone(),
                 new_wasm_hash: new_wasm_hash.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerRotated`].
+    pub fn relay_signer_rotated(
+        env: &Env,
+        old_signer: &soroban_sdk::Address,
+        new_signer: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("relay")),
+            EventRelaySignerRotated {
+                old_signer: old_signer.clone(),
+                new_signer: new_signer.clone(),
                 ledger: env.ledger().sequence(),
             },
         );

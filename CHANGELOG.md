@@ -17,9 +17,15 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Event schema
 
-- _(none)_
+- Added `EventRelaySignerRotated` (topic `relay`), emitted by
+  `set_relay_signer`. Additive new event per
+  [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy) — Minor bump.
 
 ### Added
+
+- `EventRelaySignerRotated` — relay-signer rotation is now observable
+  on-chain the same way admin transfer already is (see
+  [`EVENTS.md`](./EVENTS.md#eventrelaysignerrotated)).
 
 ### Changed
 

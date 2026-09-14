@@ -249,9 +249,15 @@ impl SynapseCoreContract {
     }
 
     /// Rotate the trusted relay signer address.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerRotated`] so off-chain monitoring can
+    /// observe the rotation the same way it does [`Self::transfer_admin`].
     pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
         AdminClient::require_admin(&env)?;
+        let old_signer = StorageClient::get_relay_signer(&env)?;
         StorageClient::set_relay_signer(&env, &new_signer);
+        EventEmitter::relay_signer_rotated(&env, &old_signer, &new_signer);
         Ok(())
     }
 

@@ -583,6 +583,17 @@ fn test_set_relay_signer_happy_path() {
 }
 
 #[test]
+fn test_set_relay_signer_emits_relay_signer_rotated_event() {
+    let (env, client, _admin, _relay) = setup();
+    let new_relay = Address::generate(&env);
+    client.set_relay_signer(&new_relay);
+
+    let events = env.events().all();
+    let last = events.get_unchecked(events.len() - 1);
+    assert_topics(&env, &last.1, symbol_short!("relay"));
+}
+
+#[test]
 fn test_relay_rotation_mid_lifecycle_enforces_new_signer() {
     let env = Env::default();
     let contract_id = env.register(SynapseCoreContract, ());

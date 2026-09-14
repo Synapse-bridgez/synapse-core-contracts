@@ -49,6 +49,7 @@ supported.
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Locked schema** (emitter scaffold) |
 | [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Locked schema** (emitter scaffold) |
 | [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `transfer_admin` | **Locked schema** (emitter scaffold) |
+| [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -166,6 +167,22 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `new_admin` | `Address` | New admin |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventRelaySignerRotated
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `relay` |
+| **Struct** | `EventRelaySignerRotated` |
+| **Emitted by** | `set_relay_signer` |
+| **When** | Trusted relay signer successfully rotated |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `old_signer` | `Address` | Previous relay signer |
+| `new_signer` | `Address` | New relay signer |
+| `ledger` | `u32` | Ledger sequence at emit |
+
 ### EventContractUpgraded
 
 | | |
@@ -219,6 +236,7 @@ invocation / transaction.
 | `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
 | `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
 | `transfer_admin` | 1. `admin` |
+| `set_relay_signer` | 1. `relay` |
 | `upgrade` | 1. `upgrade` |
 | `pause` / `unpause` | 1. `pause` |
 
@@ -272,7 +290,7 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 
 1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
 2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
-   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`).
+   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`).
 3. Confirm multi-event order in §4 still matches the call sites.
 4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
    and any new event tests; topics in assertions must match §3.
