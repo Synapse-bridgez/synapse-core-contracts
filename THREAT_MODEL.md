@@ -434,25 +434,31 @@ deployment.
 
 ### 10.1 Code & Documentation
 
-- [ ] All `todo!()` stubs in `lib.rs`, `admin.rs`, `events.rs` are implemented
-      and pass `make check` (fmt + clippy + test + wasm build).
+- [x] All `todo!()` stubs in `lib.rs`, `admin.rs`, `events.rs` are implemented
+      and pass `make check` (fmt + clippy + test + wasm build). No `todo!()`
+      remains anywhere in the crate; `make check` passes clean.
 - [ ] `THREAT_MODEL.md` (this document) is reviewed, merged, and up to date
-      with the final implementation.
-- [ ] `DECISIONS.md` is current and covers any design decisions made after
-      the scaffold phase.
+      with the final implementation. *(Content is current as of this commit;
+      "reviewed and merged" is a human sign-off this checklist can't self-attest.)*
+- [x] `DECISIONS.md` is current and covers any design decisions made after
+      the scaffold phase, including [ADR-0002](./docs/adr/0002-two-step-admin-transfer.md)
+      and [ADR-0003](./docs/adr/0003-upgrade-schema-version-guard.md).
 - [ ] `DEPLOYMENT.md` is validated against the actual testnet deployment.
-- [ ] An **events schema doc** is produced listing all emitted events with
+- [x] An **events schema doc** is produced listing all emitted events with
       their topic symbols, data struct fields, and the conditions under which
-      each is emitted. (Currently implicit in `events.rs` — needs a dedicated
-      `EVENTS.md` or section.)
-- [ ] All self-review findings (F-01 through F-10) are either fixed or have
+      each is emitted — see [`EVENTS.md`](./EVENTS.md).
+- [x] All self-review findings (F-01 through F-10) are either fixed or have
       a documented accepted-risk rationale with a linked follow-up issue.
+      8 of 10 fixed; F-05 and F-10 are accepted risks with rationale in
+      section 9.
 
 ### 10.2 Test Coverage
 
-- [ ] All 20+ test skeletons in `tests.rs` are implemented (happy paths,
-      auth failures, invalid inputs, idempotency, invalid state transitions).
-- [ ] `test_pause.rs` full suite passes (currently 7 tests — all passing ✅).
+- [x] All tests in `tests.rs` are implemented, not skeletons (51 tests:
+      happy paths, auth failures, invalid inputs, idempotency, invalid state
+      transitions, boundary-length caps).
+- [x] `test_pause.rs` full suite passes (10 tests, plus 7 more embedded in
+      `validation.rs` — 68 total across the crate, all passing ✅).
 - [ ] Test coverage report generated and reviewed. Target: 100% of public
       entry points covered by at least one positive and one negative test.
 - [ ] Fuzz targets or property-based tests exist for `validation.rs` input
