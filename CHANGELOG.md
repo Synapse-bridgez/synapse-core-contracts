@@ -31,6 +31,15 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Fixed
 
+- **Security:** `register_callback` no longer overwrites an existing
+  transaction record on a late replay. Previously, once the ~24h idempotency
+  key TTL expired, a replay with a different `idempotency_key` but the same
+  `transaction_id` would silently reset a `Completed`/`Failed` transaction
+  back to `Pending` and wipe its `stellar_tx_hash`/`failure_reason`. Fixes
+  THREAT_MODEL.md finding F-07 (High severity). `register_callback` now
+  returns `DuplicateRequest` for any `transaction_id` that already has a
+  stored record, independent of idempotency-key state. Callers that relied
+  on the old (buggy) re-registration behavior will now get an error instead.
 - `complete_transaction` / `fail_transaction` now enforce the `stellar_tx_hash`
   (72 B) and `failure_reason` (64 B) length caps documented in
   [`COST_MODEL.md` §6](./COST_MODEL.md#6-string-length-cap-impact-enforced).
