@@ -45,10 +45,10 @@ supported.
 | [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
-| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Locked schema** (emitter scaffold) |
-| [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Locked schema** (emitter scaffold) |
-| [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Locked schema** (emitter scaffold) |
-| [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `transfer_admin` | **Locked schema** (emitter scaffold) |
+| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Live** |
+| [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
+| [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
+| [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `transfer_admin` | **Live** |
 | [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
@@ -104,7 +104,7 @@ Field tables list fields in **declaration / XDR order**. Do not reorder.
 | **Struct** | `EventStatusChanged` |
 | **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction` |
 | **When** | Every successful status-machine transition |
-| **Status** | Locked schema (scaffold) |
+| **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -127,7 +127,7 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | **Struct** | `EventTransactionCompleted` |
 | **Emitted by** | `complete_transaction` |
 | **When** | Terminal success after on-chain settlement is recorded |
-| **Status** | Locked schema (scaffold) |
+| **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -143,7 +143,7 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | **Struct** | `EventTransactionFailed` |
 | **Emitted by** | `fail_transaction` |
 | **When** | Terminal failure |
-| **Status** | Locked schema (scaffold) |
+| **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -159,7 +159,7 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | **Struct** | `EventAdminTransferred` |
 | **Emitted by** | `transfer_admin` |
 | **When** | Admin role successfully transferred |
-| **Status** | Locked schema (scaffold) |
+| **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|

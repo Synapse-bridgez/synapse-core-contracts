@@ -37,6 +37,12 @@ separately from general code changes. Full topic/field contracts live in
   The validators existed but were never wired into the handlers, so an
   oversized value from a compromised or buggy relay could bypass the
   documented rent-cost protection.
+- `EVENTS.md` listed `EventStatusChanged`, `EventTransactionCompleted`,
+  `EventTransactionFailed`, and `EventAdminTransferred` as "Locked schema
+  (emitter scaffold)". All four have been wired into `src/lib.rs` and covered
+  by tests since before this release; the doc now says **Live** to match.
+  Document-only correction — no behaviour change, no version bump per
+  [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy).
 
 ---
 
