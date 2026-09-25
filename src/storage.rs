@@ -14,7 +14,7 @@
 
 use soroban_sdk::{Address, Env, String};
 
-use crate::types::{ContractError, StorageKey, Transaction};
+use crate::types::{ContractError, RelaySignerSet, StorageKey, Transaction};
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
@@ -77,18 +77,75 @@ impl StorageClient {
     // ── Relay signer ──────────────────────────────────────────────────────────
 
     /// Read the trusted relay signer address.
+    ///
+    /// With an N-of-M set this is the primary (first) signer.
     pub fn get_relay_signer(env: &Env) -> Result<Address, ContractError> {
-        env.storage()
-            .persistent()
-            .get(&StorageKey::RelaySigner)
+        Self::get_relay_signer_set(env)?
+            .signers
+            .get(0)
             .ok_or(ContractError::NotInitialised)
     }
 
-    /// Persist the relay signer address.
+    /// Persist the relay signer address (replaces the primary signer when a
+    /// signer set exists).
     pub fn set_relay_signer(env: &Env, signer: &Address) {
         env.storage()
             .persistent()
             .set(&StorageKey::RelaySigner, signer);
+        if let Some(mut set) = Self::get_relay_signer_set_opt(env) {
+            set.signers.set(0, signer.clone());
+            Self::set_relay_signer_set(env, &set);
+        }
+    }
+
+    fn get_relay_signer_set_opt(env: &Env) -> Option<RelaySignerSet> {
+        env.storage().persistent().get(&StorageKey::RelaySignerSet)
+    }
+
+    /// Read the relay signer set. Pre-N-of-M deployments migrate lazily:
+    /// the legacy single `RelaySigner` becomes `threshold = 1, signers = [it]`.
+    pub fn get_relay_signer_set(env: &Env) -> Result<RelaySignerSet, ContractError> {
+        if let Some(set) = Self::get_relay_signer_set_opt(env) {
+            return Ok(set);
+        }
+        let legacy: Address = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::RelaySigner)
+            .ok_or(ContractError::NotInitialised)?;
+        Ok(RelaySignerSet {
+            signers: soroban_sdk::vec![env, legacy],
+            threshold: 1,
+        })
+    }
+
+    /// Persist the relay signer set.
+    pub fn set_relay_signer_set(env: &Env, set: &RelaySignerSet) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::RelaySignerSet, set);
+    }
+
+    /// Record a signer's approval at the current ledger.
+    pub fn set_relay_approval(env: &Env, signer: &Address) {
+        env.storage().temporary().set(
+            &StorageKey::RelayApproval(signer.clone()),
+            &env.ledger().sequence(),
+        );
+    }
+
+    /// Ledger at which `signer` last approved, if any.
+    pub fn get_relay_approval(env: &Env, signer: &Address) -> Option<u32> {
+        env.storage()
+            .temporary()
+            .get(&StorageKey::RelayApproval(signer.clone()))
+    }
+
+    /// Consume (remove) `signer`'s approval.
+    pub fn clear_relay_approval(env: &Env, signer: &Address) {
+        env.storage()
+            .temporary()
+            .remove(&StorageKey::RelayApproval(signer.clone()));
     }
 
     // ── Admin transfer (two-step) ─────────────────────────────────────────────

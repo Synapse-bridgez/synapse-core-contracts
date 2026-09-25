@@ -116,3 +116,52 @@ fn route_emits_forwarding_intent_last() {
     assert_eq!(evs.len(), 3);
     let _ = complete;
 }
+
+// ─── #65 relay signer set ─────────────────────────────────────────────────────
+
+#[test]
+fn migrated_single_signer_is_one_of_one() {
+    let (env, client, _admin) = setup();
+    let set = client.relay_signer_set();
+    assert_eq!(set.threshold, 1);
+    assert_eq!(set.signers.len(), 1);
+    assert_eq!(set.signers.get(0).unwrap(), client.relay_signer());
+    let _ = env;
+}
+
+#[test]
+fn quorum_met_allowed_one_short_rejected() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    let primary = client.relay_signer();
+    let s2 = Address::generate(&env);
+    client.add_relay_signer(&s2);
+    client.set_relay_threshold(&2);
+    assert_eq!(
+        client.try_start_processing(&a, &primary).unwrap_err().unwrap(),
+        ContractError::QuorumNotMet
+    );
+    client.approve_relay_call(&s2);
+    client.start_processing(&a, &primary);
+    assert_eq!(client.get_status(&a), TransactionStatus::Processing);
+    let _ = admin;
+}
+
+#[test]
+fn threshold_bounds_enforced() {
+    let (env, client, _admin) = setup();
+    assert_eq!(
+        client.try_set_relay_threshold(&0).unwrap_err().unwrap(),
+        ContractError::InvalidThreshold
+    );
+    assert_eq!(
+        client.try_set_relay_threshold(&2).unwrap_err().unwrap(),
+        ContractError::InvalidThreshold
+    );
+    let primary = client.relay_signer();
+    assert_eq!(
+        client.try_remove_relay_signer(&primary).unwrap_err().unwrap(),
+        ContractError::InvalidThreshold
+    );
+    let _ = env;
+}

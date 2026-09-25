@@ -45,7 +45,7 @@ use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, RelaySignerSet, Transaction, TransactionStatus, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -115,8 +115,7 @@ impl SynapseCoreContract {
         }
 
         // Only the trusted relay signer may forward Anchor Platform callbacks.
-        let relay = StorageClient::get_relay_signer(&env)?;
-        relay.require_auth();
+        AdminClient::require_relay_quorum(&env, None)?;
 
         Validator::validate_payload(&env, &payload)?;
 
@@ -437,6 +436,83 @@ impl SynapseCoreContract {
         let old_signer = StorageClient::get_relay_signer(&env)?;
         StorageClient::set_relay_signer(&env, &new_signer);
         EventEmitter::relay_signer_rotated(&env, &old_signer, &new_signer);
+        Ok(())
+    }
+
+    // ── Relay signer set (N-of-M) ─────────────────────────────────────────────
+
+    /// Return the relay signer set (lazily migrated from a legacy single
+    /// signer as `threshold = 1`).
+    pub fn relay_signer_set(env: Env) -> Result<RelaySignerSet, ContractError> {
+        StorageClient::get_relay_signer_set(&env)
+    }
+
+    /// Register the calling relay signer's approval for the next gated relay
+    /// call (multi-invocation quorum pattern; valid for a short ledger window
+    /// and consumed by the gated call). `signer` must be a set member.
+    pub fn approve_relay_call(env: Env, signer: Address) -> Result<(), ContractError> {
+        let set = StorageClient::get_relay_signer_set(&env)?;
+        if !set.signers.contains(&signer) {
+            return Err(ContractError::NotRelaySigner);
+        }
+        signer.require_auth();
+        StorageClient::set_relay_approval(&env, &signer);
+        Ok(())
+    }
+
+    /// Add a signer to the relay set. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerAdded`].
+    pub fn add_relay_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        if set.signers.contains(&signer) {
+            return Err(ContractError::SignerAlreadyExists);
+        }
+        set.signers.push_back(signer.clone());
+        StorageClient::set_relay_signer_set(&env, &set);
+        EventEmitter::relay_signer_added(&env, &signer);
+        Ok(())
+    }
+
+    /// Remove a signer from the relay set. Admin-gated; rejected if it would
+    /// leave fewer signers than the current threshold.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerRemoved`].
+    pub fn remove_relay_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        let idx = set
+            .signers
+            .first_index_of(&signer)
+            .ok_or(ContractError::SignerNotFound)?;
+        if set.signers.len() - 1 < set.threshold {
+            return Err(ContractError::InvalidThreshold);
+        }
+        set.signers.remove(idx);
+        StorageClient::set_relay_signer_set(&env, &set);
+        StorageClient::clear_relay_approval(&env, &signer);
+        EventEmitter::relay_signer_removed(&env, &signer);
+        Ok(())
+    }
+
+    /// Change the quorum threshold. Admin-gated; must satisfy
+    /// `1 <= threshold <= signers.len()`.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelayThresholdChanged`].
+    pub fn set_relay_threshold(env: Env, threshold: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        if threshold == 0 || threshold > set.signers.len() {
+            return Err(ContractError::InvalidThreshold);
+        }
+        let old = set.threshold;
+        set.threshold = threshold;
+        StorageClient::set_relay_signer_set(&env, &set);
+        EventEmitter::relay_threshold_changed(&env, old, threshold);
         Ok(())
     }
 

@@ -160,6 +160,28 @@ pub struct EventForwardingIntent {
     pub next_phase: u32,
 }
 
+/// Emitted when a signer is added to the relay signer set.
+#[contracttype]
+pub struct EventRelaySignerAdded {
+    pub signer: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted when a signer is removed from the relay signer set.
+#[contracttype]
+pub struct EventRelaySignerRemoved {
+    pub signer: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted when the relay quorum threshold changes.
+#[contracttype]
+pub struct EventRelayThresholdChanged {
+    pub old_threshold: u32,
+    pub new_threshold: u32,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -273,6 +295,40 @@ impl EventEmitter {
             EventForwardingIntent {
                 tx_id: tx_id.clone(),
                 next_phase,
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerAdded`].
+    pub fn relay_signer_added(env: &Env, signer: &soroban_sdk::Address) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_add")),
+            EventRelaySignerAdded {
+                signer: signer.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerRemoved`].
+    pub fn relay_signer_removed(env: &Env, signer: &soroban_sdk::Address) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_rm")),
+            EventRelaySignerRemoved {
+                signer: signer.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelayThresholdChanged`].
+    pub fn relay_threshold_changed(env: &Env, old_threshold: u32, new_threshold: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_thr")),
+            EventRelayThresholdChanged {
+                old_threshold,
+                new_threshold,
+                ledger: env.ledger().sequence(),
             },
         );
     }

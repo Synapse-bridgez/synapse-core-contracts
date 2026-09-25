@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, String, Vec};
 
 /// Current on-chain storage schema version.
 ///
@@ -176,6 +176,21 @@ pub enum StorageKey {
     MergedInto(String),
     /// Per-transaction forwarding route (`next_phase`); absent = no forwarding.
     ForwardRoute(String),
+    /// Singleton: N-of-M relay signer set ([`RelaySignerSet`]). Absent on
+    /// pre-#65 deployments; the legacy `RelaySigner` key is then migrated
+    /// lazily to `threshold = 1, signers = [relay_signer]`.
+    RelaySignerSet,
+    /// Temporary: a signer's standing approval for the next gated relay call.
+    RelayApproval(Address),
+}
+
+/// N-of-M relay signer set: `threshold` distinct members must co-authorise
+/// each relay-gated call.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySignerSet {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -250,4 +265,14 @@ pub enum ContractError {
     AlreadyMerged = 101,
     /// The duplicate is `Completed` (settled); merging would be lossy.
     DuplicateSettled = 102,
+
+    // ── Relay signer set (110+ range) ───────────────────────────────────────
+    /// Threshold is 0 or exceeds the number of signers.
+    InvalidThreshold = 110,
+    /// Signer is already a member of the set.
+    SignerAlreadyExists = 111,
+    /// Signer is not a member of the set.
+    SignerNotFound = 112,
+    /// Fewer than `threshold` distinct signers authorised the call.
+    QuorumNotMet = 113,
 }
