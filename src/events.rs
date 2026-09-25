@@ -120,6 +120,15 @@ pub struct EventStandbySignerSet {
     pub ledger: u32,
 }
 
+/// Emitted when a tag is appended to a transaction.
+#[contracttype]
+pub struct EventTransactionTagged {
+    pub tx_id: String,
+    pub tag: String,
+    pub tag_count: u32,
+    pub ledger: u32,
+}
+
 /// Emitted when the admin role is transferred.
 #[contracttype]
 pub struct EventAdminTransferred {
@@ -407,6 +416,19 @@ impl EventEmitter {
             (symbol_short!("synapse"), symbol_short!("standby")),
             EventStandbySignerSet {
                 signer: signer.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionTagged`].
+    pub fn transaction_tagged(env: &Env, tx_id: &String, tag: &String, tag_count: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("tagged")),
+            EventTransactionTagged {
+                tx_id: tx_id.clone(),
+                tag: tag.clone(),
+                tag_count,
                 ledger: env.ledger().sequence(),
             },
         );

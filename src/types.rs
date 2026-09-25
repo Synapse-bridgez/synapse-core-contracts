@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, Address, String};
+use soroban_sdk::{contracterror, contracttype, Address, String, Vec};
 
 /// Current on-chain storage schema version.
 ///
@@ -118,6 +118,10 @@ pub struct Transaction {
     /// `reassign_relay_signer_for_transaction`. `None` means the global
     /// relay signer applies.
     pub assigned_signer: Option<Address>,
+
+    /// Append-only operational tags (bounded count and length; see
+    /// `validation.rs`).
+    pub tags: Vec<String>,
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -276,4 +280,10 @@ pub enum ContractError {
     // ── Signer reassignment ─────────────────────────────────────────────────
     /// `new_signer` is neither the relay signer nor the approved standby.
     SignerNotTrusted = 81,
+
+    // ── Tagging ─────────────────────────────────────────────────────────────
+    /// The transaction already carries the maximum number of tags.
+    TooManyTags = 90,
+    /// The tag is empty.
+    EmptyTag = 91,
 }

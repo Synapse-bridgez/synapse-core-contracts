@@ -37,7 +37,7 @@ mod test_pause;
 #[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
@@ -150,6 +150,7 @@ impl SynapseCoreContract {
             registered_at: env.ledger().timestamp(),
             settled_amount: None,
             assigned_signer: None,
+            tags: Vec::new(&env),
         };
 
         StorageClient::save_transaction(&env, &tx);
@@ -304,6 +305,33 @@ impl SynapseCoreContract {
 
         StorageClient::save_transaction(&env, &tx);
         EventEmitter::transaction_reassigned(&env, &tx_id, &old_signer, &new_signer);
+        Ok(())
+    }
+
+    /// Append an operational tag to a transaction. Admin or relay signer.
+    ///
+    /// Append-only; count and per-tag length are capped in `validation.rs`.
+    ///
+    /// # Errors
+    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
+    /// - [`ContractError::TooManyTags`] once the per-transaction cap is hit.
+    /// - [`ContractError::StringTooLong`] / [`ContractError::EmptyTag`] for a bad tag.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionTagged`].
+    pub fn add_transaction_tag(
+        env: Env,
+        tx_id: String,
+        tag: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        Validator::validate_tag(&tag, tx.tags.len())?;
+        tx.tags.push_back(tag.clone());
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::transaction_tagged(&env, &tx_id, &tag, tx.tags.len());
         Ok(())
     }
 
