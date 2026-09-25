@@ -391,6 +391,52 @@ impl SynapseCoreContract {
         Ok(())
     }
 
+    // ── Replay-protected (nonce) variants of privileged calls ────────────────
+
+    /// Return the next expected nonce for `addr` (0 if never used).
+    pub fn get_nonce(env: Env, addr: Address) -> u64 {
+        StorageClient::get_nonce(&env, &addr)
+    }
+
+    /// Nonce-checked [`Self::propose_admin`]. The admin's nonce must equal
+    /// [`Self::get_nonce`]; it is incremented on success. The plain variants
+    /// are retained for backward compatibility (see CHANGELOG).
+    pub fn propose_admin_with_nonce(
+        env: Env,
+        new_admin: Address,
+        nonce: u64,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        AdminClient::consume_nonce(&env, &admin, nonce)?;
+        Self::propose_admin(env, new_admin)
+    }
+
+    /// Nonce-checked [`Self::pause`].
+    pub fn pause_with_nonce(env: Env, nonce: u64) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        AdminClient::consume_nonce(&env, &admin, nonce)?;
+        Self::pause(env)
+    }
+
+    /// Nonce-checked [`Self::unpause`].
+    pub fn unpause_with_nonce(env: Env, nonce: u64) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        AdminClient::consume_nonce(&env, &admin, nonce)?;
+        Self::unpause(env)
+    }
+
+    /// Nonce-checked status transition start (`caller` is admin or relay).
+    pub fn start_processing_with_nonce(
+        env: Env,
+        tx_id: String,
+        caller: Address,
+        nonce: u64,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        AdminClient::consume_nonce(&env, &caller, nonce)?;
+        Self::start_processing(env, tx_id, caller)
+    }
+
     // ── Contract upgrade ───────────────────────────────────────────────────────
 
     /// Replace the contract WASM in-place.

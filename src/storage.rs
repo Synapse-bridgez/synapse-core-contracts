@@ -113,6 +113,21 @@ impl StorageClient {
             .remove(&StorageKey::PendingAdminExpiry);
     }
 
+    /// Next expected nonce for `addr` (0 if never used).
+    pub fn get_nonce(env: &Env, addr: &Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Nonce(addr.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Persist the next expected nonce for `addr`.
+    pub fn set_nonce(env: &Env, addr: &Address, next: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Nonce(addr.clone()), &next);
+    }
+
     /// Read the optional expiry timestamp of the pending admin proposal.
     pub fn get_pending_admin_expiry(env: &Env) -> Option<u64> {
         env.storage()
