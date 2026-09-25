@@ -108,6 +108,30 @@ impl StorageClient {
     /// Clear the pending admin nominee after a transfer is accepted.
     pub fn clear_pending_admin(env: &Env) {
         env.storage().persistent().remove(&StorageKey::PendingAdmin);
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::PendingAdminExpiry);
+    }
+
+    /// Read the optional expiry timestamp of the pending admin proposal.
+    pub fn get_pending_admin_expiry(env: &Env) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingAdminExpiry)
+    }
+
+    /// Set (or clear, with `None`) the pending admin proposal expiry.
+    pub fn set_pending_admin_expiry(env: &Env, expiry: Option<u64>) {
+        match expiry {
+            Some(t) => env
+                .storage()
+                .persistent()
+                .set(&StorageKey::PendingAdminExpiry, &t),
+            None => env
+                .storage()
+                .persistent()
+                .remove(&StorageKey::PendingAdminExpiry),
+        }
     }
 
     // ── Schema version ────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, String};
 
 /// Current on-chain storage schema version.
 ///
@@ -172,6 +172,14 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Optional expiry (ledger timestamp, seconds) of the pending admin proposal.
+    PendingAdminExpiry,
+    /// Per-address replay-protection nonce (next expected value).
+    Nonce(Address),
+    /// Per-relay-signer allowlist of anchor instance IDs (empty/absent = all).
+    RelayAnchors(Address),
+    /// Singleton: address proposed as the next relay signer.
+    PendingRelaySigner,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -238,4 +246,12 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
+    /// The pending admin proposal has passed its expiry timestamp (ADR-0002 amendment).
+    AdminProposalExpired = 200,
+    /// A supplied nonce did not match the caller's next expected nonce.
+    InvalidNonce = 210,
+    /// The relay signer is not allowlisted for the payload's anchor instance ID.
+    AnchorNotAllowed = 220,
+    /// `accept_relay_signer` was called with no pending relay-signer proposal.
+    NoPendingRelaySigner = 230,
 }

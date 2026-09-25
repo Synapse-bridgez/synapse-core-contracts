@@ -307,7 +307,41 @@ impl SynapseCoreContract {
         let current_admin = AdminClient::require_admin(&env)?;
         Validator::validate_admin_nominee(&env, &new_admin)?;
         StorageClient::set_pending_admin(&env, &new_admin);
+        StorageClient::set_pending_admin_expiry(&env, None);
         EventEmitter::admin_transfer_proposed(&env, &current_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Like [`Self::propose_admin`] but the proposal is only acceptable up to
+    /// and including `expiry` (ledger timestamp, seconds).
+    ///
+    /// # Errors
+    /// - [`ContractError::AdminProposalExpired`] if `expiry` is already in the past.
+    pub fn propose_admin_with_expiry(
+        env: Env,
+        new_admin: Address,
+        expiry: u64,
+    ) -> Result<(), ContractError> {
+        if expiry < env.ledger().timestamp() {
+            return Err(ContractError::AdminProposalExpired);
+        }
+        Self::propose_admin(env.clone(), new_admin)?;
+        StorageClient::set_pending_admin_expiry(&env, Some(expiry));
+        Ok(())
+    }
+
+    /// Withdraw a pending admin proposal. Current-admin-only.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingAdminTransfer`] if nothing is pending
+    ///   (e.g. it was already accepted).
+    pub fn cancel_admin_proposal(env: Env, caller: Address) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::Unauthorised);
+        }
+        StorageClient::get_pending_admin(&env).ok_or(ContractError::NoPendingAdminTransfer)?;
+        StorageClient::clear_pending_admin(&env);
         Ok(())
     }
 
@@ -329,6 +363,13 @@ impl SynapseCoreContract {
             return Err(ContractError::Unauthorised);
         }
         caller.require_auth();
+
+        // Expiry is inclusive: accepting at exactly `expiry` still succeeds.
+        if let Some(expiry) = StorageClient::get_pending_admin_expiry(&env) {
+            if env.ledger().timestamp() > expiry {
+                return Err(ContractError::AdminProposalExpired);
+            }
+        }
 
         let old_admin = StorageClient::get_admin(&env)?;
         StorageClient::set_admin(&env, &caller);
