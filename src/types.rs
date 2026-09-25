@@ -17,6 +17,11 @@ use soroban_sdk::{contracterror, contracttype, Address, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Contract-wide default max amount (stroops) for anchors (keyed by
+/// `asset_issuer`) with no explicit ceiling: 10^15 stroops (100M units at 7
+/// decimals). Admin may override via `set_default_amount_ceiling`.
+pub const DEFAULT_AMOUNT_CEILING: i128 = 1_000_000_000_000_000;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -194,6 +199,8 @@ pub enum StorageKey {
     PendingCount(Address),
     TxSigner(String),
     Disputed(String),
+    AnchorCeiling(String),
+    DefaultCeiling,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -270,4 +277,8 @@ pub enum ContractError {
     AlreadyDisputed = 80,
     /// Transaction is not under dispute.
     NotDisputed = 81,
+
+    // ── Amount ceilings ─────────────────────────────────────────────────────
+    /// Amount exceeds the anchor's (or the default) ceiling.
+    AmountCeilingExceeded = 90,
 }

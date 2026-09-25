@@ -437,6 +437,34 @@ impl SynapseCoreContract {
         StorageClient::get_pending_count(&env, &signer)
     }
 
+    /// Set the max registerable amount for an anchor (identified by the
+    /// payload's `asset_issuer`). Admin-gated. Applies to future
+    /// registrations only; existing transactions are unaffected.
+    pub fn set_anchor_amount_ceiling(
+        env: Env,
+        anchor: String,
+        ceiling: i128,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        Validator::validate_amount(ceiling)?;
+        StorageClient::set_anchor_ceiling(&env, &anchor, ceiling);
+        Ok(())
+    }
+
+    /// Set the default ceiling for anchors with no explicit entry (initially
+    /// [`types::DEFAULT_AMOUNT_CEILING`]). Admin-gated.
+    pub fn set_default_amount_ceiling(env: Env, ceiling: i128) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        Validator::validate_amount(ceiling)?;
+        StorageClient::set_default_ceiling(&env, ceiling);
+        Ok(())
+    }
+
+    /// Return the effective amount ceiling for `anchor`.
+    pub fn get_amount_ceiling(env: Env, anchor: String) -> i128 {
+        StorageClient::get_amount_ceiling(&env, &anchor)
+    }
+
     /// Rotate the trusted relay signer address.
     ///
     /// # Events

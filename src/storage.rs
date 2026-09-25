@@ -15,7 +15,7 @@
 use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::types::{
-    ContractError, StorageKey, Transaction, TransactionStatus, TransitionRecord, MAX_HISTORY_LEN,
+    DEFAULT_AMOUNT_CEILING, ContractError, StorageKey, Transaction, TransactionStatus, TransitionRecord, MAX_HISTORY_LEN,
 };
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
@@ -277,6 +277,30 @@ impl StorageClient {
         } else {
             env.storage().persistent().remove(&key);
         }
+    }
+
+    // ── Amount ceilings ───────────────────────────────────────────────────────
+
+    /// Effective ceiling for `anchor`: explicit entry, else the default.
+    pub fn get_amount_ceiling(env: &Env, anchor: &String) -> i128 {
+        let p = env.storage().persistent();
+        p.get(&StorageKey::AnchorCeiling(anchor.clone()))
+            .or_else(|| p.get(&StorageKey::DefaultCeiling))
+            .unwrap_or(DEFAULT_AMOUNT_CEILING)
+    }
+
+    /// Set an explicit ceiling for `anchor`.
+    pub fn set_anchor_ceiling(env: &Env, anchor: &String, ceiling: i128) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AnchorCeiling(anchor.clone()), &ceiling);
+    }
+
+    /// Set the default ceiling for anchors without an explicit entry.
+    pub fn set_default_ceiling(env: &Env, ceiling: i128) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::DefaultCeiling, &ceiling);
     }
 
     // ── Idempotency keys ──────────────────────────────────────────────────────
