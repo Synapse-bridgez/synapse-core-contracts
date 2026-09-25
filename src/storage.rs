@@ -12,7 +12,7 @@
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::types::{ContractError, StorageKey, Transaction};
 
@@ -126,6 +126,21 @@ impl StorageClient {
         env.storage()
             .persistent()
             .set(&StorageKey::Nonce(addr.clone()), &next);
+    }
+
+    /// Allowed anchor/issuer IDs for `signer`; empty means unrestricted.
+    pub fn get_relay_anchors(env: &Env, signer: &Address) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::RelayAnchors(signer.clone()))
+            .unwrap_or(Vec::new(env))
+    }
+
+    /// Replace the anchor allowlist for `signer`.
+    pub fn set_relay_anchors(env: &Env, signer: &Address, anchors: &Vec<String>) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::RelayAnchors(signer.clone()), anchors);
     }
 
     /// Read the optional expiry timestamp of the pending admin proposal.

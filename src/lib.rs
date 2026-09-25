@@ -37,7 +37,7 @@ mod test_pause;
 #[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
@@ -115,6 +115,14 @@ impl SynapseCoreContract {
         // Only the trusted relay signer may forward Anchor Platform callbacks.
         let relay = StorageClient::get_relay_signer(&env)?;
         relay.require_auth();
+
+        // Anchor allowlist: an empty allowlist means "all anchors" (backward
+        // compatible default, weaker; tighten post-deployment). The anchor
+        // identity is the payload's `asset_issuer`.
+        let allowed = StorageClient::get_relay_anchors(&env, &relay);
+        if !allowed.is_empty() && !allowed.contains(&payload.asset_issuer) {
+            return Err(ContractError::AnchorNotAllowed);
+        }
 
         Validator::validate_payload(&env, &payload)?;
 
@@ -389,6 +397,26 @@ impl SynapseCoreContract {
         StorageClient::set_relay_signer(&env, &new_signer);
         EventEmitter::relay_signer_rotated(&env, &old_signer, &new_signer);
         Ok(())
+    }
+
+    /// Set the anchor/issuer IDs `signer` may register callbacks for. Admin only.
+    ///
+    /// An empty list means unrestricted (all anchors) - the migration-friendly
+    /// default. Callbacks outside a non-empty list fail with
+    /// [`ContractError::AnchorNotAllowed`].
+    pub fn set_relay_anchors(
+        env: Env,
+        signer: Address,
+        anchors: Vec<String>,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_relay_anchors(&env, &signer, &anchors);
+        Ok(())
+    }
+
+    /// Return the anchor allowlist for `signer` (empty = unrestricted).
+    pub fn relay_anchors(env: Env, signer: Address) -> Vec<String> {
+        StorageClient::get_relay_anchors(&env, &signer)
     }
 
     // ── Replay-protected (nonce) variants of privileged calls ────────────────
