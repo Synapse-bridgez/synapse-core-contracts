@@ -184,6 +184,20 @@ impl StorageClient {
             .set(&StorageKey::ExpiryWindow, &seconds);
     }
 
+    // ── Standby signer ────────────────────────────────────────────────────────
+
+    /// Read the admin-approved standby relay signer, if any.
+    pub fn get_standby_signer(env: &Env) -> Option<Address> {
+        env.storage().persistent().get(&StorageKey::StandbySigner)
+    }
+
+    /// Persist the admin-approved standby relay signer.
+    pub fn set_standby_signer(env: &Env, signer: &Address) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::StandbySigner, signer);
+    }
+
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
     /// Return the ledger sequence at which an idempotency key was first stored,

@@ -104,6 +104,22 @@ pub struct EventTransactionPartiallyCompleted {
     pub ledger: u32,
 }
 
+/// Emitted when an in-flight transaction is rebound to a different relay signer.
+#[contracttype]
+pub struct EventTransactionReassigned {
+    pub tx_id: String,
+    pub old_signer: soroban_sdk::Address,
+    pub new_signer: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted when the admin-approved standby signer is set.
+#[contracttype]
+pub struct EventStandbySignerSet {
+    pub signer: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 /// Emitted when the admin role is transferred.
 #[contracttype]
 pub struct EventAdminTransferred {
@@ -362,6 +378,35 @@ impl EventEmitter {
                 original_amount,
                 settled_amount,
                 stellar_tx_hash: stellar_tx_hash.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionReassigned`].
+    pub fn transaction_reassigned(
+        env: &Env,
+        tx_id: &String,
+        old_signer: &soroban_sdk::Address,
+        new_signer: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("reassign")),
+            EventTransactionReassigned {
+                tx_id: tx_id.clone(),
+                old_signer: old_signer.clone(),
+                new_signer: new_signer.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventStandbySignerSet`].
+    pub fn standby_signer_set(env: &Env, signer: &soroban_sdk::Address) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("standby")),
+            EventStandbySignerSet {
+                signer: signer.clone(),
                 ledger: env.ledger().sequence(),
             },
         );

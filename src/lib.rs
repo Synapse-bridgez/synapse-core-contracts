@@ -149,6 +149,7 @@ impl SynapseCoreContract {
             failure_reason: String::from_str(&env, ""),
             registered_at: env.ledger().timestamp(),
             settled_amount: None,
+            assigned_signer: None,
         };
 
         StorageClient::save_transaction(&env, &tx);
@@ -191,10 +192,10 @@ impl SynapseCoreContract {
         stellar_tx_hash: String,
         caller: Address,
     ) -> Result<(), ContractError> {
-        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
         Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        AdminClient::assert_can_drive_tx(&env, &caller, &tx.assigned_signer)?;
         if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -226,10 +227,10 @@ impl SynapseCoreContract {
         stellar_tx_hash: String,
         caller: Address,
     ) -> Result<(), ContractError> {
-        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
         Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        AdminClient::assert_can_drive_tx(&env, &caller, &tx.assigned_signer)?;
         if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -249,6 +250,60 @@ impl SynapseCoreContract {
             settled_amount,
             &stellar_tx_hash,
         );
+        Ok(())
+    }
+
+    /// Approve a standby relay signer that in-flight transactions may be
+    /// reassigned to. Admin-gated.
+    ///
+    /// TODO: superseded by the N-of-M relay-signer set once that lands.
+    pub fn set_standby_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_standby_signer(&env, &signer);
+        EventEmitter::standby_signer_set(&env, &signer);
+        Ok(())
+    }
+
+    /// Rebind one in-flight (`Pending`/`Processing`) transaction's
+    /// authorization to `new_signer`. Admin-gated recovery path for a revoked
+    /// or compromised signer; does not touch global relay-signer state.
+    ///
+    /// `new_signer` must be the current relay signer or the admin-approved
+    /// standby (TODO: gate on the signer set once it exists).
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStatusTransition`] if the transaction is terminal.
+    /// - [`ContractError::SignerNotTrusted`] if `new_signer` is not trusted.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionReassigned`].
+    pub fn reassign_relay_signer_for_transaction(
+        env: Env,
+        tx_id: String,
+        new_signer: Address,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        let admin = StorageClient::get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::Unauthorised);
+        }
+        caller.require_auth();
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        let relay = StorageClient::get_relay_signer(&env)?;
+        let standby = StorageClient::get_standby_signer(&env);
+        if new_signer != relay && standby.as_ref() != Some(&new_signer) {
+            return Err(ContractError::SignerNotTrusted);
+        }
+        let old_signer = tx.assigned_signer.clone().unwrap_or(relay);
+        tx.assigned_signer = Some(new_signer.clone());
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::transaction_reassigned(&env, &tx_id, &old_signer, &new_signer);
         Ok(())
     }
 
