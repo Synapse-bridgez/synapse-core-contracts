@@ -140,6 +140,17 @@ pub struct EventPauseToggled {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::merge_duplicate_transactions`] when an
+/// admin links a duplicate record to its canonical original (break-glass).
+#[contracttype]
+pub struct EventTransactionsMerged {
+    pub canonical_tx_id: String,
+    pub duplicate_tx_id: String,
+    pub admin: soroban_sdk::Address,
+    pub reason: String,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -221,6 +232,26 @@ impl EventEmitter {
             EventRelaySignerRotated {
                 old_signer: old_signer.clone(),
                 new_signer: new_signer.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionsMerged`].
+    pub fn transactions_merged(
+        env: &Env,
+        canonical_tx_id: &String,
+        duplicate_tx_id: &String,
+        admin: &soroban_sdk::Address,
+        reason: &String,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("merged")),
+            EventTransactionsMerged {
+                canonical_tx_id: canonical_tx_id.clone(),
+                duplicate_tx_id: duplicate_tx_id.clone(),
+                admin: admin.clone(),
+                reason: reason.clone(),
                 ledger: env.ledger().sequence(),
             },
         );

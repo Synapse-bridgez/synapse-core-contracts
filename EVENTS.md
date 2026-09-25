@@ -324,3 +324,8 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 - Status enum: [`src/types.rs`](./src/types.rs) (`TransactionStatus`)
 - Upgradability / admin trust: [`DECISIONS.md`](./DECISIONS.md)
 - Version probe: `SynapseCoreContract::version`
+
+## Addendum: `merged` event
+
+`EventTransactionsMerged { canonical_tx_id, duplicate_tx_id, admin, reason, ledger }`,
+topic `merged`, emitted once by `merge_duplicate_transactions` (break-glass admin action).

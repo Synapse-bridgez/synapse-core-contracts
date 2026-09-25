@@ -35,6 +35,8 @@ mod validation;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
+mod test_recovery;
+#[cfg(test)]
 mod tests;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
@@ -237,6 +239,58 @@ impl SynapseCoreContract {
         Ok(())
     }
 
+    /// **Break-glass admin recovery** (not a routine operation): link
+    /// `duplicate_tx_id` to its canonical original after a replay slipped
+    /// through as a separate `transaction_id`.
+    ///
+    /// The duplicate is never deleted: its data stays queryable, it gets a
+    /// `MergedInto(canonical_tx_id)` marker (see [`Self::get_merged_into`]),
+    /// and its record is moved to `Failed` with `failure_reason = "merged"`
+    /// so `get_transaction` cannot pass for an active record. `reason` is
+    /// the evidence-backed justification and is carried in the event.
+    ///
+    /// # Errors
+    /// - [`ContractError::MergeSelf`] if both ids are equal.
+    /// - [`ContractError::AlreadyMerged`] if either side is already merged.
+    /// - [`ContractError::DuplicateSettled`] if the duplicate is `Completed`.
+    /// - [`ContractError::TransactionNotFound`] if either record is missing.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionsMerged`].
+    pub fn merge_duplicate_transactions(
+        env: Env,
+        canonical_tx_id: String,
+        duplicate_tx_id: String,
+        caller: Address,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::Unauthorised);
+        }
+        if canonical_tx_id == duplicate_tx_id {
+            return Err(ContractError::MergeSelf);
+        }
+        Validator::validate_failure_reason(&reason)?;
+        StorageClient::get_transaction(&env, &canonical_tx_id)?;
+        let mut dup = StorageClient::get_transaction(&env, &duplicate_tx_id)?;
+        if StorageClient::get_merged_into(&env, &duplicate_tx_id).is_some()
+            || StorageClient::get_merged_into(&env, &canonical_tx_id).is_some()
+        {
+            return Err(ContractError::AlreadyMerged);
+        }
+        if dup.status == TransactionStatus::Completed {
+            return Err(ContractError::DuplicateSettled);
+        }
+        dup.status = TransactionStatus::Failed;
+        dup.failure_reason = String::from_str(&env, "merged");
+        dup.updated_at_ledger = env.ledger().sequence();
+        StorageClient::save_transaction(&env, &dup);
+        StorageClient::set_merged_into(&env, &duplicate_tx_id, &canonical_tx_id);
+        EventEmitter::transactions_merged(&env, &canonical_tx_id, &duplicate_tx_id, &admin, &reason);
+        Ok(())
+    }
+
     // ── Read-only queries ─────────────────────────────────────────────────────
 
     /// Return the [`Transaction`] for the given `tx_id`, or
@@ -250,6 +304,12 @@ impl SynapseCoreContract {
     /// Return the current [`TransactionStatus`] without fetching the full record.
     pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
         StorageClient::get_transaction(&env, &tx_id).map(|tx| tx.status)
+    }
+
+    /// Return the canonical tx id `tx_id` was merged into by
+    /// [`Self::merge_duplicate_transactions`], or `None` if not merged.
+    pub fn get_merged_into(env: Env, tx_id: String) -> Option<String> {
+        StorageClient::get_merged_into(&env, &tx_id)
     }
 
     /// Check whether an idempotency key has already been processed.

@@ -172,6 +172,8 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Merge marker: duplicate tx id -> canonical tx id it was merged into.
+    MergedInto(String),
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -238,4 +240,12 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
+
+    // ── Recovery / merge (100+ range) ───────────────────────────────────────
+    /// `merge_duplicate_transactions` was given the same id for both sides.
+    MergeSelf = 100,
+    /// The duplicate (or canonical) record is already merged.
+    AlreadyMerged = 101,
+    /// The duplicate is `Completed` (settled); merging would be lossy.
+    DuplicateSettled = 102,
 }

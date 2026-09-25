@@ -170,6 +170,26 @@ impl StorageClient {
         );
     }
 
+    // ── Merge markers ─────────────────────────────────────────────────────────
+
+    /// Return the canonical tx id `tx_id` was merged into, if any.
+    pub fn get_merged_into(env: &Env, tx_id: &String) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::MergedInto(tx_id.clone()))
+    }
+
+    /// Persist the `MergedInto(canonical)` marker for `duplicate`.
+    pub fn set_merged_into(env: &Env, duplicate: &String, canonical: &String) {
+        let key = StorageKey::MergedInto(duplicate.clone());
+        env.storage().persistent().set(&key, canonical);
+        env.storage().persistent().extend_ttl(
+            &key,
+            TRANSACTION_MIN_TTL_LEDGERS,
+            TRANSACTION_MIN_TTL_LEDGERS,
+        );
+    }
+
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
     /// Return the ledger sequence at which an idempotency key was first stored,
