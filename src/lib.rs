@@ -37,13 +37,14 @@ mod test_pause;
 #[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, Transaction, TransactionStatus, TransitionRecord,
+    SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -151,6 +152,7 @@ impl SynapseCoreContract {
 
         StorageClient::save_transaction(&env, &tx);
         StorageClient::set_idempotency_key(&env, &payload.idempotency_key);
+        StorageClient::append_history(&env, &tx.id, TransactionStatus::Pending, &relay);
         EventEmitter::transaction_registered(&env, &tx);
 
         Ok(tx.id)
@@ -174,6 +176,7 @@ impl SynapseCoreContract {
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
+        StorageClient::append_history(&env, &tx_id, TransactionStatus::Processing, &caller);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Processing);
 
         Ok(())
@@ -202,6 +205,7 @@ impl SynapseCoreContract {
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
+        StorageClient::append_history(&env, &tx_id, TransactionStatus::Completed, &caller);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
         EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
 
@@ -231,6 +235,7 @@ impl SynapseCoreContract {
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
+        StorageClient::append_history(&env, &tx_id, TransactionStatus::Failed, &caller);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
         EventEmitter::transaction_failed(&env, &tx_id, &reason);
 
@@ -250,6 +255,14 @@ impl SynapseCoreContract {
     /// Return the current [`TransactionStatus`] without fetching the full record.
     pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
         StorageClient::get_transaction(&env, &tx_id).map(|tx| tx.status)
+    }
+
+    /// Return the append-only transition history of `tx_id`, oldest first.
+    ///
+    /// Holds at most [`types::MAX_HISTORY_LEN`] entries (oldest evicted first).
+    /// Transactions registered before this feature have no history.
+    pub fn get_transaction_history(env: Env, tx_id: String) -> Vec<TransitionRecord> {
+        StorageClient::get_history(&env, &tx_id)
     }
 
     /// Check whether an idempotency key has already been processed.

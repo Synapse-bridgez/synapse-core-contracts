@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, String};
 
 /// Current on-chain storage schema version.
 ///
@@ -141,6 +141,23 @@ pub struct CallbackPayload {
     pub callback_status: String,
 }
 
+/// One entry in a transaction's append-only lifecycle history.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransitionRecord {
+    /// Status the transaction entered.
+    pub status: TransactionStatus,
+    /// Address that drove the transition.
+    pub caller: Address,
+    /// Ledger close timestamp of the transition.
+    pub timestamp: u64,
+}
+
+/// Maximum history entries kept per transaction. When exceeded the oldest
+/// entry is evicted (drop-oldest, keep-newest); history loss never blocks a
+/// state transition.
+pub const MAX_HISTORY_LEN: u32 = 32;
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Discriminants used as ledger storage keys.
@@ -172,6 +189,7 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    History(String),
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────

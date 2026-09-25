@@ -12,9 +12,11 @@
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
-use crate::types::{ContractError, StorageKey, Transaction};
+use crate::types::{
+    ContractError, StorageKey, Transaction, TransactionStatus, TransitionRecord, MAX_HISTORY_LEN,
+};
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
@@ -168,6 +170,43 @@ impl StorageClient {
             TRANSACTION_MIN_TTL_LEDGERS,
             TRANSACTION_MIN_TTL_LEDGERS,
         );
+    }
+
+    // ── Transaction history ───────────────────────────────────────────────────
+
+    /// Append a transition record to the transaction's history (persistent).
+    ///
+    /// Bounded at [`MAX_HISTORY_LEN`]; once full the oldest entry is dropped
+    /// so the newest are kept and the transition itself is never blocked.
+    pub fn append_history(env: &Env, tx_id: &String, status: TransactionStatus, caller: &Address) {
+        let key = StorageKey::History(tx_id.clone());
+        let mut h: Vec<TransitionRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if h.len() >= MAX_HISTORY_LEN {
+            h.pop_front();
+        }
+        h.push_back(TransitionRecord {
+            status,
+            caller: caller.clone(),
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&key, &h);
+        env.storage().persistent().extend_ttl(
+            &key,
+            TRANSACTION_MIN_TTL_LEDGERS,
+            TRANSACTION_MIN_TTL_LEDGERS,
+        );
+    }
+
+    /// Read a transaction's history, oldest first (empty if none recorded).
+    pub fn get_history(env: &Env, tx_id: &String) -> Vec<TransitionRecord> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::History(tx_id.clone()))
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     // ── Idempotency keys ──────────────────────────────────────────────────────
