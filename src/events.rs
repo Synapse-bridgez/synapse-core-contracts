@@ -55,6 +55,14 @@ pub struct EventTransactionCancelled {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::retry_transaction`].
+#[contracttype]
+pub struct EventTransactionRetried {
+    pub tx_id: String,
+    pub retry_count: u32,
+    pub ledger: u32,
+}
+
 /// Emitted on every status change driven by [`SynapseCoreContract::start_processing`],
 /// [`SynapseCoreContract::complete_transaction`], or
 /// [`SynapseCoreContract::fail_transaction`].
@@ -302,6 +310,18 @@ impl EventEmitter {
                 tx_id: tx_id.clone(),
                 reason: reason.clone(),
                 caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionRetried`].
+    pub fn transaction_retried(env: &Env, tx_id: &String, retry_count: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("retry")),
+            EventTransactionRetried {
+                tx_id: tx_id.clone(),
+                retry_count,
                 ledger: env.ledger().sequence(),
             },
         );

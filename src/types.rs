@@ -17,6 +17,9 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Maximum number of times a `Failed` transaction may be retried.
+pub const MAX_RETRIES: u32 = 3;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -104,6 +107,10 @@ pub struct Transaction {
 
     /// Short failure reason code — populated only on `Failed`.
     pub failure_reason: String,
+
+    /// Number of times this transaction has been moved `Failed -> Pending`
+    /// via `retry_transaction`. Capped at [`MAX_RETRIES`].
+    pub retry_count: u32,
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -233,6 +240,8 @@ pub enum ContractError {
     /// Cancellation was requested from a state that cannot be cancelled
     /// (`Completed` or `Failed`).
     CannotCancel = 33,
+    /// The transaction has already used all [`MAX_RETRIES`] retries.
+    RetryLimitExceeded = 34,
 
     // ── Idempotency ─────────────────────────────────────────────────────────
     /// Request is a duplicate within the retention window (matches Redis 429).

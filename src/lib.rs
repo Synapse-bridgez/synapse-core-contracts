@@ -43,7 +43,7 @@ use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, Transaction, TransactionStatus, MAX_RETRIES, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -147,6 +147,7 @@ impl SynapseCoreContract {
             callback_status: payload.callback_status.clone(),
             stellar_tx_hash: String::from_str(&env, ""),
             failure_reason: String::from_str(&env, ""),
+            retry_count: 0,
         };
 
         StorageClient::save_transaction(&env, &tx);
@@ -269,6 +270,43 @@ impl SynapseCoreContract {
         StorageClient::save_transaction(&env, &tx);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Cancelled);
         EventEmitter::transaction_cancelled(&env, &tx_id, &reason, &caller);
+
+        Ok(())
+    }
+
+    /// Move a `Failed` transaction back to `Pending` for reprocessing.
+    ///
+    /// Relay or admin only. Each call increments [`Transaction::retry_count`];
+    /// once it reaches [`MAX_RETRIES`] further calls fail with
+    /// [`ContractError::RetryLimitExceeded`]. The counter lives on the
+    /// persistent record, so it survives contract upgrades.
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] and
+    /// [`events::EventTransactionRetried`].
+    pub fn retry_transaction(env: Env, tx_id: String, caller: Address) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Failed {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        if tx.retry_count >= MAX_RETRIES {
+            return Err(ContractError::RetryLimitExceeded);
+        }
+        tx.retry_count += 1;
+        tx.status = TransactionStatus::Pending;
+        tx.failure_reason = String::from_str(&env, "");
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(
+            &env,
+            &tx_id,
+            TransactionStatus::Failed,
+            TransactionStatus::Pending,
+        );
+        EventEmitter::transaction_retried(&env, &tx_id, tx.retry_count);
 
         Ok(())
     }

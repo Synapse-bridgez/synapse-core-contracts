@@ -1081,3 +1081,35 @@ fn test_cancel_transaction_rejects_stranger_and_illegal_states() {
         Err(Ok(ContractError::TransactionNotFound))
     );
 }
+
+// ─── retry_transaction ────────────────────────────────────────────────────────
+
+#[test]
+fn test_retry_transaction_cycle_and_limit() {
+    let (env, client, _admin, relay) = setup();
+    let reason = String::from_str(&env, "horizon_timeout");
+    let tx_id = client.register_callback(&payload_with(&env, "tx-r1", "k-r1"));
+    for n in 1..=3u32 {
+        client.start_processing(&tx_id, &relay);
+        client.fail_transaction(&tx_id, &reason, &relay);
+        client.retry_transaction(&tx_id, &relay);
+        let tx = client.get_transaction(&tx_id);
+        assert_eq!(tx.status, TransactionStatus::Pending);
+        assert_eq!(tx.retry_count, n);
+    }
+    client.fail_transaction(&tx_id, &reason, &relay);
+    assert_eq!(
+        client.try_retry_transaction(&tx_id, &relay),
+        Err(Ok(ContractError::RetryLimitExceeded))
+    );
+}
+
+#[test]
+fn test_retry_transaction_rejects_non_failed() {
+    let (env, client, _admin, relay) = setup();
+    let tx_id = client.register_callback(&payload_with(&env, "tx-r2", "k-r2"));
+    assert_eq!(
+        client.try_retry_transaction(&tx_id, &relay),
+        Err(Ok(ContractError::InvalidStatusTransition))
+    );
+}
