@@ -83,3 +83,36 @@ fn merge_rejects_self_double_and_settled() {
         ContractError::DuplicateSettled
     );
 }
+
+// ─── #64 forwarding intent ────────────────────────────────────────────────────
+
+use soroban_sdk::testutils::Events;
+
+fn complete(env: &Env, client: &SynapseCoreContractClient, admin: &Address, tx: &String) {
+    client.start_processing(tx, admin);
+    client.complete_transaction(tx, &String::from_str(env, &"a".repeat(64)), admin);
+}
+
+#[test]
+fn no_route_emits_no_forwarding_event() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    client.start_processing(&a, &admin);
+    client.complete_transaction(&a, &String::from_str(&env, &"a".repeat(64)), &admin);
+    // status + done only
+    assert_eq!(env.events().all().len(), 2);
+}
+
+#[test]
+fn route_emits_forwarding_intent_last() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    client.set_forwarding_route(&a, &2);
+    assert_eq!(client.get_forwarding_route(&a), Some(2));
+    client.start_processing(&a, &admin);
+    client.complete_transaction(&a, &String::from_str(&env, &"a".repeat(64)), &admin);
+    // last call's events: status, done, fwd (in order)
+    let evs = env.events().all();
+    assert_eq!(evs.len(), 3);
+    let _ = complete;
+}

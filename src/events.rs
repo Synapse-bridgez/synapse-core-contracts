@@ -151,6 +151,15 @@ pub struct EventTransactionsMerged {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::complete_transaction`], strictly after
+/// `status` and `done`, only when a non-zero forwarding route is configured.
+/// Purely a signal for a future downstream phase; no cross-contract call.
+#[contracttype]
+pub struct EventForwardingIntent {
+    pub tx_id: String,
+    pub next_phase: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -253,6 +262,17 @@ impl EventEmitter {
                 admin: admin.clone(),
                 reason: reason.clone(),
                 ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventForwardingIntent`].
+    pub fn forwarding_intent(env: &Env, tx_id: &String, next_phase: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("fwd")),
+            EventForwardingIntent {
+                tx_id: tx_id.clone(),
+                next_phase,
             },
         );
     }

@@ -174,6 +174,8 @@ pub enum StorageKey {
     SchemaVersion,
     /// Merge marker: duplicate tx id -> canonical tx id it was merged into.
     MergedInto(String),
+    /// Per-transaction forwarding route (`next_phase`); absent = no forwarding.
+    ForwardRoute(String),
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────

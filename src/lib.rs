@@ -206,6 +206,12 @@ impl SynapseCoreContract {
         StorageClient::save_transaction(&env, &tx);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
         EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
+        // Additive phase-router hook: only when a route is configured.
+        if let Some(next_phase) = StorageClient::get_forward_route(&env, &tx_id) {
+            if next_phase != 0 {
+                EventEmitter::forwarding_intent(&env, &tx_id, next_phase);
+            }
+        }
 
         Ok(())
     }
@@ -289,6 +295,30 @@ impl SynapseCoreContract {
         StorageClient::set_merged_into(&env, &duplicate_tx_id, &canonical_tx_id);
         EventEmitter::transactions_merged(&env, &canonical_tx_id, &duplicate_tx_id, &admin, &reason);
         Ok(())
+    }
+
+    /// Configure the phase-router forwarding route for `tx_id`. Admin-gated.
+    ///
+    /// `next_phase == 0` clears the route (the default: no forwarding).
+    /// When set, `complete_transaction` emits `EventForwardingIntent` after
+    /// the `status`/`done` events. Never performs a cross-contract call.
+    pub fn set_forwarding_route(
+        env: Env,
+        tx_id: String,
+        next_phase: u32,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_forward_route(
+            &env,
+            &tx_id,
+            if next_phase == 0 { None } else { Some(next_phase) },
+        );
+        Ok(())
+    }
+
+    /// Return the configured forwarding `next_phase` for `tx_id`, or `None`.
+    pub fn get_forwarding_route(env: Env, tx_id: String) -> Option<u32> {
+        StorageClient::get_forward_route(&env, &tx_id)
     }
 
     // ── Read-only queries ─────────────────────────────────────────────────────

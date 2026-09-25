@@ -190,6 +190,24 @@ impl StorageClient {
         );
     }
 
+    // ── Forwarding routes ─────────────────────────────────────────────────────
+
+    /// Return the configured `next_phase` for `tx_id`, if any.
+    pub fn get_forward_route(env: &Env, tx_id: &String) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ForwardRoute(tx_id.clone()))
+    }
+
+    /// Set (`Some`) or clear (`None`) the forwarding route for `tx_id`.
+    pub fn set_forward_route(env: &Env, tx_id: &String, next_phase: Option<u32>) {
+        let key = StorageKey::ForwardRoute(tx_id.clone());
+        match next_phase {
+            Some(p) => env.storage().persistent().set(&key, &p),
+            None => env.storage().persistent().remove(&key),
+        }
+    }
+
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
     /// Return the ledger sequence at which an idempotency key was first stored,
