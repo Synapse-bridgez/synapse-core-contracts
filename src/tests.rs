@@ -1150,3 +1150,48 @@ fn test_get_transactions_by_status_rejects_bad_limit() {
         Err(Ok(ContractError::InvalidPageLimit))
     );
 }
+
+// ─── batch_register_callback ──────────────────────────────────────────────────
+
+#[test]
+fn test_batch_register_callback_happy_path() {
+    let (env, client, _admin, relay) = setup();
+    let mut v = soroban_sdk::Vec::new(&env);
+    v.push_back(payload_with(&env, "tx-b1", "k-b1"));
+    v.push_back(payload_with(&env, "tx-b2", "k-b2"));
+    assert_eq!(client.batch_register_callback(&v, &relay), 2);
+    assert_eq!(
+        client.get_status(&String::from_str(&env, "tx-b2")),
+        TransactionStatus::Pending
+    );
+}
+
+#[test]
+fn test_batch_register_callback_is_atomic_and_bounded() {
+    let (env, client, _admin, relay) = setup();
+    let mut bad = payload_with(&env, "tx-b4", "k-b4");
+    bad.amount = 0;
+    let mut v = soroban_sdk::Vec::new(&env);
+    v.push_back(payload_with(&env, "tx-b3", "k-b3"));
+    v.push_back(bad);
+    assert!(client.try_batch_register_callback(&v, &relay).is_err());
+    assert!(client.try_get_status(&String::from_str(&env, "tx-b3")).is_err());
+
+    // Duplicate of an on-chain id aborts the whole batch.
+    client.register_callback(&payload_with(&env, "tx-b5", "k-b5"));
+    let mut d = soroban_sdk::Vec::new(&env);
+    d.push_back(payload_with(&env, "tx-b6", "k-b6"));
+    d.push_back(payload_with(&env, "tx-b5", "k-b7"));
+    assert_eq!(
+        client.try_batch_register_callback(&d, &relay),
+        Err(Ok(ContractError::DuplicateRequest))
+    );
+    assert!(client.try_get_status(&String::from_str(&env, "tx-b6")).is_err());
+
+    // Empty batch rejected.
+    let empty = soroban_sdk::Vec::new(&env);
+    assert_eq!(
+        client.try_batch_register_callback(&empty, &relay),
+        Err(Ok(ContractError::InvalidBatchSize))
+    );
+}

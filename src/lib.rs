@@ -43,7 +43,7 @@ use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, MAX_PAGE_LIMIT, MAX_RETRIES, SCHEMA_VERSION,
+    CallbackPayload, ContractError, Transaction, TransactionStatus, MAX_BATCH_SIZE, MAX_PAGE_LIMIT, MAX_RETRIES, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -155,6 +155,75 @@ impl SynapseCoreContract {
         EventEmitter::transaction_registered(&env, &tx);
 
         Ok(tx.id)
+    }
+
+    /// Register up to [`MAX_BATCH_SIZE`] callbacks atomically.
+    ///
+    /// Relay signer only. Every payload is validated, and checked against
+    /// on-chain and in-batch duplicate `transaction_id`s, *before* any storage
+    /// write; any failure aborts the whole call with no partial writes.
+    /// An empty or oversized batch is rejected with
+    /// [`ContractError::InvalidBatchSize`].
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionRegistered`] per payload followed by one
+    /// [`events::EventBatchProcessed`].
+    pub fn batch_register_callback(
+        env: Env,
+        payloads: Vec<CallbackPayload>,
+        caller: Address,
+    ) -> Result<u32, ContractError> {
+        if StorageClient::is_paused(&env) {
+            return Err(ContractError::ContractPaused);
+        }
+        AdminClient::require_relay_signer(&env, &caller)?;
+        caller.require_auth();
+
+        let n = payloads.len();
+        if n == 0 || n > MAX_BATCH_SIZE {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        // Pass 1: validate everything; no writes.
+        for i in 0..n {
+            let p = payloads.get_unchecked(i);
+            Validator::validate_payload(&env, &p)?;
+            if StorageClient::transaction_exists(&env, &p.transaction_id) {
+                return Err(ContractError::DuplicateRequest);
+            }
+            for j in 0..i {
+                if payloads.get_unchecked(j).transaction_id == p.transaction_id {
+                    return Err(ContractError::DuplicateRequest);
+                }
+            }
+        }
+
+        // Pass 2: write.
+        let ledger = env.ledger().sequence();
+        for p in payloads.iter() {
+            let tx = Transaction {
+                id: p.transaction_id.clone(),
+                stellar_account: p.stellar_account.clone(),
+                amount: p.amount,
+                asset_code: p.asset_code.clone(),
+                asset_issuer: p.asset_issuer.clone(),
+                status: TransactionStatus::Pending,
+                created_at_ledger: ledger,
+                updated_at_ledger: ledger,
+                anchor_transaction_id: p.anchor_transaction_id.clone(),
+                callback_type: p.callback_type.clone(),
+                callback_status: p.callback_status.clone(),
+                stellar_tx_hash: String::from_str(&env, ""),
+                failure_reason: String::from_str(&env, ""),
+                retry_count: 0,
+            };
+            StorageClient::save_transaction(&env, &tx);
+            StorageClient::set_idempotency_key(&env, &p.idempotency_key);
+            EventEmitter::transaction_registered(&env, &tx);
+        }
+        EventEmitter::batch_processed(&env, n, &caller);
+
+        Ok(n)
     }
 
     // ── Status transitions ────────────────────────────────────────────────────

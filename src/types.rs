@@ -23,6 +23,9 @@ pub const MAX_RETRIES: u32 = 3;
 /// Hard cap on the `limit` accepted by `get_transactions_by_status`.
 pub const MAX_PAGE_LIMIT: u32 = 50;
 
+/// Hard cap on the number of payloads accepted by `batch_register_callback`.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -250,6 +253,8 @@ pub enum ContractError {
     RetryLimitExceeded = 34,
     /// A pagination `limit` was zero or exceeded `MAX_PAGE_LIMIT`.
     InvalidPageLimit = 35,
+    /// A batch was empty or exceeded `MAX_BATCH_SIZE`.
+    InvalidBatchSize = 36,
 
     // ── Idempotency ─────────────────────────────────────────────────────────
     /// Request is a duplicate within the retention window (matches Redis 429).

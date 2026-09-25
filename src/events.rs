@@ -63,6 +63,15 @@ pub struct EventTransactionRetried {
     pub ledger: u32,
 }
 
+/// Emitted once by [`SynapseCoreContract::batch_register_callback`] after all
+/// per-transaction `TransactionRegistered` events.
+#[contracttype]
+pub struct EventBatchProcessed {
+    pub count: u32,
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 /// Emitted on every status change driven by [`SynapseCoreContract::start_processing`],
 /// [`SynapseCoreContract::complete_transaction`], or
 /// [`SynapseCoreContract::fail_transaction`].
@@ -322,6 +331,18 @@ impl EventEmitter {
             EventTransactionRetried {
                 tx_id: tx_id.clone(),
                 retry_count,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventBatchProcessed`].
+    pub fn batch_processed(env: &Env, count: u32, caller: &soroban_sdk::Address) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("batch")),
+            EventBatchProcessed {
+                count,
+                caller: caller.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
