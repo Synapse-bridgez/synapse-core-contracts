@@ -45,7 +45,7 @@ use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, RelaySignerSet, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, PendingRelaySigner, RelaySignerSet, Transaction, TransactionStatus, DEFAULT_RELAY_SIGNER_DELAY_LEDGERS, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -433,10 +433,89 @@ impl SynapseCoreContract {
     /// observe the rotation the same way it does [`Self::accept_admin`].
     pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
         AdminClient::require_admin(&env)?;
+        // Once a timelock delay is explicitly configured, the immediate path
+        // is closed; rotation must go through propose/finalize.
+        if StorageClient::get_relay_signer_delay(&env).unwrap_or(0) > 0 {
+            return Err(ContractError::TimelockRequired);
+        }
         let old_signer = StorageClient::get_relay_signer(&env)?;
         StorageClient::set_relay_signer(&env, &new_signer);
         EventEmitter::relay_signer_rotated(&env, &old_signer, &new_signer);
         Ok(())
+    }
+
+    // ── Timelocked relay-signer rotation ──────────────────────────────────────
+
+    /// Configure the timelock delay (ledgers) for relay-signer rotation.
+    /// Admin-gated. A non-zero value also disables the immediate
+    /// [`Self::set_relay_signer`] path.
+    pub fn set_relay_signer_delay(env: Env, delay_ledgers: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_relay_signer_delay(&env, delay_ledgers);
+        Ok(())
+    }
+
+    /// Start a timelocked rotation of the primary relay signer to `new_signer`.
+    /// Admin-gated. A second proposal while one is pending **replaces** it
+    /// (restarting the delay). With an N-of-M set (#65) only the primary
+    /// signer slot is replaced; membership/threshold changes stay immediate
+    /// admin operations.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerProposed`].
+    pub fn propose_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let delay = StorageClient::get_relay_signer_delay(&env)
+            .unwrap_or(DEFAULT_RELAY_SIGNER_DELAY_LEDGERS);
+        let eta_ledger = env.ledger().sequence().saturating_add(delay);
+        StorageClient::set_pending_relay_signer(
+            &env,
+            &PendingRelaySigner {
+                new_signer: new_signer.clone(),
+                eta_ledger,
+            },
+        );
+        EventEmitter::relay_signer_proposed(&env, &new_signer, eta_ledger);
+        Ok(())
+    }
+
+    /// Complete a pending rotation once `eta_ledger` has been reached.
+    ///
+    /// # Errors
+    /// [`ContractError::NoPendingRelaySigner`], [`ContractError::TimelockNotElapsed`].
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerRotated`].
+    pub fn finalize_relay_signer(env: Env) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let p = StorageClient::get_pending_relay_signer(&env)
+            .ok_or(ContractError::NoPendingRelaySigner)?;
+        if env.ledger().sequence() < p.eta_ledger {
+            return Err(ContractError::TimelockNotElapsed);
+        }
+        let old_signer = StorageClient::get_relay_signer(&env)?;
+        StorageClient::set_relay_signer(&env, &p.new_signer);
+        StorageClient::clear_pending_relay_signer(&env);
+        EventEmitter::relay_signer_rotated(&env, &old_signer, &p.new_signer);
+        Ok(())
+    }
+
+    /// Abort a pending rotation. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerChangeCancelled`].
+    pub fn cancel_relay_signer_change(env: Env) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let p = StorageClient::get_pending_relay_signer(&env)
+            .ok_or(ContractError::NoPendingRelaySigner)?;
+        StorageClient::clear_pending_relay_signer(&env);
+        EventEmitter::relay_signer_change_cancelled(&env, &p.new_signer);
+        Ok(())
+    }
+
+    /// Return the pending relay-signer rotation, if any.
+    pub fn pending_relay_signer(env: Env) -> Option<PendingRelaySigner> {
+        StorageClient::get_pending_relay_signer(&env)
     }
 
     // ── Relay signer set (N-of-M) ─────────────────────────────────────────────

@@ -165,3 +165,44 @@ fn threshold_bounds_enforced() {
     );
     let _ = env;
 }
+
+// ─── #66 timelocked relay signer ──────────────────────────────────────────────
+
+use soroban_sdk::testutils::Ledger;
+
+#[test]
+fn timelock_boundary_and_cancel() {
+    let (env, client, _admin) = setup();
+    let new = Address::generate(&env);
+    client.set_relay_signer_delay(&100);
+    let start = env.ledger().sequence();
+    client.propose_relay_signer(&new);
+    env.ledger().with_mut(|l| l.sequence_number = start + 99);
+    assert_eq!(
+        client.try_finalize_relay_signer().unwrap_err().unwrap(),
+        ContractError::TimelockNotElapsed
+    );
+    env.ledger().with_mut(|l| l.sequence_number = start + 100);
+    client.finalize_relay_signer();
+    assert_eq!(client.relay_signer(), new);
+
+    client.propose_relay_signer(&Address::generate(&env));
+    client.cancel_relay_signer_change();
+    assert_eq!(
+        client.try_finalize_relay_signer().unwrap_err().unwrap(),
+        ContractError::NoPendingRelaySigner
+    );
+}
+
+#[test]
+fn immediate_rotation_closed_when_delay_set() {
+    let (env, client, _admin) = setup();
+    client.set_relay_signer_delay(&10);
+    assert_eq!(
+        client
+            .try_set_relay_signer(&Address::generate(&env))
+            .unwrap_err()
+            .unwrap(),
+        ContractError::TimelockRequired
+    );
+}

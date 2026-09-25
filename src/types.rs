@@ -182,7 +182,22 @@ pub enum StorageKey {
     RelaySignerSet,
     /// Temporary: a signer's standing approval for the next gated relay call.
     RelayApproval(Address),
+    /// Singleton: pending timelocked relay-signer change.
+    PendingRelaySigner,
+    /// Singleton: timelock delay in ledgers (absent = default).
+    RelaySignerDelay,
 }
+
+/// Pending timelocked relay-signer rotation, finalisable at `eta_ledger`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingRelaySigner {
+    pub new_signer: Address,
+    pub eta_ledger: u32,
+}
+
+/// Default relay-signer timelock: ~24h at ~5s/ledger.
+pub const DEFAULT_RELAY_SIGNER_DELAY_LEDGERS: u32 = 17_280;
 
 /// N-of-M relay signer set: `threshold` distinct members must co-authorise
 /// each relay-gated call.
@@ -275,4 +290,12 @@ pub enum ContractError {
     SignerNotFound = 112,
     /// Fewer than `threshold` distinct signers authorised the call.
     QuorumNotMet = 113,
+
+    // ── Relay signer timelock (120+ range) ──────────────────────────────────
+    /// `finalize_relay_signer` / `cancel_relay_signer_change` with nothing pending.
+    NoPendingRelaySigner = 120,
+    /// `finalize_relay_signer` called before the delay elapsed.
+    TimelockNotElapsed = 121,
+    /// A non-zero timelock delay is configured; use propose/finalize.
+    TimelockRequired = 122,
 }

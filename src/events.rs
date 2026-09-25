@@ -182,6 +182,21 @@ pub struct EventRelayThresholdChanged {
     pub ledger: u32,
 }
 
+/// Emitted by `propose_relay_signer`; the rotation is not yet effective.
+#[contracttype]
+pub struct EventRelaySignerProposed {
+    pub proposed_signer: soroban_sdk::Address,
+    pub eta_ledger: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by `cancel_relay_signer_change`.
+#[contracttype]
+pub struct EventRelaySignerChangeCancelled {
+    pub cancelled_signer: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -328,6 +343,29 @@ impl EventEmitter {
             EventRelayThresholdChanged {
                 old_threshold,
                 new_threshold,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerProposed`].
+    pub fn relay_signer_proposed(env: &Env, proposed: &soroban_sdk::Address, eta_ledger: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_prop")),
+            EventRelaySignerProposed {
+                proposed_signer: proposed.clone(),
+                eta_ledger,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerChangeCancelled`].
+    pub fn relay_signer_change_cancelled(env: &Env, cancelled: &soroban_sdk::Address) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_canc")),
+            EventRelaySignerChangeCancelled {
+                cancelled_signer: cancelled.clone(),
                 ledger: env.ledger().sequence(),
             },
         );

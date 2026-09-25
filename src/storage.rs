@@ -14,7 +14,7 @@
 
 use soroban_sdk::{Address, Env, String};
 
-use crate::types::{ContractError, RelaySignerSet, StorageKey, Transaction};
+use crate::types::{ContractError, PendingRelaySigner, RelaySignerSet, StorageKey, Transaction};
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
@@ -146,6 +146,41 @@ impl StorageClient {
         env.storage()
             .temporary()
             .remove(&StorageKey::RelayApproval(signer.clone()));
+    }
+
+    // ── Relay signer timelock ─────────────────────────────────────────────────
+
+    /// Read the pending relay-signer change, if any.
+    pub fn get_pending_relay_signer(env: &Env) -> Option<PendingRelaySigner> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingRelaySigner)
+    }
+
+    /// Persist (overwriting any existing) pending relay-signer change.
+    pub fn set_pending_relay_signer(env: &Env, p: &PendingRelaySigner) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PendingRelaySigner, p);
+    }
+
+    /// Clear the pending relay-signer change.
+    pub fn clear_pending_relay_signer(env: &Env) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::PendingRelaySigner);
+    }
+
+    /// Timelock delay in ledgers; defaults to the ~24h constant.
+    pub fn get_relay_signer_delay(env: &Env) -> Option<u32> {
+        env.storage().persistent().get(&StorageKey::RelaySignerDelay)
+    }
+
+    /// Persist the timelock delay in ledgers.
+    pub fn set_relay_signer_delay(env: &Env, delay: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::RelaySignerDelay, &delay);
     }
 
     // ── Admin transfer (two-step) ─────────────────────────────────────────────
