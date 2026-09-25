@@ -109,6 +109,10 @@ pub struct Transaction {
     /// Ledger timestamp (seconds) when the transaction was registered.
     /// Used to age out stale `Pending` entries.
     pub registered_at: u64,
+
+    /// Amount actually settled when completed via `partial_complete_transaction`.
+    /// `None` for full completions and non-completed transactions.
+    pub settled_amount: Option<i128>,
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -256,4 +260,8 @@ pub enum ContractError {
     ExpiryNotConfigured = 70,
     /// `expire_transaction` was called before the expiry window elapsed.
     ExpiryNotElapsed = 71,
+
+    // ── Partial settlement ──────────────────────────────────────────────────
+    /// `settled_amount` is not strictly between zero and the original amount.
+    InvalidSettledAmount = 80,
 }

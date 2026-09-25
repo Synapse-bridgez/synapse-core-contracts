@@ -148,6 +148,7 @@ impl SynapseCoreContract {
             stellar_tx_hash: String::from_str(&env, ""),
             failure_reason: String::from_str(&env, ""),
             registered_at: env.ledger().timestamp(),
+            settled_amount: None,
         };
 
         StorageClient::save_transaction(&env, &tx);
@@ -206,6 +207,48 @@ impl SynapseCoreContract {
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
         EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
 
+        Ok(())
+    }
+
+    /// Mark a `Processing` transaction as `Completed` with a settled amount
+    /// strictly between zero and the originally registered amount.
+    ///
+    /// Purely a recording mechanism: the shortfall is not refunded or fee'd
+    /// here. `complete_transaction` remains the full-amount path.
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] then
+    /// [`events::EventTransactionPartiallyCompleted`].
+    pub fn partial_complete_transaction(
+        env: Env,
+        tx_id: String,
+        settled_amount: i128,
+        stellar_tx_hash: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Processing {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        Validator::validate_settled_amount(settled_amount, tx.amount)?;
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Completed;
+        tx.stellar_tx_hash = stellar_tx_hash.clone();
+        tx.settled_amount = Some(settled_amount);
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
+        EventEmitter::transaction_partially_completed(
+            &env,
+            &tx_id,
+            tx.amount,
+            settled_amount,
+            &stellar_tx_hash,
+        );
         Ok(())
     }
 

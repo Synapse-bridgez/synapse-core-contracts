@@ -231,6 +231,17 @@ impl Validator {
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
     }
 
+    /// Partial settlement: require `0 < settled < original`.
+    ///
+    /// Equal amounts must use `complete_transaction`; greater amounts are a
+    /// different bug class and are rejected too.
+    pub fn validate_settled_amount(settled: i128, original: i128) -> Result<(), ContractError> {
+        if settled <= 0 || settled >= original {
+            return Err(ContractError::InvalidSettledAmount);
+        }
+        Ok(())
+    }
+
     /// Reject nominating the contract's own address as the next admin.
     ///
     /// Soroban has no "zero address" sentinel the way EVM chains do — any

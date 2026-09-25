@@ -93,6 +93,17 @@ pub struct EventExpiryWindowSet {
     pub ledger: u32,
 }
 
+/// Emitted when a transaction is completed with less than its registered
+/// amount via `partial_complete_transaction`.
+#[contracttype]
+pub struct EventTransactionPartiallyCompleted {
+    pub tx_id: String,
+    pub original_amount: i128,
+    pub settled_amount: i128,
+    pub stellar_tx_hash: String,
+    pub ledger: u32,
+}
+
 /// Emitted when the admin role is transferred.
 #[contracttype]
 pub struct EventAdminTransferred {
@@ -331,6 +342,26 @@ impl EventEmitter {
             (symbol_short!("synapse"), symbol_short!("exp_win")),
             EventExpiryWindowSet {
                 seconds,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionPartiallyCompleted`].
+    pub fn transaction_partially_completed(
+        env: &Env,
+        tx_id: &String,
+        original_amount: i128,
+        settled_amount: i128,
+        stellar_tx_hash: &String,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("partial")),
+            EventTransactionPartiallyCompleted {
+                tx_id: tx_id.clone(),
+                original_amount,
+                settled_amount,
+                stellar_tx_hash: stellar_tx_hash.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
