@@ -143,6 +143,27 @@ impl StorageClient {
             .set(&StorageKey::RelayAnchors(signer.clone()), anchors);
     }
 
+    /// Read the pending relay-signer nominee.
+    pub fn get_pending_relay_signer(env: &Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingRelaySigner)
+    }
+
+    /// Store (`Some`) or clear (`None`) the pending relay-signer nominee.
+    pub fn set_pending_relay_signer(env: &Env, nominee: Option<&Address>) {
+        match nominee {
+            Some(a) => env
+                .storage()
+                .persistent()
+                .set(&StorageKey::PendingRelaySigner, a),
+            None => env
+                .storage()
+                .persistent()
+                .remove(&StorageKey::PendingRelaySigner),
+        }
+    }
+
     /// Read the optional expiry timestamp of the pending admin proposal.
     pub fn get_pending_admin_expiry(env: &Env) -> Option<u64> {
         env.storage()

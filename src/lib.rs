@@ -465,6 +465,45 @@ impl SynapseCoreContract {
         Self::start_processing(env, tx_id, caller)
     }
 
+    /// Nominate `new_signer` as the next relay signer. Admin only.
+    ///
+    /// The current relay signer stays valid until [`Self::accept_relay_signer`]
+    /// completes. This is the accept-step confirmation only (no delay); it is
+    /// additive to [`Self::set_relay_signer`] and independent of any timelocked
+    /// propose/finalize flow.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerProposed`].
+    pub fn propose_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let current = StorageClient::get_relay_signer(&env)?;
+        StorageClient::set_pending_relay_signer(&env, Some(&new_signer));
+        EventEmitter::relay_signer_proposed(&env, &current, &new_signer);
+        Ok(())
+    }
+
+    /// Complete a relay-signer rotation; `caller` must be the nominee.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingRelaySigner`] if nothing is pending.
+    /// - [`ContractError::Unauthorised`] if `caller` is not the nominee.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerRotated`].
+    pub fn accept_relay_signer(env: Env, caller: Address) -> Result<(), ContractError> {
+        let pending = StorageClient::get_pending_relay_signer(&env)
+            .ok_or(ContractError::NoPendingRelaySigner)?;
+        if caller != pending {
+            return Err(ContractError::Unauthorised);
+        }
+        caller.require_auth();
+        let old = StorageClient::get_relay_signer(&env)?;
+        StorageClient::set_relay_signer(&env, &caller);
+        StorageClient::set_pending_relay_signer(&env, None);
+        EventEmitter::relay_signer_rotated(&env, &old, &caller);
+        Ok(())
+    }
+
     // ── Contract upgrade ───────────────────────────────────────────────────────
 
     /// Replace the contract WASM in-place.
