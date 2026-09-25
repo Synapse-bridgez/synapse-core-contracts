@@ -37,13 +37,13 @@ mod test_pause;
 #[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, MAX_RETRIES, SCHEMA_VERSION,
+    CallbackPayload, ContractError, Transaction, TransactionStatus, MAX_PAGE_LIMIT, MAX_RETRIES, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -319,6 +319,27 @@ impl SynapseCoreContract {
         // Read-only: intentionally NOT gated by the pause flag — pausing must
         // never brick reads.
         StorageClient::get_transaction(&env, &tx_id)
+    }
+
+    /// Return a page of transaction IDs currently in `status`, in
+    /// registration-into-status order.
+    ///
+    /// * `cursor` — zero-based offset; pass `0` for the first page, then the
+    ///   previous `cursor + returned.len()`. An empty page means the end.
+    /// * `limit`  — page size, `1..=MAX_PAGE_LIMIT` (else
+    ///   [`ContractError::InvalidPageLimit`]).
+    ///
+    /// Read-only and not gated by the pause flag.
+    pub fn get_transactions_by_status(
+        env: Env,
+        status: TransactionStatus,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<Vec<String>, ContractError> {
+        if limit == 0 || limit > MAX_PAGE_LIMIT {
+            return Err(ContractError::InvalidPageLimit);
+        }
+        Ok(StorageClient::get_ids_by_status(&env, &status, cursor, limit))
     }
 
     /// Return the current [`TransactionStatus`] without fetching the full record.

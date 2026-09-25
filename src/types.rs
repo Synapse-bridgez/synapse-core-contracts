@@ -20,6 +20,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Maximum number of times a `Failed` transaction may be retried.
 pub const MAX_RETRIES: u32 = 3;
 
+/// Hard cap on the `limit` accepted by `get_transactions_by_status`.
+pub const MAX_PAGE_LIMIT: u32 = 50;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -183,6 +186,9 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Per-status index: ordered `Vec<String>` of transaction IDs currently in
+    /// that status. Maintained by `StorageClient::save_transaction`.
+    StatusIndex(TransactionStatus),
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -242,6 +248,8 @@ pub enum ContractError {
     CannotCancel = 33,
     /// The transaction has already used all [`MAX_RETRIES`] retries.
     RetryLimitExceeded = 34,
+    /// A pagination `limit` was zero or exceeded `MAX_PAGE_LIMIT`.
+    InvalidPageLimit = 35,
 
     // ── Idempotency ─────────────────────────────────────────────────────────
     /// Request is a duplicate within the retention window (matches Redis 429).

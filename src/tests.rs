@@ -1113,3 +1113,40 @@ fn test_retry_transaction_rejects_non_failed() {
         Err(Ok(ContractError::InvalidStatusTransition))
     );
 }
+
+// ─── get_transactions_by_status ───────────────────────────────────────────────
+
+#[test]
+fn test_get_transactions_by_status_pagination_and_transitions() {
+    let (env, client, _admin, relay) = setup();
+    let ids = ["tx-p1", "tx-p2", "tx-p3"];
+    for (i, id) in ids.iter().enumerate() {
+        let key = ["k-p1", "k-p2", "k-p3"][i];
+        client.register_callback(&payload_with(&env, id, key));
+    }
+    let p = TransactionStatus::Pending;
+    let page1 = client.get_transactions_by_status(&p, &0, &2);
+    let page2 = client.get_transactions_by_status(&p, &2, &2);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(client.get_transactions_by_status(&p, &3, &2).len(), 0);
+
+    client.start_processing(&String::from_str(&env, "tx-p1"), &relay);
+    assert_eq!(client.get_transactions_by_status(&p, &0, &10).len(), 2);
+    let proc = client.get_transactions_by_status(&TransactionStatus::Processing, &0, &10);
+    assert_eq!(proc.len(), 1);
+}
+
+#[test]
+fn test_get_transactions_by_status_rejects_bad_limit() {
+    let (_env, client, _admin, _relay) = setup();
+    let p = TransactionStatus::Pending;
+    assert_eq!(
+        client.try_get_transactions_by_status(&p, &0, &0),
+        Err(Ok(ContractError::InvalidPageLimit))
+    );
+    assert_eq!(
+        client.try_get_transactions_by_status(&p, &0, &51),
+        Err(Ok(ContractError::InvalidPageLimit))
+    );
+}
