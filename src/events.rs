@@ -77,6 +77,22 @@ pub struct EventTransactionFailed {
     pub ledger: u32,
 }
 
+/// Emitted when a stale `Pending` transaction reaches terminal state `Expired`.
+#[contracttype]
+pub struct EventTransactionExpired {
+    pub tx_id: String,
+    pub registered_at: u64,
+    pub expired_at: u64,
+    pub ledger: u32,
+}
+
+/// Emitted when the admin changes the `Pending` expiry window.
+#[contracttype]
+pub struct EventExpiryWindowSet {
+    pub seconds: u64,
+    pub ledger: u32,
+}
+
 /// Emitted when the admin role is transferred.
 #[contracttype]
 pub struct EventAdminTransferred {
@@ -291,6 +307,30 @@ impl EventEmitter {
             EventAdminTransferred {
                 old_admin: old_admin.clone(),
                 new_admin: new_admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionExpired`].
+    pub fn transaction_expired(env: &Env, tx_id: &String, registered_at: u64) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("expired")),
+            EventTransactionExpired {
+                tx_id: tx_id.clone(),
+                registered_at,
+                expired_at: env.ledger().timestamp(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventExpiryWindowSet`].
+    pub fn expiry_window_set(env: &Env, seconds: u64) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("exp_win")),
+            EventExpiryWindowSet {
+                seconds,
                 ledger: env.ledger().sequence(),
             },
         );

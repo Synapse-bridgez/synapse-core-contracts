@@ -170,6 +170,20 @@ impl StorageClient {
         );
     }
 
+    // ── Expiry window ─────────────────────────────────────────────────────────
+
+    /// Read the `Pending` expiry window in seconds, if configured.
+    pub fn get_expiry_window(env: &Env) -> Option<u64> {
+        env.storage().persistent().get(&StorageKey::ExpiryWindow)
+    }
+
+    /// Persist the `Pending` expiry window in seconds.
+    pub fn set_expiry_window(env: &Env, seconds: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ExpiryWindow, &seconds);
+    }
+
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
     /// Return the ledger sequence at which an idempotency key was first stored,

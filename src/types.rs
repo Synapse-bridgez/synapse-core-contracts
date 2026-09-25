@@ -24,7 +24,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// State machine:
 /// ```text
 /// Pending ──► Processing ──► Completed
-///         └──────────────► Failed
+///         │            └───► Failed
+///         ├──────────────► Failed
+///         └──────────────► Expired (permissionless, after expiry window)
 /// ```
 #[contracttype]
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -37,6 +39,9 @@ pub enum TransactionStatus {
     Completed,
     /// Terminal failure — reason stored in [`Transaction::failure_reason`].
     Failed,
+    /// Terminal: stayed `Pending` past the configured expiry window and was
+    /// expired via the permissionless `expire_transaction`.
+    Expired,
 }
 
 // ─── Callback type ────────────────────────────────────────────────────────────
@@ -100,6 +105,10 @@ pub struct Transaction {
 
     /// Short failure reason code — populated only on `Failed`.
     pub failure_reason: String,
+
+    /// Ledger timestamp (seconds) when the transaction was registered.
+    /// Used to age out stale `Pending` entries.
+    pub registered_at: u64,
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -172,6 +181,9 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Singleton: max age in seconds of a `Pending` transaction before it
+    /// may be expired. Absent means expiry is disabled.
+    ExpiryWindow,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -238,4 +250,10 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
+
+    // ── Expiry ──────────────────────────────────────────────────────────────
+    /// `expire_transaction` was called but no expiry window is configured.
+    ExpiryNotConfigured = 70,
+    /// `expire_transaction` was called before the expiry window elapsed.
+    ExpiryNotElapsed = 71,
 }

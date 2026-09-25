@@ -147,6 +147,7 @@ impl SynapseCoreContract {
             callback_status: payload.callback_status.clone(),
             stellar_tx_hash: String::from_str(&env, ""),
             failure_reason: String::from_str(&env, ""),
+            registered_at: env.ledger().timestamp(),
         };
 
         StorageClient::save_transaction(&env, &tx);
@@ -234,6 +235,55 @@ impl SynapseCoreContract {
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
         EventEmitter::transaction_failed(&env, &tx_id, &reason);
 
+        Ok(())
+    }
+
+    /// Set the maximum age (seconds) a `Pending` transaction may reach before
+    /// anyone can expire it. Admin-gated. `0` is rejected as invalid.
+    pub fn set_expiry_window(env: Env, seconds: u64) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        if seconds == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        StorageClient::set_expiry_window(&env, seconds);
+        EventEmitter::expiry_window_set(&env, seconds);
+        Ok(())
+    }
+
+    /// Return the configured `Pending` expiry window in seconds, if any.
+    pub fn expiry_window(env: Env) -> Option<u64> {
+        StorageClient::get_expiry_window(&env)
+    }
+
+    /// Move a stale `Pending` transaction to terminal `Expired`.
+    ///
+    /// Deliberately **permissionless** (no auth): expiry is a pure function of
+    /// ledger time versus the admin-configured window, so anyone may trigger
+    /// it and no privileged off-chain scheduler is needed. Only `Pending`
+    /// transactions can expire; `Processing` implies active relay engagement.
+    ///
+    /// # Errors
+    /// - [`ContractError::ExpiryNotConfigured`] if no window is set.
+    /// - [`ContractError::InvalidStatusTransition`] if not `Pending`.
+    /// - [`ContractError::ExpiryNotElapsed`] if `now < registered_at + window`.
+    pub fn expire_transaction(env: Env, tx_id: String) -> Result<(), ContractError> {
+        let window =
+            StorageClient::get_expiry_window(&env).ok_or(ContractError::ExpiryNotConfigured)?;
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Pending {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        let deadline = tx.registered_at.saturating_add(window);
+        if env.ledger().timestamp() < deadline {
+            return Err(ContractError::ExpiryNotElapsed);
+        }
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Expired;
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Expired);
+        EventEmitter::transaction_expired(&env, &tx_id, tx.registered_at);
         Ok(())
     }
 
