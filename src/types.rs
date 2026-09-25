@@ -190,6 +190,9 @@ pub enum StorageKey {
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
     History(String),
+    MaxPendingPerSigner,
+    PendingCount(Address),
+    TxSigner(String),
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -256,4 +259,8 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
+
+    // ── Backpressure ────────────────────────────────────────────────────────
+    /// Relay signer already has the maximum allowed outstanding `Pending` transactions.
+    OutstandingCapExceeded = 70,
 }

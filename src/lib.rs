@@ -133,6 +133,13 @@ impl SynapseCoreContract {
             return Err(ContractError::DuplicateRequest);
         }
 
+        // Backpressure: bound this signer's outstanding Pending backlog.
+        if let Some(cap) = StorageClient::get_max_pending_per_signer(&env) {
+            if StorageClient::get_pending_count(&env, &relay) >= cap {
+                return Err(ContractError::OutstandingCapExceeded);
+            }
+        }
+
         let ledger = env.ledger().sequence();
         let tx = Transaction {
             id: payload.transaction_id.clone(),
@@ -153,6 +160,7 @@ impl SynapseCoreContract {
         StorageClient::save_transaction(&env, &tx);
         StorageClient::set_idempotency_key(&env, &payload.idempotency_key);
         StorageClient::append_history(&env, &tx.id, TransactionStatus::Pending, &relay);
+        StorageClient::inc_pending(&env, &relay, &tx.id);
         EventEmitter::transaction_registered(&env, &tx);
 
         Ok(tx.id)
@@ -177,6 +185,7 @@ impl SynapseCoreContract {
 
         StorageClient::save_transaction(&env, &tx);
         StorageClient::append_history(&env, &tx_id, TransactionStatus::Processing, &caller);
+        StorageClient::dec_pending(&env, &tx_id);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Processing);
 
         Ok(())
@@ -236,6 +245,9 @@ impl SynapseCoreContract {
 
         StorageClient::save_transaction(&env, &tx);
         StorageClient::append_history(&env, &tx_id, TransactionStatus::Failed, &caller);
+        if old_status == TransactionStatus::Pending {
+            StorageClient::dec_pending(&env, &tx_id);
+        }
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
         EventEmitter::transaction_failed(&env, &tx_id, &reason);
 
@@ -348,6 +360,24 @@ impl SynapseCoreContract {
         StorageClient::clear_pending_admin(&env);
         EventEmitter::admin_transferred(&env, &old_admin, &caller);
         Ok(())
+    }
+
+    /// Set the maximum outstanding `Pending` transactions any single relay
+    /// signer may hold. Admin-gated. `register_callback` fails with
+    /// [`ContractError::OutstandingCapExceeded`] once a signer is at the cap.
+    /// Lowering the cap never affects already-registered transactions.
+    pub fn set_max_outstanding_pending_per_signer(
+        env: Env,
+        cap: u32,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_max_pending_per_signer(&env, cap);
+        Ok(())
+    }
+
+    /// Return the outstanding `Pending` count for `signer`.
+    pub fn outstanding_pending(env: Env, signer: Address) -> u32 {
+        StorageClient::get_pending_count(&env, &signer)
     }
 
     /// Rotate the trusted relay signer address.
