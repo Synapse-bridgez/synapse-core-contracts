@@ -237,6 +237,42 @@ impl SynapseCoreContract {
         Ok(())
     }
 
+    /// Cancel a `Pending` or `Processing` transaction (terminal `Cancelled`).
+    ///
+    /// Callable only by the admin or the relay signer. `Completed` and
+    /// `Failed` records are rejected with [`ContractError::CannotCancel`];
+    /// an already-`Cancelled` record with [`ContractError::AlreadyCancelled`].
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] and
+    /// [`events::EventTransactionCancelled`].
+    pub fn cancel_transaction(
+        env: Env,
+        tx_id: String,
+        reason: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_failure_reason(&reason)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        match tx.status {
+            TransactionStatus::Pending | TransactionStatus::Processing => {}
+            TransactionStatus::Cancelled => return Err(ContractError::AlreadyCancelled),
+            _ => return Err(ContractError::CannotCancel),
+        }
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Cancelled;
+        tx.failure_reason = reason.clone();
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Cancelled);
+        EventEmitter::transaction_cancelled(&env, &tx_id, &reason, &caller);
+
+        Ok(())
+    }
+
     // ── Read-only queries ─────────────────────────────────────────────────────
 
     /// Return the [`Transaction`] for the given `tx_id`, or

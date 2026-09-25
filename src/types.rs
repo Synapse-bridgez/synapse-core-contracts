@@ -24,7 +24,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// State machine:
 /// ```text
 /// Pending ──► Processing ──► Completed
-///         └──────────────► Failed
+///   │             │
+///   ├─────────────┴────────► Failed
+///   └─────────────┴────────► Cancelled
 /// ```
 #[contracttype]
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -37,6 +39,8 @@ pub enum TransactionStatus {
     Completed,
     /// Terminal failure — reason stored in [`Transaction::failure_reason`].
     Failed,
+    /// Terminal withdrawal — voided by the relay or admin before settlement.
+    Cancelled,
 }
 
 // ─── Callback type ────────────────────────────────────────────────────────────
@@ -224,6 +228,11 @@ pub enum ContractError {
     TransactionNotFound = 30,
     /// The requested status transition violates the state machine.
     InvalidStatusTransition = 31,
+    /// The transaction is already `Cancelled`; cancelling twice is rejected.
+    AlreadyCancelled = 32,
+    /// Cancellation was requested from a state that cannot be cancelled
+    /// (`Completed` or `Failed`).
+    CannotCancel = 33,
 
     // ── Idempotency ─────────────────────────────────────────────────────────
     /// Request is a duplicate within the retention window (matches Redis 429).

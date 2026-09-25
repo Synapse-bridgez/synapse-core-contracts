@@ -1030,3 +1030,54 @@ fn test_full_lifecycle_pending_to_processing_to_completed() {
     assert_eq!(tx.failure_reason, String::from_str(&env, ""));
     assert!(tx.updated_at_ledger >= tx.created_at_ledger);
 }
+
+// ─── cancel_transaction ───────────────────────────────────────────────────────
+
+#[test]
+fn test_cancel_transaction_by_relay_and_admin() {
+    let (env, client, admin, relay) = setup();
+    let a = client.register_callback(&payload_with(&env, "tx-c1", "k-c1"));
+    let b = client.register_callback(&payload_with(&env, "tx-c2", "k-c2"));
+    client.start_processing(&b, &relay);
+    let reason = String::from_str(&env, "duplicate");
+    client.cancel_transaction(&a, &reason, &relay);
+    client.cancel_transaction(&b, &reason, &admin);
+    assert_eq!(client.get_status(&a), TransactionStatus::Cancelled);
+    assert_eq!(client.get_status(&b), TransactionStatus::Cancelled);
+}
+
+#[test]
+fn test_cancel_transaction_rejects_stranger_and_illegal_states() {
+    let (env, client, _admin, relay) = setup();
+    let reason = String::from_str(&env, "r");
+    let tx_id = client.register_callback(&payload_with(&env, "tx-c3", "k-c3"));
+    let stranger = Address::generate(&env);
+    assert!(client.try_cancel_transaction(&tx_id, &reason, &stranger).is_err());
+
+    client.cancel_transaction(&tx_id, &reason, &relay);
+    assert_eq!(
+        client.try_cancel_transaction(&tx_id, &reason, &relay),
+        Err(Ok(ContractError::AlreadyCancelled))
+    );
+
+    let done = client.register_callback(&payload_with(&env, "tx-c4", "k-c4"));
+    client.start_processing(&done, &relay);
+    client.complete_transaction(&done, &String::from_str(&env, "hash-1"), &relay);
+    assert_eq!(
+        client.try_cancel_transaction(&done, &reason, &relay),
+        Err(Ok(ContractError::CannotCancel))
+    );
+
+    let failed = client.register_callback(&payload_with(&env, "tx-c5", "k-c5"));
+    client.fail_transaction(&failed, &reason, &relay);
+    assert_eq!(
+        client.try_cancel_transaction(&failed, &reason, &relay),
+        Err(Ok(ContractError::CannotCancel))
+    );
+
+    let missing = String::from_str(&env, "nope");
+    assert_eq!(
+        client.try_cancel_transaction(&missing, &reason, &relay),
+        Err(Ok(ContractError::TransactionNotFound))
+    );
+}
