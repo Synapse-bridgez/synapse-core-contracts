@@ -254,6 +254,63 @@ impl SynapseCoreContract {
         Ok(())
     }
 
+    // ── Disputes ──────────────────────────────────────────────────────────────
+
+    /// Freeze a `Completed` transaction pending review.
+    ///
+    /// Disputed is an overlay flag; the stored status stays `Completed` so
+    /// nothing is lost. Callable by the relay signer or admin.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStatusTransition`] if not `Completed`.
+    /// - [`ContractError::AlreadyDisputed`] if already disputed.
+    pub fn dispute_transaction(
+        env: Env,
+        tx_id: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        let tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Completed {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        if StorageClient::is_disputed(&env, &tx_id) {
+            return Err(ContractError::AlreadyDisputed);
+        }
+        StorageClient::set_disputed(&env, &tx_id, true);
+        Ok(())
+    }
+
+    /// Resolve a dispute. **Admin only** — unlike every other lifecycle
+    /// action this is deliberately NOT relay-signer-eligible.
+    ///
+    /// If `upheld`, the transaction moves `Completed -> Failed` with reason
+    /// `dispute_upheld`; otherwise the flag is cleared and the transaction
+    /// is exactly as it was (`Completed`).
+    pub fn resolve_dispute(env: Env, tx_id: String, upheld: bool) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if !StorageClient::is_disputed(&env, &tx_id) {
+            return Err(ContractError::NotDisputed);
+        }
+        StorageClient::set_disputed(&env, &tx_id, false);
+        if upheld {
+            let old_status = tx.status.clone();
+            tx.status = TransactionStatus::Failed;
+            tx.failure_reason = String::from_str(&env, "dispute_upheld");
+            tx.updated_at_ledger = env.ledger().sequence();
+            StorageClient::save_transaction(&env, &tx);
+            StorageClient::append_history(&env, &tx_id, TransactionStatus::Failed, &admin);
+            EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
+        }
+        Ok(())
+    }
+
+    /// Whether `tx_id` is currently under dispute.
+    pub fn is_disputed(env: Env, tx_id: String) -> bool {
+        StorageClient::is_disputed(&env, &tx_id)
+    }
+
     // ── Read-only queries ─────────────────────────────────────────────────────
 
     /// Return the [`Transaction`] for the given `tx_id`, or

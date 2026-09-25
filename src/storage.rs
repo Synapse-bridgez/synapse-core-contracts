@@ -260,6 +260,25 @@ impl StorageClient {
         }
     }
 
+    // ── Dispute overlay flag ──────────────────────────────────────────────────
+
+    /// Whether `tx_id` is currently flagged as disputed (overlay on status).
+    pub fn is_disputed(env: &Env, tx_id: &String) -> bool {
+        env.storage()
+            .persistent()
+            .has(&StorageKey::Disputed(tx_id.clone()))
+    }
+
+    /// Set or clear the dispute overlay flag.
+    pub fn set_disputed(env: &Env, tx_id: &String, disputed: bool) {
+        let key = StorageKey::Disputed(tx_id.clone());
+        if disputed {
+            env.storage().persistent().set(&key, &true);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+    }
+
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
     /// Return the ledger sequence at which an idempotency key was first stored,

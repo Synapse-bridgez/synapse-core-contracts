@@ -193,6 +193,7 @@ pub enum StorageKey {
     MaxPendingPerSigner,
     PendingCount(Address),
     TxSigner(String),
+    Disputed(String),
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -263,4 +264,10 @@ pub enum ContractError {
     // ── Backpressure ────────────────────────────────────────────────────────
     /// Relay signer already has the maximum allowed outstanding `Pending` transactions.
     OutstandingCapExceeded = 70,
+
+    // ── Disputes ────────────────────────────────────────────────────────────
+    /// Transaction is already under dispute.
+    AlreadyDisputed = 80,
+    /// Transaction is not under dispute.
+    NotDisputed = 81,
 }
