@@ -19,6 +19,16 @@
 //! emission order are versioned for Phase 2 / Phase 3 subscribers. See
 //! [`EVENTS.md`](../EVENTS.md) (catalogue + semver) and
 //! [`CHANGELOG.md`](../CHANGELOG.md#event-schema).
+//!
+//! ## Additive trailing fields (semver policy)
+//!
+//! To add a field to an existing event without a major-version bump, append it
+//! as a trailing `Option<T>` field. Soroban encodes `#[contracttype]` structs as
+//! a positional `ScVal::Map` keyed by field name, so a subscriber decoding with
+//! the *old* schema simply ignores the extra key, while a subscriber decoding
+//! with the *new* schema reads `None` for payloads emitted before the field
+//! existed. This is the required convention for all future additive changes —
+//! see [`EVENTS.md`](../EVENTS.md#additive-trailing-fields).
 
 use soroban_sdk::{contracttype, symbol_short, Env, String};
 
@@ -52,21 +62,33 @@ pub struct EventTransactionRegistered {
 ///
 /// Phase 2 listens for `new_status == Completed` to trigger the swap flow.
 /// Phase 3 listens for `new_status == Completed` after the swap to initiate bridging.
+///
+/// `correlation_id` is an additive trailing field (see module docs): it is
+/// `None` for payloads emitted before the field existed, and old subscribers
+/// decoding the pre-additive schema ignore the extra key entirely.
 #[contracttype]
 pub struct EventStatusChanged {
     pub tx_id: String,
     pub old_status: TransactionStatus,
     pub new_status: TransactionStatus,
     pub ledger: u32,
+    /// Additive trailing field — optional correlation identifier for
+    /// cross-service tracing. `None` when not supplied by the caller.
+    pub correlation_id: Option<String>,
 }
 
 /// Emitted when a transaction reaches terminal state `Completed`.
 /// Carries the confirmed Stellar transaction hash for downstream verification.
+///
+/// `correlation_id` is an additive trailing field (see module docs).
 #[contracttype]
 pub struct EventTransactionCompleted {
     pub tx_id: String,
     pub stellar_tx_hash: String,
     pub ledger: u32,
+    /// Additive trailing field — optional correlation identifier for
+    /// cross-service tracing. `None` when not supplied by the caller.
+    pub correlation_id: Option<String>,
 }
 
 /// Emitted when a transaction reaches terminal state `Failed`.
@@ -229,7 +251,7 @@ impl EventEmitter {
         proposed_admin: &soroban_sdk::Address,
     ) {
         env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("propose")),
+            (symbol_short!("synapse"), symbol_short!("admin_prop")),
             EventAdminTransferProposed {
                 current_admin: current_admin.clone(),
                 proposed_admin: proposed_admin.clone(),
@@ -238,31 +260,132 @@ impl EventEmitter {
         );
     }
 
-    /// Emit [`EventRelaySignerRotated`].
-    pub fn relay_signer_rotated(
+    /// Emit [`EventStatusChanged`].
+    ///
+    /// `correlation_id` is an additive trailing field: pass `None` to preserve
+    /// the pre-additive payload shape for existing subscribers.
+    pub fn status_changed(
         env: &Env,
-        old_signer: &soroban_sdk::Address,
-        new_signer: &soroban_sdk::Address,
+        tx_id: &String,
+        old_status: &TransactionStatus,
+        new_status: &TransactionStatus,
+        correlation_id: Option<String>,
     ) {
         env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("relay")),
-            EventRelaySignerRotated {
-                old_signer: old_signer.clone(),
-                new_signer: new_signer.clone(),
+            (symbol_short!("synapse"), symbol_short!("status")),
+            EventStatusChanged {
+                tx_id: tx_id.clone(),
+                old_status: old_status.clone(),
+                new_status: new_status.clone(),
                 ledger: env.ledger().sequence(),
+                correlation_id,
             },
         );
     }
 
-    /// Emit [`EventPauseToggled`].
-    pub fn pause_toggled(env: &Env, paused: bool, admin: &soroban_sdk::Address) {
+    /// Emit [`EventTransactionCompleted`].
+    ///
+    /// `correlation_id` is an additive trailing field: pass `None` to preserve
+    /// the pre-additive payload shape for existing subscribers.
+    pub fn transaction_completed(
+        env: &Env,
+        tx_id: &String,
+        stellar_tx_hash: &String,
+        correlation_id: Option<String>,
+    ) {
         env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("pause")),
-            EventPauseToggled {
-                paused,
-                admin: admin.clone(),
+            (symbol_short!("synapse"), symbol_short!("done")),
+            EventTransactionCompleted {
+                tx_id: tx_id.clone(),
+                stellar_tx_hash: stellar_tx_hash.clone(),
                 ledger: env.ledger().sequence(),
+                correlation_id,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Events, Env, IntoVal, String, TryFromVal, Val};
+
+    /// Old-shape decoder: mirrors a subscriber compiled against the
+    /// pre-additive `EventStatusChanged` schema (no `correlation_id`).
+    #[contracttype]
+    struct OldEventStatusChanged {
+        pub tx_id: String,
+        pub old_status: TransactionStatus,
+        pub new_status: TransactionStatus,
+        pub ledger: u32,
+    }
+
+    /// Old-shape decoder for the pre-additive `EventTransactionCompleted`.
+    #[contracttype]
+    struct OldEventTransactionCompleted {
+        pub tx_id: String,
+        pub stellar_tx_hash: String,
+        pub ledger: u32,
+    }
+
+    #[test]
+    fn old_decoder_handles_new_status_payload() {
+        let env = Env::default();
+        let tx_id = String::from_str(&env, "tx-1");
+
+        EventEmitter::status_changed(
+            &env,
+            &tx_id,
+            &TransactionStatus::Pending,
+            &TransactionStatus::Processing,
+            Some(String::from_str(&env, "corr-1")),
+        );
+
+        let events = env.events().all();
+        let (_, _, data): (Val, Val, Val) = events.last().unwrap();
+
+        // Old-shape decoding must succeed and ignore the additive field.
+        let decoded = OldEventStatusChanged::try_from_val(&env, &data)
+            .expect("old decoder must tolerate additive trailing field");
+        assert_eq!(decoded.tx_id, tx_id);
+        assert_eq!(decoded.new_status, TransactionStatus::Processing);
+    }
+
+    #[test]
+    fn old_decoder_handles_new_completed_payload() {
+        let env = Env::default();
+        let tx_id = String::from_str(&env, "tx-2");
+        let hash = String::from_str(&env, "hash-2");
+
+        EventEmitter::transaction_completed(&env, &tx_id, &hash, None);
+
+        let events = env.events().all();
+        let (_, _, data): (Val, Val, Val) = events.last().unwrap();
+
+        let decoded = OldEventTransactionCompleted::try_from_val(&env, &data)
+            .expect("old decoder must tolerate additive trailing field");
+        assert_eq!(decoded.tx_id, tx_id);
+        assert_eq!(decoded.stellar_tx_hash, hash);
+    }
+
+    #[test]
+    fn new_decoder_reads_none_for_absent_additive_field() {
+        let env = Env::default();
+        let tx_id = String::from_str(&env, "tx-3");
+
+        EventEmitter::status_changed(
+            &env,
+            &tx_id,
+            &TransactionStatus::Pending,
+            &TransactionStatus::Processing,
+            None,
+        );
+
+        let events = env.events().all();
+        let (_, _, data): (Val, Val, Val) = events.last().unwrap();
+
+        let decoded = EventStatusChanged::try_from_val(&env, &data)
+            .expect("new decoder must read additive field");
+        assert_eq!(decoded.correlation_id, None);
     }
 }
