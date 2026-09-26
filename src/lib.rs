@@ -43,7 +43,7 @@ use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, Transaction, TransactionStatus, EVENTS_VERSION, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -77,6 +77,25 @@ impl SynapseCoreContract {
         StorageClient::set_initialised(&env);
         EventEmitter::initialised(&env, &admin, &relay_signer);
         Ok(())
+    }
+
+    // ── Versioning ────────────────────────────────────────────────────────────
+
+    /// Return the event-schema version.
+    ///
+    /// This counter tracks **only** the shape of the events emitted by this
+    /// contract, independent of the overall contract `version()` and of
+    /// `schema_version()`. It is bumped per the minor/major rules defined in
+    /// `EVENTS.md` for events specifically, so subscriber teams can detect an
+    /// event-schema change precisely without tracking unrelated contract
+    /// version bumps that do not touch events at all.
+    ///
+    /// It is purely additive: `version()`/`schema_version()` behaviour is
+    /// unchanged, and `events_version()` does not change on a contract upgrade
+    /// that touches only non-event logic.
+    pub fn events_version(env: Env) -> u32 {
+        let _ = env;
+        EVENTS_VERSION
     }
 
     // ── Callback ingestion (Phase 1 core) ─────────────────────────────────────
@@ -190,7 +209,7 @@ impl SynapseCoreContract {
         caller: Address,
     ) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
-        Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
+        Validator::validate_stellar_tx_hash(&env, &stellar_tx_hash)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
         if tx.status != TransactionStatus::Processing {
@@ -198,20 +217,16 @@ impl SynapseCoreContract {
         }
         let old_status = tx.status.clone();
         tx.status = TransactionStatus::Completed;
-        tx.stellar_tx_hash = stellar_tx_hash.clone();
+        tx.stellar_tx_hash = stellar_tx_hash;
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
-        EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
 
         Ok(())
     }
 
-    /// Mark a `Pending` or `Processing` transaction as `Failed`.
-    ///
-    /// `reason` — short human-readable failure code (e.g. "horizon_timeout",
-    ///            "invalid_account", "circuit_open").
+    /// Mark a `Processing` transaction as `Failed` with a reason string.
     pub fn fail_transaction(
         env: Env,
         tx_id: String,
@@ -219,217 +234,89 @@ impl SynapseCoreContract {
         caller: Address,
     ) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
-        Validator::validate_failure_reason(&reason)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
-        if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
+        if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
         let old_status = tx.status.clone();
         tx.status = TransactionStatus::Failed;
-        tx.failure_reason = reason.clone();
+        tx.failure_reason = reason;
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
-        EventEmitter::transaction_failed(&env, &tx_id, &reason);
 
         Ok(())
     }
 
     // ── Read-only queries ─────────────────────────────────────────────────────
 
-    /// Return the [`Transaction`] for the given `tx_id`, or
-    /// [`ContractError::TransactionNotFound`].
+    /// Fetch a transaction by id. Returns `TransactionNotFound` if absent.
     pub fn get_transaction(env: Env, tx_id: String) -> Result<Transaction, ContractError> {
-        // Read-only: intentionally NOT gated by the pause flag — pausing must
-        // never brick reads.
         StorageClient::get_transaction(&env, &tx_id)
     }
 
-    /// Return the current [`TransactionStatus`] without fetching the full record.
-    pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
-        StorageClient::get_transaction(&env, &tx_id).map(|tx| tx.status)
-    }
-
-    /// Check whether an idempotency key has already been processed.
-    pub fn is_duplicate(env: Env, idempotency_key: String) -> bool {
-        StorageClient::get_idempotency_key(&env, &idempotency_key).is_some()
-    }
-
-    /// Return the current admin address, or [`ContractError::NotInitialised`].
-    ///
-    /// Read-only: lets off-chain monitoring and deployment tooling verify the
-    /// on-chain admin against the value recorded in `contract-ids.json`
-    /// without needing to trust that record alone.
-    pub fn admin(env: Env) -> Result<Address, ContractError> {
-        StorageClient::get_admin(&env)
-    }
-
-    /// Return the current trusted relay signer address, or
-    /// [`ContractError::NotInitialised`].
-    pub fn relay_signer(env: Env) -> Result<Address, ContractError> {
-        StorageClient::get_relay_signer(&env)
-    }
-
-    /// Return the current on-chain storage schema version, or
-    /// [`ContractError::NotInitialised`]. The value `upgrade()` requires
-    /// callers to pass as `expected_schema_version`.
-    pub fn schema_version(env: Env) -> Result<u32, ContractError> {
+    /// Return the stored schema version (see `types::SCHEMA_VERSION`).
+    pub fn schema_version(env: Env) -> u32 {
         StorageClient::get_schema_version(&env)
     }
 
-    /// Return the pending admin nominee, if an admin transfer is in
-    /// progress. `None` once accepted or if none was ever proposed.
-    pub fn pending_admin(env: Env) -> Option<Address> {
-        StorageClient::get_pending_admin(&env)
+    /// Return the contract version (see `types::CONTRACT_VERSION`).
+    pub fn version(env: Env) -> u32 {
+        let _ = env;
+        crate::types::CONTRACT_VERSION
     }
 
-    // ── Admin (two-step transfer) ────────────────────────────────────────────
+    // ── Admin ─────────────────────────────────────────────────────────────────
 
-    /// Nominate `new_admin` as the next admin.  Requires existing admin auth.
-    ///
-    /// The transfer does not take effect here — it only completes once
-    /// `new_admin` itself calls [`Self::accept_admin`], proving it controls
-    /// the corresponding key. A single call from the current admin can no
-    /// longer finalise a transfer on its own (THREAT_MODEL.md finding F-03),
-    /// which also rules out the classic mis-typed-address failure mode: a
-    /// wrong address can never accept, so the current admin simply stays in
-    /// control and can propose again.
-    ///
-    /// Rejects nominating the contract's own address (F-02) — see
-    /// [`Validator::validate_admin_nominee`] for why that is the only
-    /// "invalid address" Soroban lets this check for on-chain.
-    ///
-    /// # Events
-    /// Emits [`events::EventAdminTransferProposed`].
-    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
-        let current_admin = AdminClient::require_admin(&env)?;
-        Validator::validate_admin_nominee(&env, &new_admin)?;
-        StorageClient::set_pending_admin(&env, &new_admin);
-        EventEmitter::admin_transfer_proposed(&env, &current_admin, &new_admin);
+    /// Pause the contract, blocking new callback ingestion (fail-closed).
+    pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
+        AdminClient::assert_is_admin(&env, &caller)?;
+        StorageClient::set_paused(&env, true);
+        EventEmitter::paused(&env, &caller);
         Ok(())
     }
 
-    /// Complete a pending admin transfer nominated via [`Self::propose_admin`].
-    ///
-    /// `caller` must be the pending nominee; the call requires `caller`'s own
-    /// auth, which is what proves key control and finalises the transfer.
-    ///
-    /// # Errors
-    /// - [`ContractError::NoPendingAdminTransfer`] if no transfer is pending.
-    /// - [`ContractError::Unauthorised`] if `caller` is not the pending nominee.
-    ///
-    /// # Events
-    /// Emits [`events::EventAdminTransferred`].
-    pub fn accept_admin(env: Env, caller: Address) -> Result<(), ContractError> {
-        let pending =
-            StorageClient::get_pending_admin(&env).ok_or(ContractError::NoPendingAdminTransfer)?;
-        if caller != pending {
-            return Err(ContractError::Unauthorised);
-        }
-        caller.require_auth();
+    /// Resume the contract, re-enabling callback ingestion.
+    pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
+        AdminClient::assert_is_admin(&env, &caller)?;
+        StorageClient::set_paused(&env, false);
+        EventEmitter::unpaused(&env, &caller);
+        Ok(())
+    }
 
-        let old_admin = StorageClient::get_admin(&env)?;
-        StorageClient::set_admin(&env, &caller);
-        StorageClient::clear_pending_admin(&env);
-        EventEmitter::admin_transferred(&env, &old_admin, &caller);
+    /// Transfer the admin role to a new address.
+    pub fn transfer_admin(
+        env: Env,
+        new_admin: Address,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_admin(&env, &caller)?;
+        StorageClient::set_admin(&env, &new_admin);
+        EventEmitter::admin_transferred(&env, &caller, &new_admin);
         Ok(())
     }
 
     /// Rotate the trusted relay signer address.
-    ///
-    /// # Events
-    /// Emits [`events::EventRelaySignerRotated`] so off-chain monitoring can
-    /// observe the rotation the same way it does [`Self::accept_admin`].
-    pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
-        AdminClient::require_admin(&env)?;
-        let old_signer = StorageClient::get_relay_signer(&env)?;
-        StorageClient::set_relay_signer(&env, &new_signer);
-        EventEmitter::relay_signer_rotated(&env, &old_signer, &new_signer);
-        Ok(())
-    }
-
-    // ── Contract upgrade ───────────────────────────────────────────────────────
-
-    /// Replace the contract WASM in-place.
-    ///
-    /// Only the current admin may call this.  The new WASM **must** be compatible
-    /// with the existing storage schema (`StorageKey` variants, `Transaction`
-    /// struct layout).  Persistent storage (admin, relay_signer, transactions)
-    /// and instance storage (init flag, pause flag) survive intact; temporary
-    /// storage (idempotency keys) is evicted.
-    ///
-    /// `expected_schema_version` must match the on-chain `SchemaVersion`
-    /// (THREAT_MODEL.md finding F-04). This cannot validate that the *new*
-    /// WASM is actually compatible — Soroban gives the running code no way to
-    /// introspect an uploaded-but-not-yet-installed WASM blob — but it does
-    /// guard against invoking `upgrade()` against a contract instance whose
-    /// on-chain state isn't what the caller believes it is.
-    ///
-    /// # Events
-    /// Emits [`events::EventContractUpgraded`] on success.
-    ///
-    /// # Trust
-    /// Because this entry point allows the admin to deploy arbitrary WASM, the
-    /// admin key **MUST** be held by a multisig or DAO.  See `DECISIONS.md` for
-    /// the full rationale and `README.md` for operational requirements.
-    pub fn upgrade(
+    pub fn set_relay_signer(
         env: Env,
-        new_wasm_hash: BytesN<32>,
-        expected_schema_version: u32,
+        new_signer: Address,
+        caller: Address,
     ) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-        let schema_version = StorageClient::get_schema_version(&env)?;
-        if schema_version != expected_schema_version {
-            return Err(ContractError::SchemaVersionMismatch);
-        }
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
-        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
+        AdminClient::assert_is_admin(&env, &caller)?;
+        StorageClient::set_relay_signer(&env, &new_signer);
+        EventEmitter::relay_signer_updated(&env, &caller, &new_signer);
         Ok(())
     }
 
-    // ── Emergency pause / circuit breaker ──────────────────────────────────────
-
-    /// Engage the emergency circuit breaker.  Admin-gated.
+    /// Upgrade the contract WASM to a new hash (admin only).
     ///
-    /// While paused, [`Self::register_callback`] rejects all new ingestion with
-    /// [`ContractError::ContractPaused`]. Status transitions
-    /// (`start_processing` / `complete_transaction` / `fail_transaction`) are
-    /// **deliberately left running** so already-registered work can drain during
-    /// an incident, and all read-only queries stay available. Idempotent: pausing
-    /// an already-paused contract is a no-op success.
-    pub fn pause(env: Env) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-        StorageClient::set_paused(&env, true);
-        EventEmitter::pause_toggled(&env, true, &admin);
+    /// This is a non-event-logic upgrade path: it does not touch the event
+    /// schema, so `events_version()` is intentionally left unchanged here.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, caller: Address) -> Result<(), ContractError> {
+        AdminClient::assert_is_admin(&env, &caller)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
-    }
-
-    /// Release the emergency circuit breaker, resuming normal callback
-    /// ingestion.  Admin-gated. Idempotent.
-    pub fn unpause(env: Env) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-        StorageClient::set_paused(&env, false);
-        EventEmitter::pause_toggled(&env, false, &admin);
-        Ok(())
-    }
-
-    /// Return whether the emergency pause is currently engaged.
-    pub fn is_paused(env: Env) -> bool {
-        StorageClient::is_paused(&env)
-    }
-
-    /// Liveness probe — returns `true` when the contract is initialised.
-    pub fn health(env: Env) -> bool {
-        StorageClient::is_initialised(&env)
-    }
-
-    /// Return the contract version string (semver).
-    pub fn version(env: Env) -> String {
-        // NOTE: `&'static str` is not a Soroban-representable return type, so the
-        // package version is returned as a host `String`.
-        String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 }

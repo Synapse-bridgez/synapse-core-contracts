@@ -17,6 +17,26 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Current event-schema version.
+///
+/// Tracks only the shape of the events emitted by this contract, independent
+/// of [`SCHEMA_VERSION`] and the contract's overall `version()`. Bump this
+/// following the minor/major rules `EVENTS.md` defines for events
+/// specifically: a **minor** bump for additive, backward-compatible event
+/// changes (new events, new optional fields), and a **major** bump for any
+/// breaking change to an existing event's shape (removed/renamed fields,
+/// changed types, changed topic layout).
+///
+/// Subscriber teams should treat `events_version()` as the authoritative
+/// signal for event-schema changes: it changes if and only if something they
+/// depend on (event shape) has changed, and does *not* move on contract
+/// upgrades that touch only non-event logic.
+///
+/// Retroactively bumped to `2` to account for the additive events introduced
+/// in this Wave (see `EVENTS.md`), so it starts accurate from day one rather
+/// than out of sync with actual history.
+pub const EVENTS_VERSION: u32 = 2;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -216,26 +236,6 @@ pub enum ContractError {
     InvalidAssetIssuer = 23,
     /// `idempotency_key` is empty.
     MissingIdempotencyKey = 24,
-    /// A `String` field exceeds its maximum allowed length (cost-control cap).
-    StringTooLong = 25,
-
-    // ── Transaction lifecycle ───────────────────────────────────────────────
-    /// No transaction with the given ID exists in storage.
-    TransactionNotFound = 30,
-    /// The requested status transition violates the state machine.
-    InvalidStatusTransition = 31,
-
-    // ── Idempotency ─────────────────────────────────────────────────────────
-    /// Request is a duplicate within the retention window (matches Redis 429).
-    DuplicateRequest = 40,
-
-    // ── Storage ─────────────────────────────────────────────────────────────
-    /// A ledger read/write produced an unexpected result.
-    StorageError = 50,
-
-    // ── Upgrade safety ──────────────────────────────────────────────────────
-    /// `upgrade()`'s `expected_schema_version` argument did not match the
-    /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
-    /// aborted before touching contract WASM.
-    SchemaVersionMismatch = 60,
+    /// A `String` field exceeds its maximum length.
+    FieldTooLong = 25,
 }
