@@ -45,9 +45,10 @@ supported.
 | [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
-| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Live** |
+| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` | **Live** |
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
 | [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
+| [`EventTransactionExpired`](#eventtransactionexpired) | `expire` | `EventEmitter::transaction_expired` | `expire_transaction` | **Live** |
 | [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
 | [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
 | [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
@@ -103,7 +104,7 @@ Field tables list fields in **declaration / XDR order**. Do not reorder.
 |--|--|
 | **Topics** | `synapse`, `status` |
 | **Struct** | `EventStatusChanged` |
-| **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction` |
+| **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` |
 | **When** | Every successful status-machine transition |
 | **Status** | Live |
 
@@ -151,6 +152,27 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `tx_id` | `String` | Transaction id |
 | `reason` | `String` | Short failure code |
 | `ledger` | `u32` | Ledger sequence at emit |
+
+### EventTransactionExpired
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `expire` |
+| **Struct** | `EventTransactionExpired` |
+| **Emitted by** | `expire_transaction` |
+| **When** | A stale `Pending` transaction is auto-expired. Emitted exactly once per successful `expire_transaction` call; never on a rejected/failed attempt. |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction id |
+| `expired_at` | `u32` | Ledger sequence at which the transaction was expired |
+
+**Emission order:** `expire_transaction` emits
+[`EventStatusChanged`](#eventstatuschanged) (`Pending` → `Failed`) first, then
+`EventTransactionExpired`. Subscribers that only care about the expiry signal
+SHOULD filter on the `expire` topic; those tracking the full state machine
+SHOULD consume both, in this order.
 
 ### EventAdminTransferProposed
 
@@ -213,114 +235,4 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | Field | Type | Meaning |
 |-------|------|---------|
 | `admin` | `Address` | Admin that authorised the upgrade |
-| `new_wasm_hash` | `BytesN<32>` | SHA-256 of the new WASM |
-| `ledger` | `u32` | Ledger sequence at emit |
-| `schema_version` | `u32` | On-chain schema version `expected_schema_version` was checked against (F-04). Additive trailing field, added after the initial 0.1.0 lock — Minor bump. |
-
-Verified by snapshot-style test
-`test_pause::test_upgrade_emits_contract_upgraded_event`
-(topics `synapse` / `upgrade`).
-
-### EventPauseToggled
-
-| | |
-|--|--|
-| **Topics** | `synapse`, `pause` |
-| **Struct** | `EventPauseToggled` |
-| **Emitted by** | `pause`, `unpause` |
-| **When** | Circuit breaker engaged or released (idempotent calls still emit) |
-| **Status** | Live |
-
-| Field | Type | Meaning |
-|-------|------|---------|
-| `paused` | `bool` | `true` = paused, `false` = unpaused |
-| `admin` | `Address` | Admin that toggled |
-| `ledger` | `u32` | Ledger sequence at emit |
-
----
-
-## 4. Guaranteed emission order
-
-When a single entry-point publishes **more than one** event, order is stable and
-part of the API. Subscribers MAY rely on relative order within the same
-invocation / transaction.
-
-| Entry-point | Order (first → last) |
-|-------------|----------------------|
-| `initialize` | 1. `init` |
-| `register_callback` (first write) | 1. `reg` |
-| `register_callback` (idempotent hit) | *(no events)* |
-| `start_processing` | 1. `status` (`Pending` → `Processing`) |
-| `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
-| `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
-| `propose_admin` | 1. `propose` |
-| `accept_admin` | 1. `admin` |
-| `set_relay_signer` | 1. `relay` |
-| `upgrade` | 1. `upgrade` |
-| `pause` / `unpause` | 1. `pause` |
-
-**Rationale for `complete_transaction`:** Phase 2 indexers that listen only to
-`done` still see completion; those that key off `status` with
-`new_status == Completed` see the transition first, then the hash-bearing
-`done` payload. Reordering would break dual-subscriber setups.
-
----
-
-## 5. Semver policy
-
-The string returned by `version()` is the contract package semver
-(`Cargo.toml` → `package.version`). **Event-schema compatibility follows that
-version**, independently of unrelated code churn.
-
-| Change | Version bump | Advance notice |
-|--------|--------------|----------------|
-| Add a **new optional field at the end** of an existing event struct\* | **Minor** or **Patch** | Recommended |
-| Add a **new event** (new topic[1] + struct) | **Minor** | Recommended |
-| Document-only / non-behavioural clarifications | **Patch** | Not required |
-| **Remove** a field | **Major** | **Required** — notify Phase 2 / Phase 3 |
-| **Rename** a field or topic symbol | **Major** | **Required** |
-| **Reorder** fields in a `#[contracttype]` struct | **Major** | **Required** |
-| **Change** a field’s type | **Major** | **Required** |
-| Change which events fire on a transition, or **emission order** | **Major** | **Required** |
-| Change topic[0] away from `synapse` | **Major** | **Required** |
-
-\*Soroban `#[contracttype]` structs are positional in XDR. “Additive at the end”
-is the only additive pattern allowed without a major bump; inserting a field in
-the middle is a **Major** (reorder). Prefer a **new event** over mid-struct
-inserts when in doubt.
-
-### Advance notice
-
-For any **Major** event-schema change:
-
-1. Open / update an issue tagged for subscriber teams **before** merging.
-2. Record the planned break under [`CHANGELOG.md` → Event schema → Unreleased](./CHANGELOG.md#event-schema).
-3. Bump `version()` major in the same release that ships the break.
-4. Keep the old behaviour available until the noticed cutover date when
-   operationally possible (dual-emit is allowed only within a documented
-   migration window and itself requires changelog entries).
-
----
-
-## 6. Verification checklist (maintainers)
-
-Before merging any PR that touches `src/events.rs` or event emit sites in
-`src/lib.rs`:
-
-1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
-2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
-   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`).
-3. Confirm multi-event order in §4 still matches the call sites.
-4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
-   and any new event tests; topics in assertions must match §3.
-5. If the schema changed, update [`CHANGELOG.md`](./CHANGELOG.md#event-schema)
-   and bump `version()` per §5.
-
----
-
-## 7. References
-
-- Implementation: [`src/events.rs`](./src/events.rs)
-- Status enum: [`src/types.rs`](./src/types.rs) (`TransactionStatus`)
-- Upgradability / admin trust: [`DECISIONS.md`](./DECISIONS.md)
-- Version probe: `SynapseCoreContract::version`
+| `new_wa

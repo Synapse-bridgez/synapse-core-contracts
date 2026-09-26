@@ -77,6 +77,20 @@ pub struct EventTransactionFailed {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::expire_transaction`] when a stale
+/// `Pending` transaction is auto-expired by the state machine.
+///
+/// Emitted exactly once per successful `expire_transaction` call, and never
+/// on a rejected/failed attempt. Subscribers should treat this as a terminal
+/// transition equivalent to [`EventTransactionFailed`].
+#[contracttype]
+pub struct EventTransactionExpired {
+    /// Identifier of the transaction that was expired.
+    pub tx_id: String,
+    /// Ledger sequence at which the expiry was recorded.
+    pub expired_at: u32,
+}
+
 /// Emitted when the admin role is transferred.
 #[contracttype]
 pub struct EventAdminTransferred {
@@ -176,6 +190,20 @@ impl EventEmitter {
         );
     }
 
+    /// Emit [`EventTransactionExpired`].
+    ///
+    /// Called exactly once per successful `expire_transaction` invocation,
+    /// after the transaction has been moved to its terminal expired state.
+    pub fn transaction_expired(env: &Env, tx_id: &String) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("expire")),
+            EventTransactionExpired {
+                tx_id: tx_id.clone(),
+                expired_at: env.ledger().sequence(),
+            },
+        );
+    }
+
     /// Emit [`EventContractUpgraded`].
     pub fn contract_upgraded(
         env: &Env,
@@ -233,64 +261,6 @@ impl EventEmitter {
             EventPauseToggled {
                 paused,
                 admin: admin.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventStatusChanged`].
-    pub fn status_changed(
-        env: &Env,
-        tx_id: &String,
-        old_status: TransactionStatus,
-        new_status: TransactionStatus,
-    ) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("status")),
-            EventStatusChanged {
-                tx_id: tx_id.clone(),
-                old_status,
-                new_status,
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventTransactionCompleted`].
-    pub fn transaction_completed(env: &Env, tx_id: &String, stellar_tx_hash: &String) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("done")),
-            EventTransactionCompleted {
-                tx_id: tx_id.clone(),
-                stellar_tx_hash: stellar_tx_hash.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventTransactionFailed`].
-    pub fn transaction_failed(env: &Env, tx_id: &String, reason: &String) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("fail")),
-            EventTransactionFailed {
-                tx_id: tx_id.clone(),
-                reason: reason.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventAdminTransferred`].
-    pub fn admin_transferred(
-        env: &Env,
-        old_admin: &soroban_sdk::Address,
-        new_admin: &soroban_sdk::Address,
-    ) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("admin")),
-            EventAdminTransferred {
-                old_admin: old_admin.clone(),
-                new_admin: new_admin.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
