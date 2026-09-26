@@ -140,6 +140,32 @@ pub struct EventPauseToggled {
     pub ledger: u32,
 }
 
+/// Emitted once per `batch_register_callback` call, after all per-transaction
+/// [`EventTransactionRegistered`] events for that batch have been published.
+///
+/// This is a compact aggregate signal: subscribers that only need "how many
+/// transactions did this one batch call register" can read `batch_size`
+/// directly instead of correlating many individual per-transaction events.
+/// Detailed per-item data remains available from the per-transaction events;
+/// this summary intentionally does not duplicate it.
+///
+/// **Emission ordering:** within a single batch call the contract emits the
+/// per-transaction events first (in batch order), then exactly one
+/// `EventBatchProcessed` last. This event is emitted even when the batch size
+/// is one, and `batch_size` is always the number of items in the batch.
+#[contracttype]
+pub struct EventBatchProcessed {
+    /// Address that invoked the batch registration.
+    pub caller: soroban_sdk::Address,
+    /// Number of transactions in the batch (accurate for a batch size of one).
+    pub batch_size: u32,
+    /// `tx_id` of the first transaction in the batch.
+    pub first_tx_id: String,
+    /// `tx_id` of the last transaction in the batch.
+    pub last_tx_id: String,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -171,6 +197,30 @@ impl EventEmitter {
                 amount: tx.amount,
                 asset_code: tx.asset_code.clone(),
                 anchor_transaction_id: tx.anchor_transaction_id.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventBatchProcessed`].
+    ///
+    /// Must be called once per batch call, after the per-transaction
+    /// [`EventTransactionRegistered`] events for the same batch have been
+    /// published, so subscribers observe the summary last.
+    pub fn batch_processed(
+        env: &Env,
+        caller: &soroban_sdk::Address,
+        batch_size: u32,
+        first_tx_id: &String,
+        last_tx_id: &String,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("batch")),
+            EventBatchProcessed {
+                caller: caller.clone(),
+                batch_size,
+                first_tx_id: first_tx_id.clone(),
+                last_tx_id: last_tx_id.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
@@ -233,64 +283,6 @@ impl EventEmitter {
             EventPauseToggled {
                 paused,
                 admin: admin.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventStatusChanged`].
-    pub fn status_changed(
-        env: &Env,
-        tx_id: &String,
-        old_status: TransactionStatus,
-        new_status: TransactionStatus,
-    ) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("status")),
-            EventStatusChanged {
-                tx_id: tx_id.clone(),
-                old_status,
-                new_status,
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventTransactionCompleted`].
-    pub fn transaction_completed(env: &Env, tx_id: &String, stellar_tx_hash: &String) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("done")),
-            EventTransactionCompleted {
-                tx_id: tx_id.clone(),
-                stellar_tx_hash: stellar_tx_hash.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventTransactionFailed`].
-    pub fn transaction_failed(env: &Env, tx_id: &String, reason: &String) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("fail")),
-            EventTransactionFailed {
-                tx_id: tx_id.clone(),
-                reason: reason.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventAdminTransferred`].
-    pub fn admin_transferred(
-        env: &Env,
-        old_admin: &soroban_sdk::Address,
-        new_admin: &soroban_sdk::Address,
-    ) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("admin")),
-            EventAdminTransferred {
-                old_admin: old_admin.clone(),
-                new_admin: new_admin.clone(),
                 ledger: env.ledger().sequence(),
             },
         );

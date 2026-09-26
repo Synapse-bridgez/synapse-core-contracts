@@ -43,6 +43,7 @@ supported.
 |-------|----------|---------|----------------|--------|
 | [`EventInitialised`](#eventinitialised) | `init` | `EventEmitter::initialised` | `initialize` | **Live** |
 | [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
+| [`EventBatchProcessed`](#eventbatchprocessed) | `batch` | `EventEmitter::batch_processed` | `batch_register_callback` | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
 | [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Live** |
@@ -96,6 +97,37 @@ Field tables list fields in **declaration / XDR order**. Do not reorder.
 | `asset_code` | `String` | SEP-11 asset code |
 | `anchor_transaction_id` | `String` | Anchor Platform id |
 | `ledger` | `u32` | Ledger sequence at emit |
+
+### EventBatchProcessed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `batch` |
+| **Struct** | `EventBatchProcessed` |
+| **Emitted by** | `batch_register_callback` |
+| **When** | Exactly once per successful batch call, after all per-transaction events for that call |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `caller` | `Address` | Address that invoked the batch entry point |
+| `batch_size` | `u32` | Number of transactions in the batch (accurate even when `1`) |
+| `first_tx_id` | `String` | `tx_id` of the first item in the batch |
+| `last_tx_id` | `String` | `tx_id` of the last item in the batch |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+This is a **compact aggregate signal** only. Per-transaction detail (accounts,
+amounts, asset codes, anchor ids) is available from the corresponding
+[`EventTransactionRegistered`](#eventtransactionregistered) events; subscribers
+SHOULD NOT expect the summary to duplicate batch contents.
+
+**Emission ordering (guaranteed):** within a single `batch_register_callback`
+call, the per-transaction events are emitted first, in batch order, and the
+single `EventBatchProcessed` summary is emitted **last**. A batch of `N`
+transactions therefore produces exactly `N` `EventTransactionRegistered` events
+followed by exactly one `EventBatchProcessed` event. This holds for the
+batch-size-of-one edge case (`N == 1`), where `batch_size == 1` and
+`first_tx_id == last_tx_id`.
 
 ### EventStatusChanged
 
@@ -213,13 +245,8 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | Field | Type | Meaning |
 |-------|------|---------|
 | `admin` | `Address` | Admin that authorised the upgrade |
-| `new_wasm_hash` | `BytesN<32>` | SHA-256 of the new WASM |
+| `new_wasm_hash` | `BytesN<32>` | New contract wasm hash |
 | `ledger` | `u32` | Ledger sequence at emit |
-| `schema_version` | `u32` | On-chain schema version `expected_schema_version` was checked against (F-04). Additive trailing field, added after the initial 0.1.0 lock — Minor bump. |
-
-Verified by snapshot-style test
-`test_pause::test_upgrade_emits_contract_upgraded_event`
-(topics `synapse` / `upgrade`).
 
 ### EventPauseToggled
 
@@ -228,99 +255,47 @@ Verified by snapshot-style test
 | **Topics** | `synapse`, `pause` |
 | **Struct** | `EventPauseToggled` |
 | **Emitted by** | `pause`, `unpause` |
-| **When** | Circuit breaker engaged or released (idempotent calls still emit) |
+| **When** | Pause state flips |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `paused` | `bool` | `true` = paused, `false` = unpaused |
-| `admin` | `Address` | Admin that toggled |
+| `paused` | `bool` | New pause state |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ---
 
-## 4. Guaranteed emission order
+## 4. Ordering guarantees
 
-When a single entry-point publishes **more than one** event, order is stable and
-part of the API. Subscribers MAY rely on relative order within the same
-invocation / transaction.
+Within a single transaction, events are emitted in the order the emitters are
+called. The following orderings are part of the contract surface:
 
-| Entry-point | Order (first → last) |
-|-------------|----------------------|
-| `initialize` | 1. `init` |
-| `register_callback` (first write) | 1. `reg` |
-| `register_callback` (idempotent hit) | *(no events)* |
-| `start_processing` | 1. `status` (`Pending` → `Processing`) |
-| `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
-| `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
-| `propose_admin` | 1. `propose` |
-| `accept_admin` | 1. `admin` |
-| `set_relay_signer` | 1. `relay` |
-| `upgrade` | 1. `upgrade` |
-| `pause` / `unpause` | 1. `pause` |
+- `initialize`: `EventInitialised` only.
+- `register_callback`: `EventTransactionRegistered` (first write only).
+- `batch_register_callback`: for a batch of `N` items, `N`
+  `EventTransactionRegistered` events in batch order, followed by exactly one
+  `EventBatchProcessed` summary event. The summary is always last, and is
+  emitted even when `N == 1`.
+- `start_processing` / `complete_transaction` / `fail_transaction`:
+  `EventStatusChanged` first, then the terminal event
+  (`EventTransactionCompleted` / `EventTransactionFailed`) where applicable.
+- `propose_admin` / `accept_admin` / `set_relay_signer` / `upgrade` / `pause` /
+  `unpause`: single event each.
 
-**Rationale for `complete_transaction`:** Phase 2 indexers that listen only to
-`done` still see completion; those that key off `status` with
-`new_status == Completed` see the transition first, then the hash-bearing
-`done` payload. Reordering would break dual-subscriber setups.
+Subscribers that need a per-batch aggregate MUST rely on the single trailing
+`EventBatchProcessed` rather than counting per-transaction events, so that
+idempotent replays (which do not re-emit `EventTransactionRegistered`) do not
+skew the count.
 
 ---
 
-## 5. Semver policy
+## Semver policy
 
-The string returned by `version()` is the contract package semver
-(`Cargo.toml` → `package.version`). **Event-schema compatibility follows that
-version**, independently of unrelated code churn.
+- **Patch** — documentation-only clarifications that do not change topics,
+  field names, types, or ordering.
+- **Minor** — additive changes: a new event, or a new trailing field on an
+  existing struct (subscribers must tolerate unknown trailing fields).
+- **Major** — any change to existing topic names, field names, field types,
+  field order, or the ordering guarantees in § 4.
 
-| Change | Version bump | Advance notice |
-|--------|--------------|----------------|
-| Add a **new optional field at the end** of an existing event struct\* | **Minor** or **Patch** | Recommended |
-| Add a **new event** (new topic[1] + struct) | **Minor** | Recommended |
-| Document-only / non-behavioural clarifications | **Patch** | Not required |
-| **Remove** a field | **Major** | **Required** — notify Phase 2 / Phase 3 |
-| **Rename** a field or topic symbol | **Major** | **Required** |
-| **Reorder** fields in a `#[contracttype]` struct | **Major** | **Required** |
-| **Change** a field’s type | **Major** | **Required** |
-| Change which events fire on a transition, or **emission order** | **Major** | **Required** |
-| Change topic[0] away from `synapse` | **Major** | **Required** |
-
-\*Soroban `#[contracttype]` structs are positional in XDR. “Additive at the end”
-is the only additive pattern allowed without a major bump; inserting a field in
-the middle is a **Major** (reorder). Prefer a **new event** over mid-struct
-inserts when in doubt.
-
-### Advance notice
-
-For any **Major** event-schema change:
-
-1. Open / update an issue tagged for subscriber teams **before** merging.
-2. Record the planned break under [`CHANGELOG.md` → Event schema → Unreleased](./CHANGELOG.md#event-schema).
-3. Bump `version()` major in the same release that ships the break.
-4. Keep the old behaviour available until the noticed cutover date when
-   operationally possible (dual-emit is allowed only within a documented
-   migration window and itself requires changelog entries).
-
----
-
-## 6. Verification checklist (maintainers)
-
-Before merging any PR that touches `src/events.rs` or event emit sites in
-`src/lib.rs`:
-
-1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
-2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
-   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`).
-3. Confirm multi-event order in §4 still matches the call sites.
-4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
-   and any new event tests; topics in assertions must match §3.
-5. If the schema changed, update [`CHANGELOG.md`](./CHANGELOG.md#event-schema)
-   and bump `version()` per §5.
-
----
-
-## 7. References
-
-- Implementation: [`src/events.rs`](./src/events.rs)
-- Status enum: [`src/types.rs`](./src/types.rs) (`TransactionStatus`)
-- Upgradability / admin trust: [`DECISIONS.md`](./DECISIONS.md)
-- Version probe: `SynapseCoreContract::version`
+Adding `EventBatchProcessed` is a **minor** (additive) change.
