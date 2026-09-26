@@ -251,3 +251,8 @@ PR review or release cadence.
 Live emitters today: `init`, `reg`, `status`, `done`, `fail`, `propose`,
 `admin`, `relay`, `pause`, `upgrade` — the full catalogue in `EVENTS.md` is
 wired.
+
+## Handsoff notes
+
+<!-- handsoff-issue-109 -->
+- #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
