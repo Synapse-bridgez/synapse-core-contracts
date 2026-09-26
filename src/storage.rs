@@ -12,9 +12,12 @@
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, BytesN, Env, String};
 
-use crate::types::{ContractError, StorageKey, Transaction};
+use crate::types::{
+    ContractError, PendingUpgrade, SchemaCompatRange, StorageKey, Transaction, UpgradeSnapshot,
+    DEFAULT_UPGRADE_DELAY_LEDGERS,
+};
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
@@ -125,6 +128,135 @@ impl StorageClient {
         env.storage()
             .persistent()
             .set(&StorageKey::SchemaVersion, &version);
+    }
+
+    // ── Schema compatibility range ───────────────────────────────────────────
+
+    /// Return the admin-configured compatibility window, defaulting to
+    /// exact-match `(current, current)` when unset (ADR-0006 backward compat).
+    pub fn get_schema_compat_range(env: &Env, current: u32) -> SchemaCompatRange {
+        let min = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::MinCompatibleSchema)
+            .unwrap_or(current);
+        let max = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::MaxCompatibleSchema)
+            .unwrap_or(current);
+        SchemaCompatRange { min, max }
+    }
+
+    /// Persist the compatibility window. Caller must validate inclusion of
+    /// the current schema version before calling.
+    pub fn set_schema_compat_range(env: &Env, range: &SchemaCompatRange) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::MinCompatibleSchema, &range.min);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::MaxCompatibleSchema, &range.max);
+    }
+
+    // ── Timelocked upgrade ────────────────────────────────────────────────────
+
+    /// Read the pending upgrade, if any.
+    pub fn get_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
+        env.storage().persistent().get(&StorageKey::PendingUpgrade)
+    }
+
+    /// Persist (or replace) the pending upgrade proposal.
+    pub fn set_pending_upgrade(env: &Env, pending: &PendingUpgrade) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PendingUpgrade, pending);
+    }
+
+    /// Clear a pending upgrade after finalize or cancel.
+    pub fn clear_pending_upgrade(env: &Env) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::PendingUpgrade);
+    }
+
+    /// Upgrade timelock delay in ledgers (default
+    /// [`DEFAULT_UPGRADE_DELAY_LEDGERS`]).
+    pub fn get_upgrade_delay(env: &Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::UpgradeDelay)
+            .unwrap_or(DEFAULT_UPGRADE_DELAY_LEDGERS)
+    }
+
+    /// Persist the upgrade timelock delay.
+    pub fn set_upgrade_delay(env: &Env, delay_ledgers: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::UpgradeDelay, &delay_ledgers);
+    }
+
+    // ── Upgrade history (single-slot previous) ────────────────────────────────
+
+    /// Currently installed WASM hash, if recorded.
+    pub fn get_current_wasm_hash(env: &Env) -> Option<BytesN<32>> {
+        env.storage().persistent().get(&StorageKey::CurrentWasmHash)
+    }
+
+    /// Record the currently installed WASM hash (post-deploy or post-upgrade).
+    pub fn set_current_wasm_hash(env: &Env, hash: &BytesN<32>) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::CurrentWasmHash, hash);
+    }
+
+    /// Previous upgrade snapshot for rollback, if any.
+    pub fn get_previous_upgrade(env: &Env) -> Option<UpgradeSnapshot> {
+        env.storage().persistent().get(&StorageKey::PreviousUpgrade)
+    }
+
+    /// Persist the previous-upgrade snapshot.
+    pub fn set_previous_upgrade(env: &Env, snap: &UpgradeSnapshot) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PreviousUpgrade, snap);
+    }
+
+    /// Clear the previous-upgrade snapshot (e.g. after a successful rollback).
+    pub fn clear_previous_upgrade(env: &Env) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::PreviousUpgrade);
+    }
+
+    /// Whether the most recent upgrade applied a non-reversible migration.
+    pub fn last_upgrade_migrated(env: &Env) -> bool {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::LastUpgradeMigrated)
+            .unwrap_or(false)
+    }
+
+    /// Record whether the most recent upgrade applied a migration.
+    pub fn set_last_upgrade_migrated(env: &Env, migrated: bool) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::LastUpgradeMigrated, &migrated);
+    }
+
+    // ── Migration scaffolding marker ──────────────────────────────────────────
+
+    /// Read the migration marker, if present.
+    #[cfg(test)]
+    pub fn get_migration_marker(env: &Env) -> Option<u32> {
+        env.storage().persistent().get(&StorageKey::MigrationMarker)
+    }
+
+    /// Write the migration marker (scaffolding / tests).
+    pub fn set_migration_marker(env: &Env, migration_id: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::MigrationMarker, &migration_id);
     }
 
     // ── Transactions ──────────────────────────────────────────────────────────

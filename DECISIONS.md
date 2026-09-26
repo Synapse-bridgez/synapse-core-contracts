@@ -172,11 +172,14 @@ The admin key is the **single most important secret** in the Synapse Bridge ecos
 
 ---
 
-## 7. Future Enhancements (Out of Scope for Phase 1)
+## 7. Future Enhancements
 
-- **Timelocked upgrade**: Require a two-step process where `schedule_upgrade()` sets a pending hash and `execute_upgrade()` can only be called after N ledgers
-- **Emergency pause before upgrade**: Require the contract to be paused before an upgrade can execute, preventing race conditions with in-flight callbacks
+- ~~**Timelocked upgrade**~~ — **Done** (issue #81 / ADR-0004):
+  `propose_upgrade` / `finalize_upgrade` / `cancel_upgrade`
+- **Emergency pause before upgrade**: Require the contract to be paused before an upgrade can execute, preventing race conditions with in-flight callbacks (still F-05)
 - **DAO-controlled admin**: Replace the single-address admin with a Soroban DAO contract
+- **Resumable multi-call migrations**: For transforms exceeding
+  `MAX_MIGRATION_STORAGE_TOUCHES` (ADR-0005 v1 documents the limitation)
 
 ---
 

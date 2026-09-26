@@ -17,6 +17,36 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Event schema
 
+- Added `EventUpgradeProposed` (`up_prop`), `EventUpgradeFinalized`
+  (`up_fin`), `EventUpgradeCancelled` (`up_can`), `EventUpgradeRolledBack`
+  (`rollback`), `EventUpgradeMigrated` (`migrate`) — additive new events
+  (Minor) for issues #81–#83.
+
+### Added
+
+- Timelocked upgrade flow (#81 / ADR-0004): `propose_upgrade`,
+  `finalize_upgrade`, `cancel_upgrade`, `get_pending_upgrade`,
+  `set_upgrade_delay` / `upgrade_delay`. Second propose **replaces** and
+  restarts the delay.
+- `upgrade_and_migrate` + versioned migration registry (#82 / ADR-0005)
+  with `MAX_MIGRATION_STORAGE_TOUCHES` bound; oversized/resumable
+  migrations documented as out of scope for v1.
+- `rollback_upgrade` single-step previous-WASM restore (#83); blocked when
+  the last upgrade used `upgrade_and_migrate` (`UpgradeNotReversible`).
+  `register_installed_wasm` seeds the history slot post-deploy.
+- Schema compatibility ranges (#84 / ADR-0006):
+  `set_schema_compatibility_range` / `schema_compatibility_range`; default
+  unset behaviour remains exact-match (ADR-0003).
+
+### Changed
+
+- THREAT_MODEL.md §8 **R-05** status updated from accepted (no timelock) to
+  **mitigated** via the propose/finalize flow.
+- `upgrade()` schema guard now checks the configured `[min, max]` range
+  instead of exact equality only (range defaults to exact match).
+
+### Event schema (prior unreleased)
+
 - Added `EventRelaySignerRotated` (topic `relay`), emitted by
   `set_relay_signer`. Additive new event per
   [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy) — Minor bump.

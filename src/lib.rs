@@ -28,6 +28,7 @@
 
 mod admin;
 mod events;
+mod migration;
 mod storage;
 mod types;
 mod validation;
@@ -35,15 +36,19 @@ mod validation;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
+mod test_upgrade_safety;
+#[cfg(test)]
 mod tests;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
+use crate::migration::MigrationRegistry;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, PendingUpgrade, SchemaCompatRange, Transaction,
+    TransactionStatus, UpgradeSnapshot, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -274,15 +279,48 @@ impl SynapseCoreContract {
 
     /// Return the current on-chain storage schema version, or
     /// [`ContractError::NotInitialised`]. The value `upgrade()` requires
-    /// callers to pass as `expected_schema_version`.
+    /// callers to pass as `expected_schema_version` when no compatibility
+    /// range has been configured (exact-match default).
     pub fn schema_version(env: Env) -> Result<u32, ContractError> {
         StorageClient::get_schema_version(&env)
+    }
+
+    /// Return the admin-configured schema compatibility range.
+    ///
+    /// When unset, both bounds equal the current [`Self::schema_version`]
+    /// (exact-match behaviour identical to pre-ADR-0006 deployments).
+    pub fn schema_compatibility_range(env: Env) -> Result<SchemaCompatRange, ContractError> {
+        let current = StorageClient::get_schema_version(&env)?;
+        Ok(StorageClient::get_schema_compat_range(&env, current))
     }
 
     /// Return the pending admin nominee, if an admin transfer is in
     /// progress. `None` once accepted or if none was ever proposed.
     pub fn pending_admin(env: Env) -> Option<Address> {
         StorageClient::get_pending_admin(&env)
+    }
+
+    /// Return the pending timelocked upgrade, if any — hash, expected schema
+    /// version, and ETA ledger for off-chain / subscriber monitoring.
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        StorageClient::get_pending_upgrade(&env)
+    }
+
+    /// Return the configured upgrade timelock delay in ledgers.
+    pub fn upgrade_delay(env: Env) -> u32 {
+        StorageClient::get_upgrade_delay(&env)
+    }
+
+    /// Return the previous-upgrade snapshot used by [`Self::rollback_upgrade`],
+    /// if one is recorded.
+    pub fn previous_upgrade(env: Env) -> Option<UpgradeSnapshot> {
+        StorageClient::get_previous_upgrade(&env)
+    }
+
+    /// Return whether the most recent upgrade applied a non-reversible
+    /// migration (blocks [`Self::rollback_upgrade`]).
+    pub fn last_upgrade_migrated(env: Env) -> bool {
+        StorageClient::last_upgrade_migrated(&env)
     }
 
     // ── Admin (two-step transfer) ────────────────────────────────────────────
@@ -352,7 +390,12 @@ impl SynapseCoreContract {
 
     // ── Contract upgrade ───────────────────────────────────────────────────────
 
-    /// Replace the contract WASM in-place.
+    /// Replace the contract WASM in-place (immediate; no timelock).
+    ///
+    /// Prefer [`Self::propose_upgrade`] / [`Self::finalize_upgrade`] for
+    /// production upgrades so guardians have a review window (THREAT_MODEL.md
+    /// R-05 / ADR-0004). This entry point remains for emergency use,
+    /// [`Self::rollback_upgrade`], and as the shared WASM-swap primitive.
     ///
     /// Only the current admin may call this.  The new WASM **must** be compatible
     /// with the existing storage schema (`StorageKey` variants, `Transaction`
@@ -360,33 +403,193 @@ impl SynapseCoreContract {
     /// and instance storage (init flag, pause flag) survive intact; temporary
     /// storage (idempotency keys) is evicted.
     ///
-    /// `expected_schema_version` must match the on-chain `SchemaVersion`
-    /// (THREAT_MODEL.md finding F-04). This cannot validate that the *new*
-    /// WASM is actually compatible — Soroban gives the running code no way to
-    /// introspect an uploaded-but-not-yet-installed WASM blob — but it does
-    /// guard against invoking `upgrade()` against a contract instance whose
-    /// on-chain state isn't what the caller believes it is.
+    /// `expected_schema_version` must fall within the on-chain compatibility
+    /// range (default: exact match to `schema_version()` — ADR-0003 / ADR-0006).
     ///
     /// # Events
     /// Emits [`events::EventContractUpgraded`] on success.
-    ///
-    /// # Trust
-    /// Because this entry point allows the admin to deploy arbitrary WASM, the
-    /// admin key **MUST** be held by a multisig or DAO.  See `DECISIONS.md` for
-    /// the full rationale and `README.md` for operational requirements.
     pub fn upgrade(
         env: Env,
         new_wasm_hash: BytesN<32>,
         expected_schema_version: u32,
     ) -> Result<(), ContractError> {
         let admin = AdminClient::require_admin(&env)?;
-        let schema_version = StorageClient::get_schema_version(&env)?;
-        if schema_version != expected_schema_version {
-            return Err(ContractError::SchemaVersionMismatch);
+        Self::perform_upgrade(&env, &admin, new_wasm_hash, expected_schema_version, false)?;
+        Ok(())
+    }
+
+    /// Schedule a timelocked upgrade. Admin-gated.
+    ///
+    /// Starts (or **replaces**) the pending-upgrade window. A second
+    /// `propose_upgrade` while one is already pending overwrites the prior
+    /// proposal and restarts the delay from the current ledger — documented
+    /// replace semantics (same pattern as `propose_admin`).
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeProposed`] (topic `up_prop`).
+    pub fn propose_upgrade(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        // Validate the schema argument up front so a doomed proposal is
+        // rejected before the timelock starts.
+        Self::assert_schema_compatible(&env, expected_schema_version)?;
+
+        let delay = StorageClient::get_upgrade_delay(&env);
+        let eta = env.ledger().sequence().saturating_add(delay);
+        let pending = PendingUpgrade {
+            wasm_hash: new_wasm_hash.clone(),
+            expected_schema_version,
+            eta_ledger: eta,
+        };
+        StorageClient::set_pending_upgrade(&env, &pending);
+        EventEmitter::upgrade_proposed(&env, &admin, &new_wasm_hash, expected_schema_version, eta);
+        Ok(())
+    }
+
+    /// Complete a pending timelocked upgrade after the delay has elapsed.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingUpgrade`] if nothing is pending.
+    /// - [`ContractError::UpgradeTimelockNotElapsed`] if called before ETA.
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeFinalized`] (topic `up_fin`) and the
+    /// existing [`events::EventContractUpgraded`] (topic `upgrade`).
+    pub fn finalize_upgrade(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let pending =
+            StorageClient::get_pending_upgrade(&env).ok_or(ContractError::NoPendingUpgrade)?;
+        if env.ledger().sequence() < pending.eta_ledger {
+            return Err(ContractError::UpgradeTimelockNotElapsed);
         }
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
-        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
+        StorageClient::clear_pending_upgrade(&env);
+        Self::perform_upgrade(
+            &env,
+            &admin,
+            pending.wasm_hash.clone(),
+            pending.expected_schema_version,
+            false,
+        )?;
+        EventEmitter::upgrade_finalized(
+            &env,
+            &admin,
+            &pending.wasm_hash,
+            pending.expected_schema_version,
+        );
+        Ok(())
+    }
+
+    /// Abort a pending timelocked upgrade. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeCancelled`] (topic `up_can`).
+    pub fn cancel_upgrade(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let pending =
+            StorageClient::get_pending_upgrade(&env).ok_or(ContractError::NoPendingUpgrade)?;
+        StorageClient::clear_pending_upgrade(&env);
+        EventEmitter::upgrade_cancelled(&env, &admin, &pending.wasm_hash);
+        Ok(())
+    }
+
+    /// Configure the upgrade timelock delay in ledgers. Admin-gated.
+    pub fn set_upgrade_delay(env: Env, delay_ledgers: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_upgrade_delay(&env, delay_ledgers);
+        Ok(())
+    }
+
+    /// Record the currently installed WASM hash without upgrading.
+    ///
+    /// Call once after deploy so the first real upgrade can populate the
+    /// previous-hash rollback slot (ADR-0004 / issue #83 single-slot history).
+    pub fn register_installed_wasm(env: Env, wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_current_wasm_hash(&env, &wasm_hash);
+        Ok(())
+    }
+
+    /// Upgrade WASM and run a bounded migration in the same invocation.
+    ///
+    /// Order: schema-range check → migration registry dispatch → WASM swap.
+    /// Any migration `Err` aborts the invoke (Soroban rolls storage back) so
+    /// the ledger is unchanged and the WASM is never swapped.
+    ///
+    /// Sets the non-reversible-migration flag so [`Self::rollback_upgrade`]
+    /// will refuse until a later non-migrating upgrade clears it.
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeMigrated`] then [`events::EventContractUpgraded`].
+    pub fn upgrade_and_migrate(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+        migration_id: u32,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        Self::assert_schema_compatible(&env, expected_schema_version)?;
+
+        let touches = MigrationRegistry::run(&env, migration_id)?;
+        Self::perform_upgrade(
+            &env,
+            &admin,
+            new_wasm_hash.clone(),
+            expected_schema_version,
+            true,
+        )?;
+        EventEmitter::upgrade_migrated(&env, &admin, migration_id, touches, &new_wasm_hash);
+        Ok(())
+    }
+
+    /// Roll back to the immediately-previous WASM hash recorded by the last
+    /// successful upgrade. Admin-gated. Single-step only.
+    ///
+    /// # Errors
+    /// - [`ContractError::NothingToRollback`] if no previous snapshot exists.
+    /// - [`ContractError::UpgradeNotReversible`] if the latest upgrade ran
+    ///   [`Self::upgrade_and_migrate`].
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeRolledBack`] (topic `rollback`) and
+    /// [`events::EventContractUpgraded`].
+    pub fn rollback_upgrade(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        if StorageClient::last_upgrade_migrated(&env) {
+            return Err(ContractError::UpgradeNotReversible);
+        }
+        let prev =
+            StorageClient::get_previous_upgrade(&env).ok_or(ContractError::NothingToRollback)?;
+        StorageClient::clear_previous_upgrade(&env);
+        Self::perform_upgrade(
+            &env,
+            &admin,
+            prev.wasm_hash.clone(),
+            prev.schema_version,
+            false,
+        )?;
+        EventEmitter::upgrade_rolled_back(&env, &admin, &prev.wasm_hash, prev.schema_version);
+        Ok(())
+    }
+
+    /// Set the schema compatibility range used by upgrade guards. Admin-gated.
+    ///
+    /// The range **must** include the current on-chain schema version or the
+    /// call is rejected with [`ContractError::InvalidSchemaCompatRange`] —
+    /// never silently create an un-upgradeable contract.
+    pub fn set_schema_compatibility_range(
+        env: Env,
+        min: u32,
+        max: u32,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let current = StorageClient::get_schema_version(&env)?;
+        if min > max || current < min || current > max {
+            return Err(ContractError::InvalidSchemaCompatRange);
+        }
+        StorageClient::set_schema_compat_range(&env, &SchemaCompatRange { min, max });
         Ok(())
     }
 
@@ -431,5 +634,48 @@ impl SynapseCoreContract {
         // NOTE: `&'static str` is not a Soroban-representable return type, so the
         // package version is returned as a host `String`.
         String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+}
+
+impl SynapseCoreContract {
+    /// Check `expected` against the configured compatibility range
+    /// (exact match when unset).
+    fn assert_schema_compatible(env: &Env, expected: u32) -> Result<u32, ContractError> {
+        let current = StorageClient::get_schema_version(env)?;
+        let range = StorageClient::get_schema_compat_range(env, current);
+        if expected < range.min || expected > range.max {
+            return Err(ContractError::SchemaVersionMismatch);
+        }
+        Ok(current)
+    }
+
+    /// Shared WASM-swap primitive used by `upgrade`, `finalize_upgrade`,
+    /// `upgrade_and_migrate`, and `rollback_upgrade`.
+    fn perform_upgrade(
+        env: &Env,
+        admin: &Address,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+        migrated: bool,
+    ) -> Result<(), ContractError> {
+        let schema_version = Self::assert_schema_compatible(env, expected_schema_version)?;
+
+        // Snapshot the currently recorded hash so rollback can restore it.
+        if let Some(current_hash) = StorageClient::get_current_wasm_hash(env) {
+            StorageClient::set_previous_upgrade(
+                env,
+                &UpgradeSnapshot {
+                    wasm_hash: current_hash,
+                    schema_version,
+                },
+            );
+        }
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        StorageClient::set_current_wasm_hash(env, &new_wasm_hash);
+        StorageClient::set_last_upgrade_migrated(env, migrated);
+        EventEmitter::contract_upgraded(env, admin, &new_wasm_hash, schema_version);
+        Ok(())
     }
 }

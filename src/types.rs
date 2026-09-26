@@ -3,19 +3,26 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, BytesN, String};
 
 /// Current on-chain storage schema version.
 ///
 /// Bump this whenever [`Transaction`] or [`StorageKey`] layout changes in a
 /// way that a running upgrade needs to be aware of. `initialize()` stores it;
-/// `SynapseCoreContract::upgrade()` requires the caller to pass the value it
-/// currently expects on-chain before proceeding (THREAT_MODEL.md finding
-/// F-04). This cannot validate the *new* WASM's schema — Soroban gives the
-/// currently-running code no way to introspect an uploaded-but-not-yet-
-/// installed WASM blob — so it guards against upgrading the wrong deployment
-/// or an unexpected on-chain state, not against an incompatible new binary.
+/// `SynapseCoreContract::upgrade()` requires the caller to pass a value that
+/// falls within the admin-configured compatibility range (default: exact
+/// match to the on-chain version — THREAT_MODEL.md finding F-04 / ADR-0003
+/// as amended by ADR-0006). This cannot validate the *new* WASM's schema —
+/// Soroban gives the currently-running code no way to introspect an
+/// uploaded-but-not-yet-installed WASM blob — so it guards against upgrading
+/// the wrong deployment or an unexpected on-chain state, not against an
+/// incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Default timelock delay for [`crate::SynapseCoreContract::propose_upgrade`],
+/// in ledgers (~24h at ~5s/ledger). Overridable via
+/// [`crate::SynapseCoreContract::set_upgrade_delay`].
+pub const DEFAULT_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
 
 // ─── Transaction status ───────────────────────────────────────────────────────
 
@@ -172,6 +179,65 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Singleton: pending timelocked upgrade, if any. See [`PendingUpgrade`].
+    PendingUpgrade,
+    /// Singleton: upgrade timelock delay in ledgers. Absent →
+    /// [`DEFAULT_UPGRADE_DELAY_LEDGERS`].
+    UpgradeDelay,
+    /// Singleton: last successfully installed WASM hash (set by
+    /// `register_installed_wasm` / every successful upgrade). Used as the
+    /// source for the previous-hash rollback slot.
+    CurrentWasmHash,
+    /// Singleton: immediately-previous WASM hash + schema for
+    /// [`crate::SynapseCoreContract::rollback_upgrade`]. See [`UpgradeSnapshot`].
+    PreviousUpgrade,
+    /// Singleton: `true` when the most recent upgrade ran a migration that
+    /// is not safely reversible via rollback.
+    LastUpgradeMigrated,
+    /// Singleton: minimum compatible schema version for upgrade guards.
+    /// Absent → treat as exact match to [`StorageKey::SchemaVersion`].
+    MinCompatibleSchema,
+    /// Singleton: maximum compatible schema version for upgrade guards.
+    /// Absent → treat as exact match to [`StorageKey::SchemaVersion`].
+    MaxCompatibleSchema,
+    /// Singleton: optional marker written by scaffolding migrations
+    /// (`migration.rs`) so atomic-revert tests can observe writes.
+    MigrationMarker,
+}
+
+/// Pending timelocked upgrade recorded by
+/// [`crate::SynapseCoreContract::propose_upgrade`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingUpgrade {
+    /// WASM hash that will be installed on finalize.
+    pub wasm_hash: BytesN<32>,
+    /// Schema version the finalize call will assert against the compatibility
+    /// range (same meaning as `upgrade`'s `expected_schema_version`).
+    pub expected_schema_version: u32,
+    /// First ledger sequence at which [`crate::SynapseCoreContract::finalize_upgrade`]
+    /// is allowed to proceed.
+    pub eta_ledger: u32,
+}
+
+/// Single-slot upgrade-history snapshot used by
+/// [`crate::SynapseCoreContract::rollback_upgrade`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeSnapshot {
+    /// WASM hash to restore on rollback.
+    pub wasm_hash: BytesN<32>,
+    /// Schema version that was current when this snapshot was taken (passed
+    /// as `expected_schema_version` on rollback).
+    pub schema_version: u32,
+}
+
+/// Admin-configured schema compatibility window.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaCompatRange {
+    pub min: u32,
+    pub max: u32,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -234,8 +300,27 @@ pub enum ContractError {
     StorageError = 50,
 
     // ── Upgrade safety ──────────────────────────────────────────────────────
-    /// `upgrade()`'s `expected_schema_version` argument did not match the
-    /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
-    /// aborted before touching contract WASM.
+    /// `upgrade()`'s `expected_schema_version` argument did not fall within
+    /// the on-chain compatibility range; the upgrade was aborted before
+    /// touching contract WASM.
     SchemaVersionMismatch = 60,
+    /// `finalize_upgrade` was called before the pending upgrade's ETA ledger.
+    UpgradeTimelockNotElapsed = 61,
+    /// No pending upgrade exists for finalize/cancel.
+    NoPendingUpgrade = 62,
+    /// `rollback_upgrade` was called with no previous WASM snapshot recorded.
+    NothingToRollback = 63,
+    /// Rollback refused because the latest upgrade applied a non-reversible
+    /// migration (`upgrade_and_migrate`).
+    UpgradeNotReversible = 64,
+    /// `migration_id` is not registered in this WASM's migration registry.
+    UnknownMigration = 65,
+    /// A migration routine reported failure (triggers full invoke rollback).
+    MigrationFailed = 66,
+    /// Planned migration storage touches exceed
+    /// [`crate::migration::MAX_MIGRATION_STORAGE_TOUCHES`].
+    MigrationBoundExceeded = 67,
+    /// Admin-configured schema compatibility range would exclude the current
+    /// on-chain schema version (or `min > max`).
+    InvalidSchemaCompatRange = 68,
 }

@@ -126,6 +126,59 @@ pub struct EventContractUpgraded {
     pub schema_version: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::propose_upgrade`] when a timelocked
+/// upgrade is scheduled (distinct from [`EventContractUpgraded`]).
+#[contracttype]
+pub struct EventUpgradeProposed {
+    pub admin: soroban_sdk::Address,
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub expected_schema_version: u32,
+    /// Ledger sequence at which finalize becomes legal.
+    pub eta_ledger: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::finalize_upgrade`] after the timelock
+/// elapses and the WASM swap succeeds (distinct from the immediate
+/// [`EventContractUpgraded`] topic used by `upgrade` itself).
+#[contracttype]
+pub struct EventUpgradeFinalized {
+    pub admin: soroban_sdk::Address,
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub schema_version: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::cancel_upgrade`] when a pending
+/// timelocked upgrade is aborted.
+#[contracttype]
+pub struct EventUpgradeCancelled {
+    pub admin: soroban_sdk::Address,
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::rollback_upgrade`] — distinct from a
+/// forward [`EventContractUpgraded`].
+#[contracttype]
+pub struct EventUpgradeRolledBack {
+    pub admin: soroban_sdk::Address,
+    pub restored_wasm_hash: soroban_sdk::BytesN<32>,
+    pub schema_version: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::upgrade_and_migrate`] after a successful
+/// bounded migration (in addition to [`EventContractUpgraded`]).
+#[contracttype]
+pub struct EventUpgradeMigrated {
+    pub admin: soroban_sdk::Address,
+    pub migration_id: u32,
+    pub storage_touches: u32,
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub ledger: u32,
+}
+
 /// Emitted by [`SynapseCoreContract::pause`] / [`SynapseCoreContract::unpause`]
 /// whenever the emergency circuit breaker is toggled.
 ///
@@ -190,6 +243,98 @@ impl EventEmitter {
                 new_wasm_hash: new_wasm_hash.clone(),
                 ledger: env.ledger().sequence(),
                 schema_version,
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeProposed`] (topic `up_prop`).
+    pub fn upgrade_proposed(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        wasm_hash: &soroban_sdk::BytesN<32>,
+        expected_schema_version: u32,
+        eta_ledger: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("up_prop")),
+            EventUpgradeProposed {
+                admin: admin.clone(),
+                wasm_hash: wasm_hash.clone(),
+                expected_schema_version,
+                eta_ledger,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeFinalized`] (topic `up_fin`).
+    pub fn upgrade_finalized(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        wasm_hash: &soroban_sdk::BytesN<32>,
+        schema_version: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("up_fin")),
+            EventUpgradeFinalized {
+                admin: admin.clone(),
+                wasm_hash: wasm_hash.clone(),
+                schema_version,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeCancelled`] (topic `up_can`).
+    pub fn upgrade_cancelled(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        wasm_hash: &soroban_sdk::BytesN<32>,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("up_can")),
+            EventUpgradeCancelled {
+                admin: admin.clone(),
+                wasm_hash: wasm_hash.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeRolledBack`] (topic `rollback`).
+    pub fn upgrade_rolled_back(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        restored_wasm_hash: &soroban_sdk::BytesN<32>,
+        schema_version: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rollback")),
+            EventUpgradeRolledBack {
+                admin: admin.clone(),
+                restored_wasm_hash: restored_wasm_hash.clone(),
+                schema_version,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeMigrated`] (topic `migrate`).
+    pub fn upgrade_migrated(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        migration_id: u32,
+        storage_touches: u32,
+        new_wasm_hash: &soroban_sdk::BytesN<32>,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("migrate")),
+            EventUpgradeMigrated {
+                admin: admin.clone(),
+                migration_id,
+                storage_touches,
+                new_wasm_hash: new_wasm_hash.clone(),
+                ledger: env.ledger().sequence(),
             },
         );
     }
