@@ -127,6 +127,51 @@ impl StorageClient {
             .set(&StorageKey::SchemaVersion, &version);
     }
 
+    // ── Per-anchor storage quota ──────────────────────────────────────────────
+
+    /// Read the admin-configured per-anchor storage-cost quota.
+    ///
+    /// The quota is an *approximate* proxy for on-ledger storage footprint,
+    /// expressed in "storage units" where one unit is charged per active
+    /// transaction entry plus one unit per byte of its string fields.  It is
+    /// deliberately cheap to compute and does **not** meter exact ledger byte
+    /// cost (key encoding, XDR framing, TTL metadata and rent are ignored).
+    ///
+    /// Returns `None` when no quota has been configured, in which case
+    /// enforcement is disabled and behaviour is unchanged.
+    pub fn get_anchor_storage_quota(env: &Env) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::AnchorStorageQuota)
+    }
+
+    /// Persist the admin-configured per-anchor storage-cost quota.
+    ///
+    /// See [`Self::get_anchor_storage_quota`] for the accuracy limits of the
+    /// proxy this quota bounds.
+    pub fn set_anchor_storage_quota(env: &Env, quota: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AnchorStorageQuota, &quota);
+    }
+
+    /// Read the approximate storage units currently attributed to `anchor`.
+    ///
+    /// Defaults to `0` when the anchor has no recorded usage.
+    pub fn get_anchor_storage_usage(env: &Env, anchor: &Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::AnchorStorageUsage(anchor.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Persist the approximate storage units attributed to `anchor`.
+    pub fn set_anchor_storage_usage(env: &Env, anchor: &Address, usage: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AnchorStorageUsage(anchor.clone()), &usage);
+    }
+
     // ── Transactions ──────────────────────────────────────────────────────────
 
     /// Returns `true` if a transaction record already exists for `tx_id`.
