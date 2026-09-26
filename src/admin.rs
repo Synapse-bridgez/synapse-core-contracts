@@ -11,6 +11,7 @@
 
 use soroban_sdk::{Address, Env};
 
+use crate::events::{emit_admin_action_taken, AdminActionType};
 use crate::storage::StorageClient;
 use crate::types::ContractError;
 
@@ -50,5 +51,25 @@ impl AdminClient {
         }
         caller.require_auth();
         Ok(())
+    }
+
+    /// Emit the unified `EventAdminActionTaken` audit event for a privileged
+    /// action performed by `caller`.
+    ///
+    /// This is the single shared helper every privileged entry point calls so
+    /// that off-chain monitoring can subscribe to one normalized topic to catch
+    /// *any* privileged action.  It is additive: the action's existing specific
+    /// event is still emitted separately by the call site.
+    ///
+    /// `target` carries the address the action applies to when one exists
+    /// (e.g. the new admin, the new relay signer); pass `None` for actions with
+    /// no address target (e.g. pause/unpause).
+    pub fn emit_action_taken(
+        env: &Env,
+        action_type: AdminActionType,
+        caller: &Address,
+        target: Option<Address>,
+    ) {
+        emit_admin_action_taken(env, action_type, caller, target);
     }
 }

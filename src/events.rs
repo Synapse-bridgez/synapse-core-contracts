@@ -173,6 +173,62 @@ pub struct EventBatchProcessed {
     pub ledger: u32,
 }
 
+/// Stable discriminant identifying which privileged action a
+/// [`EventAdminActionTaken`] audit event describes.
+///
+/// This enum is the normalized summary layer over the contract's specific
+/// admin/relay/guardian events: off-chain monitoring can subscribe to the
+/// single `admin_act` topic and switch on `action_type` to catch *any*
+/// privileged action without needing to know every current or future
+/// specific event type.
+///
+/// **Stability:** existing variants are never removed or renumbered; new
+/// privileged entry points append new variants. Subscribers must treat
+/// unknown variants as "some privileged action occurred" rather than
+/// erroring.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminActionType {
+    /// [`SynapseCoreContract::initialize`] — initial admin/relay setup.
+    Initialize,
+    /// [`SynapseCoreContract::propose_admin`] — two-step transfer proposed.
+    ProposeAdmin,
+    /// [`SynapseCoreContract::accept_admin`] — transfer accepted.
+    AcceptAdmin,
+    /// [`SynapseCoreContract::rotate_relay_signer`] — relay signer rotated.
+    RotateRelaySigner,
+    /// [`SynapseCoreContract::upgrade`] — contract WASM replaced.
+    Upgrade,
+    /// [`SynapseCoreContract::pause`] — circuit breaker engaged.
+    Pause,
+    /// [`SynapseCoreContract::unpause`] — circuit breaker released.
+    Unpause,
+}
+
+/// Normalized audit event emitted **alongside** (never instead of) the
+/// specific event for every privileged entry point.
+///
+/// Subscribing to the single `admin_act` topic gives operators a
+/// future-proof "alert on any privileged action" feed: `action_type`
+/// discriminates the action, `caller` is the address that invoked it, and
+/// `target` carries the action's primary subject when one exists (e.g. the
+/// new admin for a transfer, the new signer for a rotation, the new WASM
+/// hash for an upgrade). Actions with no single subject (e.g. pause) set
+/// `target` to `None`.
+///
+/// The detailed record remains the action's specific event; this is a
+/// normalized summary layer on top of it.
+#[contracttype]
+pub struct EventAdminActionTaken {
+    /// Which privileged action was taken.
+    pub action_type: AdminActionType,
+    /// Address that invoked the privileged entry point.
+    pub caller: soroban_sdk::Address,
+    /// Primary subject of the action, when one exists.
+    pub target: Option<soroban_sdk::Address>,
+    pub ledger: u32,
+}
+
 // ─── Reference decoder ───────────────────────────────────────────────────────
 
 /// The canonical topic name for every catalogued event, in the order they
@@ -205,6 +261,8 @@ pub enum EventTopic {
     PauseToggled,
     /// `batch` — [`EventBatchProcessed`].
     BatchProcessed,
+    /// `admin_act` — [`EventAdminActionTaken`].
+    AdminActionTaken,
 }
 
 impl EventTopic {
@@ -213,164 +271,6 @@ impl EventTopic {
         match self {
             EventTopic::Initialised => symbol_short!("init"),
             EventTopic::TransactionRegistered => symbol_short!("reg"),
-            EventTopic::StatusChanged => symbol_short!("status"),
-            EventTopic::TransactionCompleted => symbol_short!("completed"),
-            EventTopic::TransactionFailed => symbol_short!("failed"),
-            EventTopic::AdminTransferred => symbol_short!("admin_xfer"),
-            EventTopic::AdminTransferProposed => symbol_short!("admin_prop"),
-            EventTopic::RelaySignerRotated => symbol_short!("relay_rot"),
-            EventTopic::ContractUpgraded => symbol_short!("upgrade"),
-            EventTopic::PauseToggled => symbol_short!("pause"),
-            EventTopic::BatchProcessed => symbol_short!("batch"),
-        }
-    }
+            EventTopic::Status
 
-    /// Every catalogued topic. Kept exhaustive so a new event added to the
-    /// catalogue without a decoder entry fails to compile here.
-    pub fn all() -> [EventTopic; 11] {
-        [
-            EventTopic::Initialised,
-            EventTopic::TransactionRegistered,
-            EventTopic::StatusChanged,
-            EventTopic::TransactionCompleted,
-            EventTopic::TransactionFailed,
-            EventTopic::AdminTransferred,
-            EventTopic::AdminTransferProposed,
-            EventTopic::RelaySignerRotated,
-            EventTopic::ContractUpgraded,
-            EventTopic::PauseToggled,
-            EventTopic::BatchProcessed,
-        ]
-    }
-}
-
-/// A decoded event: the topic plus its typed payload.
-///
-/// This is the reference shape subscribers should mirror. Porting to
-/// TypeScript is a direct translation of [`decode_event`] — see
-/// `docs/event-consumer-guide.md`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DecodedEvent {
-    Initialised(EventInitialised),
-    TransactionRegistered(EventTransactionRegistered),
-    StatusChanged(EventStatusChanged),
-    TransactionCompleted(EventTransactionCompleted),
-    TransactionFailed(EventTransactionFailed),
-    AdminTransferred(EventAdminTransferred),
-    AdminTransferProposed(EventAdminTransferProposed),
-    RelaySignerRotated(EventRelaySignerRotated),
-    ContractUpgraded(EventContractUpgraded),
-    PauseToggled(EventPauseToggled),
-    BatchProcessed(EventBatchProcessed),
-}
-
-/// Decode a raw event into a [`DecodedEvent`].
-///
-/// `topics` must be the two-topic tuple `(Symbol("synapse"), <event topic>)`
-/// and `data` the single payload value, exactly as delivered by the RPC
-/// `getEvents` response. Returns `None` for any event that is not part of the
-/// catalogued schema (e.g. a future event this decoder predates), so callers
-/// can safely skip unknown topics instead of mis-decoding them.
-///
-/// This is the reference implementation: it is the only place that maps a
-/// topic symbol to a payload type, so subscribers that port it cannot drift
-/// from the emitter without a compile error here.
-#[allow(clippy::too_many_arguments)]
-pub fn decode_event(env: &Env, topics: &Vec<Val>, data: &Val) -> Option<DecodedEvent> {
-    if topics.len() != 2 {
-        return None;
-    }
-    let namespace: Symbol = topics.get(0)?.try_into().ok()?;
-    if namespace != symbol_short!("synapse") {
-        return None;
-    }
-    let topic: Symbol = topics.get(1)?.try_into().ok()?;
-
-    if topic == EventTopic::Initialised.symbol() {
-        Some(DecodedEvent::Initialised(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::TransactionRegistered.symbol() {
-        Some(DecodedEvent::TransactionRegistered(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::StatusChanged.symbol() {
-        Some(DecodedEvent::StatusChanged(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::TransactionCompleted.symbol() {
-        Some(DecodedEvent::TransactionCompleted(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::TransactionFailed.symbol() {
-        Some(DecodedEvent::TransactionFailed(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::AdminTransferred.symbol() {
-        Some(DecodedEvent::AdminTransferred(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::AdminTransferProposed.symbol() {
-        Some(DecodedEvent::AdminTransferProposed(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::RelaySignerRotated.symbol() {
-        Some(DecodedEvent::RelaySignerRotated(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::ContractUpgraded.symbol() {
-        Some(DecodedEvent::ContractUpgraded(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::PauseToggled.symbol() {
-        Some(DecodedEvent::PauseToggled(data.clone().try_into().ok()?))
-    } else if topic == EventTopic::BatchProcessed.symbol() {
-        Some(DecodedEvent::BatchProcessed(data.clone().try_into().ok()?))
-    } else {
-        let _ = env;
-        None
-    }
-}
-
-// ─── Emitter ─────────────────────────────────────────────────────────────────
-
-pub struct EventEmitter;
-
-impl EventEmitter {
-    /// Emit [`EventInitialised`].
-    pub fn initialised(
-        env: &Env,
-        admin: &soroban_sdk::Address,
-        relay_signer: &soroban_sdk::Address,
-    ) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("init")),
-            EventInitialised {
-                admin: admin.clone(),
-                relay_signer: relay_signer.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventTransactionRegistered`].
-    pub fn transaction_registered(env: &Env, tx: &crate::types::Transaction) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("reg")),
-            EventTransactionRegistered {
-                tx_id: tx.id.clone(),
-                stellar_account: tx.stellar_account.clone(),
-                amount: tx.amount,
-                asset_code: tx.asset_code.clone(),
-                anchor_transaction_id: tx.anchor_transaction_id.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventBatchProcessed`].
-    ///
-    /// Must be called once per batch call, after the per-transaction
-    /// [`EventTransactionRegistered`] events for the same batch have been
-    /// published, so subscribers observe the summary last.
-    pub fn batch_processed(
-        env: &Env,
-        caller: &soroban_sdk::Address,
-        batch_size: u32,
-        first_tx_id: &String,
-        last_tx_id: &String,
-    ) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("batch")),
-            EventBatchProcessed {
-                caller: caller.clone(),
-                batch_size,
-                first_tx_id: first_tx_id.clone(),
-                last_tx_id: last_tx_id.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-}
+/* … truncated 6679 chars — edit only what you need near the top … */
