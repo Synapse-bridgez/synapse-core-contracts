@@ -28,5 +28,22 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-      - name: Build wasm
+      - name: Build wasm (once)
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Upload release wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synapse-core-contract-wasm
+          path: target/wasm32-unknown-unknown/release/synapse_core_contract.wasm
+
+      - name: Verify schema_version() matches migrations.toml (#88)
+        run: |
+          chmod +x scripts/check_schema_migration.sh
+          scripts/check_schema_migration.sh
+
+      - name: Prove schema check fails on mismatched manifest (#88 fixture)
+        run: |
+          scripts/check_schema_migration.sh \
+            --manifest fixtures/ci/migrations.mismatch.toml \
+            --expect-fail

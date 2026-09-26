@@ -33,17 +33,22 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod schema_ci;
+#[cfg(test)]
 mod test_pause;
+#[cfg(test)]
+mod test_wave;
 #[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, PendingUpgrade, Transaction, TransactionStatus, UpgradeQuorum,
+    SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -61,10 +66,14 @@ impl SynapseCoreContract {
     /// * `admin`        — Address that may call privileged methods.
     /// * `relay_signer` — Address of the trusted off-chain relay that forwards
     ///                    Anchor Platform callbacks on-chain.
+    /// * `wasm_hash`    — SHA-256 of the WASM being deployed (genesis hash).
+    ///                    Recorded so the first [`Self::upgrade`] can report it
+    ///                    via [`Self::get_previous_wasm_hash`] (#90).
     pub fn initialize(
         env: Env,
         admin: Address,
         relay_signer: Address,
+        wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         if StorageClient::is_initialised(&env) {
             return Err(ContractError::AlreadyInitialised);
@@ -74,6 +83,7 @@ impl SynapseCoreContract {
         // Start unpaused so a freshly deployed contract accepts callbacks.
         StorageClient::set_paused(&env, false);
         StorageClient::set_schema_version(&env, SCHEMA_VERSION);
+        StorageClient::set_current_wasm_hash(&env, &wasm_hash);
         StorageClient::set_initialised(&env);
         EventEmitter::initialised(&env, &admin, &relay_signer);
         Ok(())
@@ -285,6 +295,23 @@ impl SynapseCoreContract {
         StorageClient::get_pending_admin(&env)
     }
 
+    /// Return the WASM hash this contract most recently upgraded from (#90).
+    ///
+    /// `None` until the first successful [`Self::upgrade`]. After the first
+    /// upgrade the value is the genesis WASM hash recorded at
+    /// [`Self::initialize`] — never a null/zero default that could be confused
+    /// with "never upgraded."
+    pub fn get_previous_wasm_hash(env: Env) -> Option<BytesN<32>> {
+        StorageClient::get_previous_wasm_hash(&env)
+    }
+
+    /// Return the optional upgrade quorum configuration (#87).
+    ///
+    /// `None` means single-admin upgrade behaviour (backward compatible default).
+    pub fn upgrade_quorum(env: Env) -> Option<UpgradeQuorum> {
+        StorageClient::get_upgrade_quorum(&env)
+    }
+
     // ── Admin (two-step transfer) ────────────────────────────────────────────
 
     /// Nominate `new_admin` as the next admin.  Requires existing admin auth.
@@ -350,22 +377,50 @@ impl SynapseCoreContract {
         Ok(())
     }
 
+    /// Configure (or clear) the optional upgrade M-of-N quorum (#87).
+    ///
+    /// Pass `None` to restore single-admin upgrade behaviour. When `Some`,
+    /// [`Self::upgrade`] and [`Self::propose_upgrade`] require genuine
+    /// multi-party co-signatures from the member set — admin alone is rejected.
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeQuorumSet`].
+    pub fn set_upgrade_quorum(
+        env: Env,
+        quorum: Option<UpgradeQuorum>,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        if let Some(ref q) = quorum {
+            AdminClient::validate_upgrade_quorum(q)?;
+        }
+        let (threshold, member_count) = match &quorum {
+            Some(q) => (q.threshold, q.members.len()),
+            None => (0, 0),
+        };
+        StorageClient::set_upgrade_quorum(&env, &quorum);
+        EventEmitter::upgrade_quorum_set(&env, &admin, threshold, member_count);
+        Ok(())
+    }
+
     // ── Contract upgrade ───────────────────────────────────────────────────────
 
     /// Replace the contract WASM in-place.
     ///
     /// Only the current admin may call this.  The new WASM **must** be compatible
-    /// with the existing storage schema (`StorageKey` variants, `Transaction`
-    /// struct layout).  Persistent storage (admin, relay_signer, transactions)
-    /// and instance storage (init flag, pause flag) survive intact; temporary
-    /// storage (idempotency keys) is evicted.
+    /// with the existing storage schema (`StorageKey` / `DataKey` variants,
+    /// `Transaction` struct layout).  Persistent storage and instance storage
+    /// survive intact; temporary storage (idempotency keys) is evicted.
     ///
     /// `expected_schema_version` must match the on-chain `SchemaVersion`
-    /// (THREAT_MODEL.md finding F-04). This cannot validate that the *new*
-    /// WASM is actually compatible — Soroban gives the running code no way to
-    /// introspect an uploaded-but-not-yet-installed WASM blob — but it does
-    /// guard against invoking `upgrade()` against a contract instance whose
-    /// on-chain state isn't what the caller believes it is.
+    /// (THREAT_MODEL.md finding F-04).
+    ///
+    /// `cosigners` — when an [`UpgradeQuorum`] is configured (#87), must contain
+    /// at least `threshold` distinct quorum members, each of which
+    /// `require_auth()`s in this invocation. When no quorum is set, pass an
+    /// empty vector (single-admin behaviour).
+    ///
+    /// On success, records the previously-running WASM hash into
+    /// [`Self::get_previous_wasm_hash`] before installing `new_wasm_hash` (#90).
     ///
     /// # Events
     /// Emits [`events::EventContractUpgraded`] on success.
@@ -373,20 +428,155 @@ impl SynapseCoreContract {
     /// # Trust
     /// Because this entry point allows the admin to deploy arbitrary WASM, the
     /// admin key **MUST** be held by a multisig or DAO.  See `DECISIONS.md` for
-    /// the full rationale and `README.md` for operational requirements.
+    /// the full rationale and `README.md` for operational requirements. The
+    /// optional on-chain upgrade quorum (#87) enforces that expectation at the
+    /// contract layer when configured.
     pub fn upgrade(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+        cosigners: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_upgrade_authorisation(&env, &cosigners)?;
+        Self::execute_upgrade(&env, &admin, &new_wasm_hash, expected_schema_version)
+    }
+
+    /// Stage an upgrade proposal that accumulates quorum co-signatures across
+    /// separate transactions (#87).
+    ///
+    /// Admin-gated. When no upgrade quorum is configured this path is
+    /// unnecessary — use [`Self::upgrade`] directly. When a quorum *is* set,
+    /// members call [`Self::approve_upgrade`] until threshold is met, at which
+    /// point the WASM is installed.
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeProposed`].
+    pub fn propose_upgrade(
         env: Env,
         new_wasm_hash: BytesN<32>,
         expected_schema_version: u32,
     ) -> Result<(), ContractError> {
         let admin = AdminClient::require_admin(&env)?;
+        // Quorum must be configured for the multi-step path to be meaningful;
+        // without one, a single admin call to upgrade() is the right path.
+        if StorageClient::get_upgrade_quorum(&env).is_none() {
+            return Err(ContractError::InsufficientUpgradeQuorum);
+        }
         let schema_version = StorageClient::get_schema_version(&env)?;
         if schema_version != expected_schema_version {
             return Err(ContractError::SchemaVersionMismatch);
         }
+        StorageClient::clear_pending_upgrade(&env);
+        StorageClient::set_pending_upgrade(
+            &env,
+            &PendingUpgrade {
+                new_wasm_hash: new_wasm_hash.clone(),
+                expected_schema_version,
+                proposer: admin.clone(),
+            },
+        );
+        EventEmitter::upgrade_proposed(&env, &admin, &new_wasm_hash, expected_schema_version);
+        Ok(())
+    }
+
+    /// Cast one quorum-member co-signature toward a pending
+    /// [`Self::propose_upgrade`] (#87).
+    ///
+    /// When the accumulated distinct member approvals reach the configured
+    /// threshold the upgrade executes immediately (same effects as
+    /// [`Self::upgrade`]). Returning `Ok` with the pause still engaged is not
+    /// applicable here — incomplete quorum returns
+    /// [`ContractError::InsufficientUpgradeQuorum`] is avoided so the vote
+    /// commits: this method returns `Ok(())` after recording a vote even when
+    /// threshold is not yet met. Callers should check
+    /// [`Self::get_previous_wasm_hash`] / events to observe completion.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingUpgrade`]
+    /// - [`ContractError::NotUpgradeQuorumMember`]
+    pub fn approve_upgrade(env: Env, caller: Address) -> Result<(), ContractError> {
+        let pending =
+            StorageClient::get_pending_upgrade(&env).ok_or(ContractError::NoPendingUpgrade)?;
+        let quorum = StorageClient::get_upgrade_quorum(&env)
+            .ok_or(ContractError::InsufficientUpgradeQuorum)?;
+
+        let count = AdminClient::add_upgrade_approval(&env, &caller)?;
+        if count < quorum.threshold {
+            // Vote recorded; waiting for more co-signatures.
+            return Ok(());
+        }
+
+        let admin = StorageClient::get_admin(&env)?;
+        let result = Self::execute_upgrade(
+            &env,
+            &admin,
+            &pending.new_wasm_hash,
+            pending.expected_schema_version,
+        );
+        StorageClient::clear_pending_upgrade(&env);
+        result
+    }
+
+    /// One-shot upgrade + singleton key migration helper (#89).
+    ///
+    /// Installs `new_wasm_hash` (same auth / schema / quorum rules as
+    /// [`Self::upgrade`]), then runs [`Self::migrate_storage_keys`]. Intended
+    /// for the schema v1 → v2 namespacing cutover. Mainnet execution timing is
+    /// a deployment-ops concern; this is the on-chain tooling.
+    pub fn upgrade_and_migrate(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+        cosigners: Vec<Address>,
+    ) -> Result<u32, ContractError> {
+        let admin = AdminClient::require_upgrade_authorisation(&env, &cosigners)?;
+        Self::execute_upgrade(&env, &admin, &new_wasm_hash, expected_schema_version)?;
+        // Note: migration of *legacy* keys must run in the WASM that still
+        // understands both layouts. Operators should call
+        // `migrate_storage_keys` on the post-upgrade WASM if this returns
+        // NothingToMigrate because the new code no longer sees legacy keys.
+        // For same-WASM test / tooling paths we still attempt it here.
+        match StorageClient::migrate_singleton_keys(&env) {
+            Ok(n) => Ok(n),
+            Err(ContractError::NothingToMigrate) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Migrate legacy (schema v1) singleton storage keys onto the namespaced
+    /// [`crate::types::StorageKey`] layout and bump on-chain schema to
+    /// [`SCHEMA_VERSION`] (#89).
+    ///
+    /// Admin-gated. Idempotent once the namespaced layout is live
+    /// ([`ContractError::NothingToMigrate`]).
+    pub fn migrate_storage_keys(env: Env) -> Result<u32, ContractError> {
+        AdminClient::require_admin_allowing_legacy(&env)?;
+        StorageClient::migrate_singleton_keys(&env)
+    }
+
+    /// Shared upgrade body: schema check, previous-hash bookkeeping (#90),
+    /// WASM replace, event.
+    fn execute_upgrade(
+        env: &Env,
+        admin: &Address,
+        new_wasm_hash: &BytesN<32>,
+        expected_schema_version: u32,
+    ) -> Result<(), ContractError> {
+        let schema_version = StorageClient::get_schema_version(env)?;
+        if schema_version != expected_schema_version {
+            return Err(ContractError::SchemaVersionMismatch);
+        }
+
+        let current = StorageClient::get_current_wasm_hash(env)
+            .ok_or(ContractError::MissingCurrentWasmHash)?;
+        // Always record the hash we are leaving — on the first upgrade this
+        // is the genesis hash from initialize(), never a zero default (#90).
+        StorageClient::set_previous_wasm_hash(env, &current);
+
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
-        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
+        StorageClient::set_current_wasm_hash(env, new_wasm_hash);
+        EventEmitter::contract_upgraded(env, admin, new_wasm_hash, schema_version);
         Ok(())
     }
 

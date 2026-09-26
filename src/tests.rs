@@ -43,10 +43,12 @@
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal, String, Symbol, TryFromVal,
+    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
 };
 
-use crate::types::{CallbackPayload, CallbackType, ContractError, StorageKey, TransactionStatus};
+use crate::types::{
+    CallbackPayload, CallbackType, ContractError, DataKey, StorageKey, TransactionStatus,
+};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -59,7 +61,8 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
     (env, client, admin, relay)
 }
 
@@ -115,14 +118,15 @@ fn test_initialize_happy_path() {
     let relay = Address::generate(&env);
 
     assert!(!client.health());
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
     assert!(client.health());
 }
 
 #[test]
 fn test_initialize_rejects_double_init() {
-    let (_env, client, admin, relay) = setup();
-    let result = client.try_initialize(&admin, &relay);
+    let (env, client, admin, relay) = setup();
+    let result = client.try_initialize(&admin, &relay, &BytesN::from_array(&env, &[0x01u8; 32]));
     assert_eq!(result, Err(Ok(ContractError::AlreadyInitialised)));
 }
 
@@ -173,7 +177,8 @@ fn test_register_callback_rejects_non_relay_caller() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
 
     let attacker = Address::generate(&env);
     let payload = default_payload(&env);
@@ -364,7 +369,8 @@ fn test_start_processing_accepts_scoped_relay_auth() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
 
     let payload = default_payload(&env);
     let tx_id = client
@@ -401,7 +407,8 @@ fn test_start_processing_rejects_when_wrong_address_authorised() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
 
     let payload = default_payload(&env);
     let tx_id = client
@@ -595,7 +602,8 @@ fn test_admin_transfer_two_step_happy_path() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
 
     let new_admin = Address::generate(&env);
 
@@ -666,7 +674,8 @@ fn test_propose_admin_rejects_non_admin() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
 
     let attacker = Address::generate(&env);
     let new_admin = Address::generate(&env);
@@ -714,7 +723,8 @@ fn test_accept_admin_rejects_wrong_caller() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
 
     let new_admin = Address::generate(&env);
     let bystander = Address::generate(&env);
@@ -801,7 +811,8 @@ fn test_relay_rotation_mid_lifecycle_enforces_new_signer() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    client.initialize(&admin, &relay);
+    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
+    client.initialize(&admin, &relay, &genesis);
 
     let payload = default_payload(&env);
     let tx_id = client
@@ -949,10 +960,12 @@ fn test_idempotency_key_expires_after_ttl() {
         env.storage().instance().extend_ttl(100_000, 100_000);
         env.storage()
             .persistent()
-            .extend_ttl(&StorageKey::Admin, 100_000, 100_000);
-        env.storage()
-            .persistent()
-            .extend_ttl(&StorageKey::RelaySigner, 100_000, 100_000);
+            .extend_ttl(&StorageKey::ns(DataKey::Admin), 100_000, 100_000);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ns(DataKey::RelaySigner),
+            100_000,
+            100_000,
+        );
     });
 
     // Jump past the ~24h / 18_000-ledger idempotency TTL.
@@ -990,10 +1003,12 @@ fn test_register_callback_rejects_duplicate_transaction_id_after_idempotency_exp
         env.storage().instance().extend_ttl(100_000, 100_000);
         env.storage()
             .persistent()
-            .extend_ttl(&StorageKey::Admin, 100_000, 100_000);
-        env.storage()
-            .persistent()
-            .extend_ttl(&StorageKey::RelaySigner, 100_000, 100_000);
+            .extend_ttl(&StorageKey::ns(DataKey::Admin), 100_000, 100_000);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ns(DataKey::RelaySigner),
+            100_000,
+            100_000,
+        );
     });
     env.ledger().with_mut(|li| li.sequence_number += 18_001);
 

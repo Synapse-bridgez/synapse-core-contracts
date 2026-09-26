@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, String, Vec};
 
 /// Current on-chain storage schema version.
 ///
@@ -15,7 +15,26 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// currently-running code no way to introspect an uploaded-but-not-yet-
 /// installed WASM blob — so it guards against upgrading the wrong deployment
 /// or an unexpected on-chain state, not against an incompatible new binary.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// Version history:
+/// - `1` — original un-namespaced [`LegacyStorageKey`] layout
+/// - `2` — namespaced [`StorageKey`] / [`DataKey`] layout (#89)
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Namespace discriminant baked into every [`StorageKey`] (#89).
+///
+/// All ledger keys are stored as [`StorageKey::Ns`]`(STORAGE_KEY_NAMESPACE, DataKey)`.
+/// Additive schema changes (new [`DataKey`] variants, new fields on existing
+/// structs) stay inside the current namespace. A schema bump that relocates
+/// keys uses a new namespace value and an `upgrade_and_migrate` /
+/// [`crate::SynapseCoreContract::migrate_storage_keys`] path so old and new
+/// key-spaces never collide.
+///
+/// **Convention for future additions:** every new persistent / temporary /
+/// instance key MUST be a [`DataKey`] variant constructed via
+/// [`StorageKey::ns`]. Do not introduce bare unit-variant keys alongside
+/// this enum — the exhaustiveness test in `tests` will fail.
+pub const STORAGE_KEY_NAMESPACE: u32 = 1;
 
 // ─── Transaction status ───────────────────────────────────────────────────────
 
@@ -53,7 +72,7 @@ pub enum CallbackType {
 
 /// On-chain mirror of the `transactions` table row.
 ///
-/// Stored in persistent ledger storage keyed by [`StorageKey::Transaction`].
+/// Stored in persistent ledger storage keyed by [`DataKey::Transaction`].
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Transaction {
@@ -141,15 +160,32 @@ pub struct CallbackPayload {
     pub callback_status: String,
 }
 
-// ─── Storage keys ─────────────────────────────────────────────────────────────
+// ─── Upgrade quorum (#87) ─────────────────────────────────────────────────────
 
-/// Discriminants used as ledger storage keys.
+/// Optional M-of-N co-signer set required for [`crate::SynapseCoreContract::upgrade`].
 ///
-/// Persistent storage keys (admin, relay signer, init flag) use `Symbol`-based
-/// variants. Per-transaction data is keyed by the transaction ID string.
+/// Distinct from the single admin key: when configured, admin auth alone is
+/// rejected and at least [`Self::threshold`] distinct members of
+/// [`Self::members`] must co-sign on-chain. `None` (absent storage) preserves
+/// today's single-admin behaviour for backward compatibility.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub enum StorageKey {
+pub struct UpgradeQuorum {
+    /// Minimum number of distinct member co-signatures required (M).
+    pub threshold: u32,
+    /// Designated co-signer set (N). Must be non-empty; threshold ∈ `[1, N]`.
+    pub members: Vec<Address>,
+}
+
+// ─── Storage keys ─────────────────────────────────────────────────────────────
+
+/// Logical storage discriminants (un-versioned).
+///
+/// Always wrap with [`StorageKey::ns`] before touching the ledger. See
+/// [`STORAGE_KEY_NAMESPACE`] for the namespacing convention (#89).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum DataKey {
     /// Singleton: whether `initialize()` has been called.
     Initialised,
     /// Singleton: current admin address.
@@ -172,6 +208,64 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Singleton: optional upgrade co-signer quorum (#87). Absent = single-admin.
+    UpgradeQuorum,
+    /// Singleton: WASM hash most recently upgraded *from* (#90).
+    /// Absent until the first successful `upgrade()`.
+    PreviousWasmHash,
+    /// Singleton: WASM hash the contract is currently running (#90 helper).
+    /// Set at `initialize()` to the genesis hash; updated on every upgrade.
+    CurrentWasmHash,
+    /// Singleton: pending upgrade proposal when using the multi-step path (#87).
+    PendingUpgrade,
+    /// Accumulated co-signer approvals for [`DataKey::PendingUpgrade`] (#87).
+    UpgradeApprovals,
+}
+
+/// Versioned ledger storage key (#89).
+///
+/// Every on-chain entry is `(namespace, DataKey)`. Construct via
+/// [`StorageKey::ns`] so the namespace cannot drift from
+/// [`STORAGE_KEY_NAMESPACE`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum StorageKey {
+    /// Namespaced key: `(STORAGE_KEY_NAMESPACE, logical discriminant)`.
+    Ns(u32, DataKey),
+}
+
+impl StorageKey {
+    /// Build a namespaced storage key under [`STORAGE_KEY_NAMESPACE`].
+    pub fn ns(key: DataKey) -> Self {
+        StorageKey::Ns(STORAGE_KEY_NAMESPACE, key)
+    }
+}
+
+/// Pre-namespacing storage keys (schema version 1).
+///
+/// Retained solely so [`crate::SynapseCoreContract::migrate_storage_keys`] can
+/// read legacy entries and rewrite them under [`StorageKey`]. Not used for new
+/// writes. Mainnet cutover is a deployment-ops concern; this is the tooling.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum LegacyStorageKey {
+    Initialised,
+    Admin,
+    RelaySigner,
+    Paused,
+    Transaction(String),
+    IdempotencyKey(String),
+    PendingAdmin,
+    SchemaVersion,
+}
+
+/// Pending upgrade proposal awaiting quorum co-signatures (#87).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingUpgrade {
+    pub new_wasm_hash: BytesN<32>,
+    pub expected_schema_version: u32,
+    pub proposer: Address,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -232,10 +326,29 @@ pub enum ContractError {
     // ── Storage ─────────────────────────────────────────────────────────────
     /// A ledger read/write produced an unexpected result.
     StorageError = 50,
+    /// `migrate_storage_keys` found nothing to migrate, or schema already
+    /// at the current namespaced layout.
+    NothingToMigrate = 51,
+    /// `migrate_storage_keys` refused: on-chain schema version is not the
+    /// legacy (pre-namespace) version this migrator understands.
+    UnexpectedSchemaForMigration = 52,
 
     // ── Upgrade safety ──────────────────────────────────────────────────────
     /// `upgrade()`'s `expected_schema_version` argument did not match the
-    /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
-    /// aborted before touching contract WASM.
+    /// on-chain [`DataKey::SchemaVersion`]; the upgrade was aborted before
+    /// touching contract WASM.
     SchemaVersionMismatch = 60,
+    /// Upgrade quorum is configured but fewer than `threshold` distinct
+    /// member co-signatures were supplied (#87).
+    InsufficientUpgradeQuorum = 61,
+    /// `set_upgrade_quorum` rejected: empty members, zero threshold, or
+    /// threshold greater than member count.
+    InvalidUpgradeQuorum = 62,
+    /// `approve_upgrade` / related path called with no pending proposal.
+    NoPendingUpgrade = 63,
+    /// Co-signer address is not in the configured upgrade quorum set.
+    NotUpgradeQuorumMember = 64,
+    /// `CurrentWasmHash` was never recorded (initialize must supply the
+    /// genesis WASM hash) so provenance cannot be written (#90).
+    MissingCurrentWasmHash = 65,
 }

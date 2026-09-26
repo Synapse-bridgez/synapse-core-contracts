@@ -140,6 +140,29 @@ pub struct EventPauseToggled {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::set_upgrade_quorum`] when the optional
+/// upgrade M-of-N co-signer set is configured or cleared (#87).
+#[contracttype]
+pub struct EventUpgradeQuorumSet {
+    /// Admin that wrote the config.
+    pub admin: soroban_sdk::Address,
+    /// Configured threshold (0 when cleared).
+    pub threshold: u32,
+    /// Member count (0 when cleared).
+    pub member_count: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::propose_upgrade`] when an upgrade is
+/// staged awaiting quorum co-signatures (#87).
+#[contracttype]
+pub struct EventUpgradeProposed {
+    pub proposer: soroban_sdk::Address,
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub expected_schema_version: u32,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -291,6 +314,42 @@ impl EventEmitter {
             EventAdminTransferred {
                 old_admin: old_admin.clone(),
                 new_admin: new_admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeQuorumSet`].
+    pub fn upgrade_quorum_set(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        threshold: u32,
+        member_count: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("uqset")),
+            EventUpgradeQuorumSet {
+                admin: admin.clone(),
+                threshold,
+                member_count,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeProposed`].
+    pub fn upgrade_proposed(
+        env: &Env,
+        proposer: &soroban_sdk::Address,
+        new_wasm_hash: &soroban_sdk::BytesN<32>,
+        expected_schema_version: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("uprop")),
+            EventUpgradeProposed {
+                proposer: proposer.clone(),
+                new_wasm_hash: new_wasm_hash.clone(),
+                expected_schema_version,
                 ledger: env.ledger().sequence(),
             },
         );
