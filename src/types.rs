@@ -172,6 +172,72 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Singleton: outgoing admin after a completed `accept_admin`, eligible
+    /// to call `renounce_admin` once the successor is live (#76).
+    PreviousAdmin,
+    /// Singleton: guardian address (pause authority + auto-unpause voter).
+    /// Absent until [`crate::SynapseCoreContract::set_guardian`] is called.
+    Guardian,
+    /// Singleton: whether the current pause was triggered automatically
+    /// (circuit-breaker) rather than by a manual admin `pause()`.
+    AutoPaused,
+    /// Singleton: fixed-window admin rate-limit config (`max`, `window_ledgers`).
+    AdminRateLimitConfig,
+    /// Singleton: admin rate-limit counter state (`window_start`, `count`).
+    AdminRateLimitState,
+    /// Per-signer self-reported build/commit fingerprint (attestation).
+    SignerAttestation(soroban_sdk::Address),
+    /// Singleton: pending approvals for auto-pause multi-role unpause
+    /// (`admin_ok`, `guardian_ok`, `relay_ok`).
+    AutoUnpauseVotes,
+}
+
+/// Fixed-window rate-limit configuration for admin-gated calls (#75).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminRateLimitConfig {
+    /// Maximum privileged admin calls allowed inside one window.
+    pub max_per_window: u32,
+    /// Window length in ledger sequences (fixed window, not sliding).
+    pub window_ledgers: u32,
+}
+
+/// Mutable counter for the current admin rate-limit window (#75).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminRateLimitState {
+    /// Ledger sequence at which the current fixed window opened.
+    pub window_start: u32,
+    /// Number of counted admin-gated calls in the current window.
+    pub count: u32,
+}
+
+/// Which role combination completed an automatic-pause unpause (#78).
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnpauseRoles {
+    AdminGuardian,
+    AdminRelay,
+    GuardianRelay,
+}
+
+/// Accumulated role votes toward a 2-of-3 auto-unpause (#78).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoUnpauseVotes {
+    pub admin_ok: bool,
+    pub guardian_ok: bool,
+    pub relay_ok: bool,
+}
+
+impl AutoUnpauseVotes {
+    pub fn empty() -> Self {
+        Self {
+            admin_ok: false,
+            guardian_ok: false,
+            relay_ok: false,
+        }
+    }
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -238,4 +304,29 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
+
+    // ── Admin rate limit (#75) ───────────────────────────────────────────────
+    /// Privileged admin call rejected: the fixed rolling ledger-time window
+    /// has already consumed its configured max-per-window budget.
+    AdminRateLimited = 70,
+    /// Rate-limit config rejected (zero max or zero window).
+    InvalidRateLimitConfig = 71,
+
+    // ── Renounce admin (#76) ────────────────────────────────────────────────
+    /// `renounce_admin` rejected: no live successor exists that has already
+    /// completed `accept_admin`. Leaving a zero-admin state is unreachable.
+    NoAcceptedSuccessor = 80,
+
+    // ── Signer attestation (#77) ────────────────────────────────────────────
+    /// Attestation fingerprint is empty.
+    EmptyAttestation = 90,
+
+    // ── Multi-role unpause (#78) ────────────────────────────────────────────
+    /// Guardian role has not been configured yet.
+    GuardianNotSet = 100,
+    /// `unpause_auto` called when the contract is not under an automatic pause.
+    NotAutoPaused = 101,
+    /// Manual `unpause` called while an automatic pause is in effect — use
+    /// the multi-role path instead.
+    RequiresMultiRoleUnpause = 102,
 }
