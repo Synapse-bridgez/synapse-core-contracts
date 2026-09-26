@@ -2,7 +2,10 @@
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
-check: fmt clippy test wasm
+# `wasm` runs before `test` so upgrade-integration tests can
+# `include_bytes!` the release artefact when present; tests that need
+# it fall back to `testdata/minimal.wasm` for host-hash uploads.
+check: fmt clippy wasm test
 
 # ── Individual targets ────────────────────────────────────────────────────────
 

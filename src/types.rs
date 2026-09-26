@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
 
 /// Current on-chain storage schema version.
 ///
@@ -172,6 +172,59 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Singleton: append-only upgrade audit log (`Vec<UpgradeRecord>`),
+    /// bounded by [`MAX_UPGRADE_HISTORY`]. Persistent so it survives upgrades.
+    UpgradeHistory,
+    /// Singleton: WASM hash of the currently installed contract code, updated
+    /// on every successful `upgrade()`. Absent/`[0;32]` until the first
+    /// upgrade after this feature ships (pre-feature history is not
+    /// backfilled — see CHANGELOG.md).
+    CurrentWasmHash,
+}
+
+/// Maximum number of [`UpgradeRecord`] entries retained on-chain.
+///
+/// Once the cap is hit the oldest entry is evicted (FIFO) so rent stays
+/// bounded. Operators needing the full historical trail should archive
+/// `(synapse, upgrade)` events off-chain before eviction; the on-chain log
+/// is the authoritative *recent* audit window, not an infinite archive.
+pub const MAX_UPGRADE_HISTORY: u32 = 32;
+
+/// One completed upgrade, appended by `upgrade()` on success.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpgradeRecord {
+    /// WASM hash installed before this upgrade. `[0;32]` when unknown
+    /// (first upgrade after the history feature landed).
+    pub previous_wasm_hash: BytesN<32>,
+    /// WASM hash installed by this upgrade.
+    pub new_wasm_hash: BytesN<32>,
+    /// On-chain schema version at the time of the upgrade.
+    pub schema_version: u32,
+    /// Ledger sequence when the upgrade committed.
+    pub ledger: u32,
+    /// Admin address that authorised the upgrade.
+    pub admin: Address,
+}
+
+/// Verdict returned by [`crate::SynapseCoreContract::simulate_upgrade`].
+///
+/// Distinguishes every guard failure `upgrade()` can produce so operators
+/// get an actionable pre-flight result instead of a bare boolean.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpgradeCompatibility {
+    /// All on-chain guards would pass; a real `upgrade()` still requires
+    /// admin auth and a ledger-resident WASM blob for `new_wasm_hash`.
+    Compatible,
+    /// Contract has not been initialised — `upgrade()` would return
+    /// [`ContractError::NotInitialised`].
+    NotInitialised,
+    /// `caller` is not the current admin — `upgrade()` would reject auth.
+    CallerNotAdmin,
+    /// `expected_schema_version` does not match on-chain state —
+    /// `upgrade()` would return [`ContractError::SchemaVersionMismatch`].
+    SchemaVersionMismatch,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -238,4 +291,8 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
+    /// Post-upgrade storage-integrity self-check failed; the entire upgrade
+    /// transaction reverts (WASM swap included) so the contract never runs
+    /// new code against storage it cannot interpret.
+    SelfCheckFailed = 61,
 }

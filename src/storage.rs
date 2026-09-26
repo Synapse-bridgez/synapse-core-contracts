@@ -9,12 +9,16 @@
 //! |-----------------------|------------|--------------------------------------------|
 //! | Admin, relay signer   | `persistent` | Must survive archive/restore cycles      |
 //! | Transactions          | `persistent` | Long-lived; needed for audit trail       |
+//! | Upgrade history       | `persistent` | Bounded audit log; must survive upgrades |
+//! | Current WASM hash     | `persistent` | Tracks last installed code for history   |
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
-use crate::types::{ContractError, StorageKey, Transaction};
+use crate::types::{
+    ContractError, StorageKey, Transaction, UpgradeRecord, MAX_UPGRADE_HISTORY, SCHEMA_VERSION,
+};
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
@@ -125,6 +129,72 @@ impl StorageClient {
         env.storage()
             .persistent()
             .set(&StorageKey::SchemaVersion, &version);
+    }
+
+    // ── Current WASM hash / upgrade history ───────────────────────────────────
+
+    /// Read the last successfully installed WASM hash, or `[0;32]` if none
+    /// has been recorded yet (pre-feature deploys / fresh init).
+    pub fn get_current_wasm_hash(env: &Env) -> BytesN<32> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::CurrentWasmHash)
+            .unwrap_or_else(|| BytesN::from_array(env, &[0u8; 32]))
+    }
+
+    /// Persist the currently installed WASM hash after a successful upgrade.
+    pub fn set_current_wasm_hash(env: &Env, hash: &BytesN<32>) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::CurrentWasmHash, hash);
+    }
+
+    /// Read the on-chain upgrade history log (oldest → newest). Empty when
+    /// no upgrades have completed since this feature shipped.
+    pub fn get_upgrade_history(env: &Env) -> Vec<UpgradeRecord> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::UpgradeHistory)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Append `record` to the upgrade history, evicting the oldest entry
+    /// when the log would exceed [`MAX_UPGRADE_HISTORY`].
+    pub fn append_upgrade_record(env: &Env, record: &UpgradeRecord) {
+        let mut history = Self::get_upgrade_history(env);
+        if history.len() >= MAX_UPGRADE_HISTORY {
+            history.pop_front();
+        }
+        history.push_back(record.clone());
+        env.storage()
+            .persistent()
+            .set(&StorageKey::UpgradeHistory, &history);
+    }
+
+    /// Post-upgrade storage-integrity self-check (issue #80).
+    ///
+    /// Versioned alongside [`SCHEMA_VERSION`]: verifies that critical
+    /// instance/persistent entries the new WASM expects are present and
+    /// consistent. Cheap — a handful of targeted reads — and invoked at
+    /// the end of every `upgrade()`. Returning `Err` from the caller
+    /// reverts the whole upgrade transaction, including the deferred WASM
+    /// swap (`Deployer::update_current_contract_wasm` only commits on
+    /// successful invocation finish).
+    pub fn post_upgrade_self_check(env: &Env) -> Result<(), ContractError> {
+        if !Self::is_initialised(env) {
+            return Err(ContractError::SelfCheckFailed);
+        }
+        // Presence + readability of the trust root.
+        let _admin = Self::get_admin(env).map_err(|_| ContractError::SelfCheckFailed)?;
+        let _relay = Self::get_relay_signer(env).map_err(|_| ContractError::SelfCheckFailed)?;
+        let on_chain = Self::get_schema_version(env).map_err(|_| ContractError::SelfCheckFailed)?;
+        // Schema-version consistency: the new WASM's compile-time constant
+        // must match what is stored. A schema-breaking upgrade that forgot
+        // to migrate (or bump + write) fails closed here.
+        if on_chain != SCHEMA_VERSION {
+            return Err(ContractError::SelfCheckFailed);
+        }
+        Ok(())
     }
 
     // ── Transactions ──────────────────────────────────────────────────────────

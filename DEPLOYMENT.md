@@ -240,9 +240,22 @@ stellar contract upload \
 # 3. Confirm the on-chain schema version you're about to pass matches
 stellar contract invoke --id $CONTRACT_ID --source <ANY_KEY_WITH_XLM> --network $NETWORK -- schema_version
 
+# 3b. Dry-run the same guards upgrade() will enforce (no state change).
+#     Expect `Compatible` before spending a real admin signature on step 4.
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source <ANY_KEY_WITH_XLM> \
+  --network $NETWORK \
+  -- \
+  simulate_upgrade \
+  --caller <ADMIN_ADDRESS> \
+  --new_wasm_hash <NEW_WASM_HASH> \
+  --expected_schema_version <EXPECTED_SCHEMA_VERSION>
+
 # 4. Invoke upgrade (replace <NEW_WASM_HASH> with the hash from step 2, and
 #    <EXPECTED_SCHEMA_VERSION> with the value read back in step 3 — a
-#    mismatch is rejected before contract WASM is touched)
+#    mismatch is rejected before contract WASM is touched; a post-swap
+#    self-check failure reverts the whole transaction)
 stellar contract invoke \
   --id $CONTRACT_ID \
   --source <ADMIN_SECRET> \
@@ -252,10 +265,12 @@ stellar contract invoke \
   --new_wasm_hash <NEW_WASM_HASH> \
   --expected_schema_version <EXPECTED_SCHEMA_VERSION>
 
-# 5. Update contract-ids.json with the new wasm_hash
-# 6. Run the full post-deployment smoke test to verify the upgrade
-```
+# 5. Confirm the on-chain upgrade history recorded this swap
+stellar contract invoke --id $CONTRACT_ID --source <ANY_KEY_WITH_XLM> --network $NETWORK -- get_upgrade_history
 
+# 6. Update contract-ids.json with the new wasm_hash
+# 7. Run the full post-deployment smoke test to verify the upgrade
+```
 ---
 
 ## Cost Estimates

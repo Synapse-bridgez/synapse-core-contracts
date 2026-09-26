@@ -287,3 +287,318 @@ fn test_upgrade_emits_contract_upgraded_event() {
     assert_eq!(t0, symbol_short!("synapse"));
     assert_eq!(t1, symbol_short!("upgrade"));
 }
+
+// Minimal valid WASM used only to satisfy the host's "hash must exist in
+// ledger" check during upgrade tests. Sourced from soroban-sdk doctest fixtures.
+const MINIMAL_WASM: &[u8] = include_bytes!("../testdata/minimal.wasm");
+
+fn upload_minimal(env: &Env) -> BytesN<32> {
+    env.deployer().upload_contract_wasm(MINIMAL_WASM)
+}
+
+// ─── #80 post-upgrade self-check ─────────────────────────────────────────────
+
+#[test]
+fn test_post_upgrade_self_check_passes_on_healthy_state() {
+    let (env, client, _admin, _relay) = setup();
+    let contract_id = client.address.clone();
+    env.as_contract(&contract_id, || {
+        crate::storage::StorageClient::post_upgrade_self_check(&env).expect("healthy");
+    });
+}
+
+#[test]
+fn test_post_upgrade_self_check_fails_when_relay_missing() {
+    let (env, client, admin, _relay) = setup();
+    let contract_id = client.address.clone();
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .remove(&crate::types::StorageKey::RelaySigner);
+        let err = crate::storage::StorageClient::post_upgrade_self_check(&env).unwrap_err();
+        assert_eq!(err, ContractError::SelfCheckFailed);
+    });
+
+    // Admin / schema still readable — only relay was corrupted.
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.schema_version(), 1);
+}
+
+#[test]
+fn test_upgrade_self_check_failure_reverts_without_history() {
+    // Corrupted core storage + a ledger-resident WASM hash: upgrade passes
+    // auth/schema guards, requests the WASM swap, then self-check fails.
+    // Returning Err rolls back the invocation (host defers the code swap until
+    // success), so history must stay empty and trust-root keys unchanged.
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let relay = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &relay);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .remove(&crate::types::StorageKey::RelaySigner);
+    });
+
+    let wasm_hash = upload_minimal(&env);
+    let pre_admin = client.admin();
+    let pre_schema = client.schema_version();
+    assert!(client.get_upgrade_history().is_empty());
+
+    let result = client.try_upgrade(&wasm_hash, &1);
+    assert_eq!(result, Err(Ok(ContractError::SelfCheckFailed)));
+
+    // Post-state identical for everything the failed upgrade would have written.
+    assert_eq!(client.admin(), pre_admin);
+    assert_eq!(client.schema_version(), pre_schema);
+    assert!(client.get_upgrade_history().is_empty());
+    assert!(client.health());
+}
+
+#[test]
+fn test_self_check_events_topics() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    env.as_contract(&contract_id, || {
+        crate::events::EventEmitter::upgrade_self_check_passed(&env, 1);
+        crate::events::EventEmitter::upgrade_self_check_failed(&env, 1);
+    });
+    let events = env.events().all();
+    assert_eq!(events.len(), 2);
+    let t_pass = Symbol::try_from_val(&env, &events.get_unchecked(0).1.get_unchecked(1)).unwrap();
+    let t_fail = Symbol::try_from_val(&env, &events.get_unchecked(1).1.get_unchecked(1)).unwrap();
+    assert_eq!(t_pass, symbol_short!("chk_pass"));
+    assert_eq!(t_fail, symbol_short!("chk_fail"));
+}
+
+// ─── #85 simulate_upgrade ────────────────────────────────────────────────────
+
+#[test]
+fn test_simulate_upgrade_compatible_and_schema_mismatch() {
+    let (env, client, admin, _relay) = setup();
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    assert_eq!(
+        client.simulate_upgrade(&admin, &hash, &1),
+        crate::types::UpgradeCompatibility::Compatible
+    );
+    assert_eq!(
+        client.simulate_upgrade(&admin, &hash, &999),
+        crate::types::UpgradeCompatibility::SchemaVersionMismatch
+    );
+}
+
+#[test]
+fn test_simulate_upgrade_caller_not_admin() {
+    let (env, client, _admin, _relay) = setup();
+    let stranger = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+    assert_eq!(
+        client.simulate_upgrade(&stranger, &hash, &1),
+        crate::types::UpgradeCompatibility::CallerNotAdmin
+    );
+}
+
+#[test]
+fn test_simulate_upgrade_not_initialised() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let anyone = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+    assert_eq!(
+        client.simulate_upgrade(&anyone, &hash, &1),
+        crate::types::UpgradeCompatibility::NotInitialised
+    );
+}
+
+#[test]
+fn test_simulate_upgrade_is_side_effect_free() {
+    let (env, client, admin, relay) = setup();
+    let contract_id = client.address.clone();
+    let hash = BytesN::from_array(&env, &[9u8; 32]);
+
+    // Fingerprint persistent+instance keys we care about before/after.
+    let before_history = client.get_upgrade_history().len();
+    let before_paused = client.is_paused();
+    let before_schema = client.schema_version();
+
+    let _ = client.simulate_upgrade(&admin, &hash, &1);
+    let _ = client.simulate_upgrade(&admin, &hash, &999);
+    let _ = client.simulate_upgrade(&relay, &hash, &1);
+
+    assert_eq!(client.get_upgrade_history().len(), before_history);
+    assert_eq!(client.is_paused(), before_paused);
+    assert_eq!(client.schema_version(), before_schema);
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.relay_signer(), relay);
+
+    // No CurrentWasmHash write either.
+    env.as_contract(&contract_id, || {
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&crate::types::StorageKey::CurrentWasmHash));
+    });
+}
+
+#[test]
+fn test_simulate_upgrade_matches_real_upgrade_guards() {
+    // Property: for every distinct guard failure, simulate's verdict matches
+    // what a subsequent upgrade() call returns. Compatible + missing WASM is
+    // out of scope (host-level); we upload a hash for the success path.
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let relay = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &relay);
+
+    let hash = upload_minimal(&env);
+
+    // Schema mismatch
+    assert_eq!(
+        client.simulate_upgrade(&admin, &hash, &42),
+        crate::types::UpgradeCompatibility::SchemaVersionMismatch
+    );
+    assert_eq!(
+        client.try_upgrade(&hash, &42),
+        Err(Ok(ContractError::SchemaVersionMismatch))
+    );
+
+    // Wrong caller — simulate distinguishes auth; real upgrade fails auth.
+    assert_eq!(
+        client.simulate_upgrade(&stranger, &hash, &1),
+        crate::types::UpgradeCompatibility::CallerNotAdmin
+    );
+    let auth_fail = client
+        .mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (hash.clone(), 1u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_upgrade(&hash, &1);
+    assert!(auth_fail.is_err());
+
+    // Compatible → real upgrade succeeds (history written; code becomes minimal).
+    assert_eq!(
+        client.simulate_upgrade(&admin, &hash, &1),
+        crate::types::UpgradeCompatibility::Compatible
+    );
+    client.upgrade(&hash, &1);
+    env.as_contract(&contract_id, || {
+        let hist = crate::storage::StorageClient::get_upgrade_history(&env);
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist.get_unchecked(0).new_wasm_hash, hash);
+        assert_eq!(hist.get_unchecked(0).admin, admin);
+    });
+}
+
+// ─── #86 upgrade history ─────────────────────────────────────────────────────
+
+#[test]
+fn test_upgrade_history_ordered_across_multiple_appends() {
+    let (env, client, admin, _relay) = setup();
+    let contract_id = client.address.clone();
+
+    assert!(client.get_upgrade_history().is_empty());
+
+    env.as_contract(&contract_id, || {
+        for i in 0u8..5 {
+            let previous = BytesN::from_array(&env, &[i; 32]);
+            let new_hash = BytesN::from_array(&env, &[i + 1; 32]);
+            crate::storage::StorageClient::append_upgrade_record(
+                &env,
+                &crate::types::UpgradeRecord {
+                    previous_wasm_hash: previous,
+                    new_wasm_hash: new_hash,
+                    schema_version: 1,
+                    ledger: 100 + u32::from(i),
+                    admin: admin.clone(),
+                },
+            );
+        }
+    });
+
+    let hist = client.get_upgrade_history();
+    assert_eq!(hist.len(), 5);
+    for i in 0u8..5 {
+        let rec = hist.get_unchecked(u32::from(i));
+        assert_eq!(rec.previous_wasm_hash, BytesN::from_array(&env, &[i; 32]));
+        assert_eq!(rec.new_wasm_hash, BytesN::from_array(&env, &[i + 1; 32]));
+        assert_eq!(rec.ledger, 100 + u32::from(i));
+        assert_eq!(rec.admin, admin);
+    }
+}
+
+#[test]
+fn test_upgrade_history_evicts_oldest_at_cap() {
+    let (env, client, admin, _relay) = setup();
+    let contract_id = client.address.clone();
+    let cap = crate::types::MAX_UPGRADE_HISTORY;
+
+    env.as_contract(&contract_id, || {
+        for i in 0..cap + 3 {
+            let b = (i % 256) as u8;
+            crate::storage::StorageClient::append_upgrade_record(
+                &env,
+                &crate::types::UpgradeRecord {
+                    previous_wasm_hash: BytesN::from_array(&env, &[b; 32]),
+                    new_wasm_hash: BytesN::from_array(&env, &[b.wrapping_add(1); 32]),
+                    schema_version: 1,
+                    ledger: i,
+                    admin: admin.clone(),
+                },
+            );
+        }
+    });
+
+    let hist = client.get_upgrade_history();
+    assert_eq!(hist.len(), cap);
+    // Oldest surviving ledger is 3 (0,1,2 evicted).
+    assert_eq!(hist.get_unchecked(0).ledger, 3);
+    assert_eq!(hist.get_unchecked(cap - 1).ledger, cap + 2);
+}
+
+#[test]
+fn test_upgrade_history_survives_in_persistent_tier() {
+    // History uses persistent storage (same tier as admin) so it survives
+    // upgrades. Verified here by writing a record then confirming it is still
+    // readable after unrelated privileged ops (pause round-trip), matching the
+    // existing upgrade-survival suite pattern.
+    let (env, client, admin, _relay) = setup();
+    let contract_id = client.address.clone();
+    let hash = BytesN::from_array(&env, &[0x11u8; 32]);
+
+    env.as_contract(&contract_id, || {
+        crate::storage::StorageClient::append_upgrade_record(
+            &env,
+            &crate::types::UpgradeRecord {
+                previous_wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
+                new_wasm_hash: hash.clone(),
+                schema_version: 1,
+                ledger: 7,
+                admin: admin.clone(),
+            },
+        );
+    });
+
+    client.pause();
+    client.unpause();
+
+    let hist = client.get_upgrade_history();
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist.get_unchecked(0).new_wasm_hash, hash);
+    assert_eq!(hist.get_unchecked(0).ledger, 7);
+}

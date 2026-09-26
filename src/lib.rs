@@ -37,13 +37,14 @@ mod test_pause;
 #[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, Transaction, TransactionStatus, UpgradeCompatibility,
+    UpgradeRecord, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -56,11 +57,30 @@ pub struct SynapseCoreContract;
 impl SynapseCoreContract {
     // ── Initialisation ────────────────────────────────────────────────────────
 
-    /// Initialise the contract; can only be called once.
+    /// Initialise the contract; can only be called once per contract instance.
     ///
     /// * `admin`        — Address that may call privileged methods.
     /// * `relay_signer` — Address of the trusted off-chain relay that forwards
     ///                    Anchor Platform callbacks on-chain.
+    ///
+    /// # Single-call guarantee
+    /// Enforced on-chain by the instance-storage `Initialised` flag. The first
+    /// successful call sets the flag; every subsequent call — from any caller,
+    /// including the original admin — returns
+    /// [`ContractError::AlreadyInitialised`]. This is the sole trust-root
+    /// write path; a race that let a second init succeed would be catastrophic.
+    ///
+    /// # Authorisation
+    /// **No caller auth is required.** Under Soroban's deployment model the
+    /// contract WASM is live and callable by anyone as soon as `deploy`
+    /// succeeds, and there is no deployer-only privilege the contract can
+    /// read. Gating `initialize` on auth would not stop front-running (an
+    /// attacker can still submit their own signed init first); it would only
+    /// add an unused signature requirement for the legitimate deployer.
+    /// Front-running is therefore mitigated **operationally**: deploy and
+    /// `initialize` MUST be submitted in the same transaction (see
+    /// `DEPLOYMENT.md` and `THREAT_MODEL.md` §4.1). Once the flag is set,
+    /// the on-chain single-call guard is the hard guarantee.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -285,6 +305,56 @@ impl SynapseCoreContract {
         StorageClient::get_pending_admin(&env)
     }
 
+    /// Return the append-only on-chain upgrade audit log (oldest → newest).
+    ///
+    /// Bounded by [`crate::types::MAX_UPGRADE_HISTORY`]; once the cap is hit
+    /// the oldest entry is evicted. Empty until the first successful
+    /// `upgrade()` after this feature ships (pre-feature upgrades are not
+    /// backfilled — see CHANGELOG.md).
+    pub fn get_upgrade_history(env: Env) -> Vec<UpgradeRecord> {
+        StorageClient::get_upgrade_history(&env)
+    }
+
+    /// Read-only dry-run of the guards [`Self::upgrade`] would enforce.
+    ///
+    /// Performs every on-chain check `upgrade` performs (initialisation,
+    /// caller-is-admin, schema-version match) **without** touching storage
+    /// or invoking `update_current_contract_wasm`. Does not verify that
+    /// `new_wasm_hash` is present in ledger storage — that is inherently
+    /// an off-chain/tooling concern, and `upgrade` itself will fail at the
+    /// host layer if the blob is missing.
+    ///
+    /// `new_wasm_hash` is accepted for API symmetry with `upgrade` and so
+    /// deployment checklists can pass the candidate hash through unchanged.
+    pub fn simulate_upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+    ) -> UpgradeCompatibility {
+        // Silence unused-arg lint while keeping the parameter in the ABI.
+        let _ = new_wasm_hash;
+
+        if !StorageClient::is_initialised(&env) {
+            return UpgradeCompatibility::NotInitialised;
+        }
+        let admin = match StorageClient::get_admin(&env) {
+            Ok(a) => a,
+            Err(_) => return UpgradeCompatibility::NotInitialised,
+        };
+        if caller != admin {
+            return UpgradeCompatibility::CallerNotAdmin;
+        }
+        let on_chain = match StorageClient::get_schema_version(&env) {
+            Ok(v) => v,
+            Err(_) => return UpgradeCompatibility::NotInitialised,
+        };
+        if on_chain != expected_schema_version {
+            return UpgradeCompatibility::SchemaVersionMismatch;
+        }
+        UpgradeCompatibility::Compatible
+    }
+
     // ── Admin (two-step transfer) ────────────────────────────────────────────
 
     /// Nominate `new_admin` as the next admin.  Requires existing admin auth.
@@ -356,9 +426,9 @@ impl SynapseCoreContract {
     ///
     /// Only the current admin may call this.  The new WASM **must** be compatible
     /// with the existing storage schema (`StorageKey` variants, `Transaction`
-    /// struct layout).  Persistent storage (admin, relay_signer, transactions)
-    /// and instance storage (init flag, pause flag) survive intact; temporary
-    /// storage (idempotency keys) is evicted.
+    /// struct layout).  Persistent storage (admin, relay_signer, transactions,
+    /// upgrade history) and instance storage (init flag, pause flag) survive
+    /// intact; temporary storage (idempotency keys) is evicted.
     ///
     /// `expected_schema_version` must match the on-chain `SchemaVersion`
     /// (THREAT_MODEL.md finding F-04). This cannot validate that the *new*
@@ -367,8 +437,16 @@ impl SynapseCoreContract {
     /// guard against invoking `upgrade()` against a contract instance whose
     /// on-chain state isn't what the caller believes it is.
     ///
+    /// After the WASM swap is requested, a versioned
+    /// [`StorageClient::post_upgrade_self_check`] runs. If it fails, this
+    /// function returns [`ContractError::SelfCheckFailed`] and the whole
+    /// transaction reverts — including the deferred WASM update, which the
+    /// host only commits when the invocation finishes successfully.
+    ///
     /// # Events
-    /// Emits [`events::EventContractUpgraded`] on success.
+    /// Emits [`events::EventContractUpgraded`] then either
+    /// [`events::EventUpgradeSelfCheckPassed`] or
+    /// [`events::EventUpgradeSelfCheckFailed`].
     ///
     /// # Trust
     /// Because this entry point allows the admin to deploy arbitrary WASM, the
@@ -384,8 +462,35 @@ impl SynapseCoreContract {
         if schema_version != expected_schema_version {
             return Err(ContractError::SchemaVersionMismatch);
         }
+
+        let previous_wasm_hash = StorageClient::get_current_wasm_hash(&env);
+
+        // Host defers the actual code swap until this invocation succeeds;
+        // returning Err below rolls the swap back atomically.
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
+
+        match StorageClient::post_upgrade_self_check(&env) {
+            Ok(()) => {
+                EventEmitter::upgrade_self_check_passed(&env, schema_version);
+            }
+            Err(e) => {
+                EventEmitter::upgrade_self_check_failed(&env, schema_version);
+                return Err(e);
+            }
+        }
+
+        StorageClient::append_upgrade_record(
+            &env,
+            &UpgradeRecord {
+                previous_wasm_hash,
+                new_wasm_hash: new_wasm_hash.clone(),
+                schema_version,
+                ledger: env.ledger().sequence(),
+                admin: admin.clone(),
+            },
+        );
+        StorageClient::set_current_wasm_hash(&env, &new_wasm_hash);
         EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
         Ok(())
     }

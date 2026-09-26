@@ -126,6 +126,23 @@ pub struct EventContractUpgraded {
     pub schema_version: u32,
 }
 
+/// Emitted at the end of a successful [`SynapseCoreContract::upgrade`] once
+/// the post-upgrade storage-integrity self-check has passed.
+#[contracttype]
+pub struct EventUpgradeSelfCheckPassed {
+    pub schema_version: u32,
+    pub ledger: u32,
+}
+
+/// Emitted when the post-upgrade self-check fails. The upgrade transaction
+/// reverts after this event is published, so subscribers see the failure
+/// in simulation/logs but on-chain state (including WASM) is unchanged.
+#[contracttype]
+pub struct EventUpgradeSelfCheckFailed {
+    pub schema_version: u32,
+    pub ledger: u32,
+}
+
 /// Emitted by [`SynapseCoreContract::pause`] / [`SynapseCoreContract::unpause`]
 /// whenever the emergency circuit breaker is toggled.
 ///
@@ -190,6 +207,28 @@ impl EventEmitter {
                 new_wasm_hash: new_wasm_hash.clone(),
                 ledger: env.ledger().sequence(),
                 schema_version,
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeSelfCheckPassed`].
+    pub fn upgrade_self_check_passed(env: &Env, schema_version: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("chk_pass")),
+            EventUpgradeSelfCheckPassed {
+                schema_version,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeSelfCheckFailed`].
+    pub fn upgrade_self_check_failed(env: &Env, schema_version: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("chk_fail")),
+            EventUpgradeSelfCheckFailed {
+                schema_version,
+                ledger: env.ledger().sequence(),
             },
         );
     }

@@ -45,6 +45,8 @@ supported.
 | [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
+| [`EventUpgradeSelfCheckPassed`](#eventupgradeselfcheckpassed) | `chk_pass` | `EventEmitter::upgrade_self_check_passed` | `upgrade` | **Live** |
+| [`EventUpgradeSelfCheckFailed`](#eventupgradeselfcheckfailed) | `chk_fail` | `EventEmitter::upgrade_self_check_failed` | `upgrade` | **Live** |
 | [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Live** |
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
 | [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
@@ -221,6 +223,38 @@ Verified by snapshot-style test
 `test_pause::test_upgrade_emits_contract_upgraded_event`
 (topics `synapse` / `upgrade`).
 
+### EventUpgradeSelfCheckPassed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `chk_pass` |
+| **Struct** | `EventUpgradeSelfCheckPassed` |
+| **Emitted by** | `upgrade` |
+| **When** | Post-upgrade storage-integrity self-check succeeded |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `schema_version` | `u32` | On-chain schema version verified by the self-check |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventUpgradeSelfCheckFailed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `chk_fail` |
+| **Struct** | `EventUpgradeSelfCheckFailed` |
+| **Emitted by** | `upgrade` |
+| **When** | Post-upgrade self-check failed; the upgrade transaction reverts |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `schema_version` | `u32` | On-chain schema version at the time of the failed check |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+Verified by `test_pause::test_self_check_events_topics`.
+
 ### EventPauseToggled
 
 | | |
@@ -256,7 +290,8 @@ invocation / transaction.
 | `propose_admin` | 1. `propose` |
 | `accept_admin` | 1. `admin` |
 | `set_relay_signer` | 1. `relay` |
-| `upgrade` | 1. `upgrade` |
+| `upgrade` (success) | 1. `chk_pass`<br>2. `upgrade` |
+| `upgrade` (self-check failure) | 1. `chk_fail` *(invocation then reverts)* |
 | `pause` / `unpause` | 1. `pause` |
 
 **Rationale for `complete_transaction`:** Phase 2 indexers that listen only to

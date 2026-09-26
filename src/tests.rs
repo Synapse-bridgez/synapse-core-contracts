@@ -126,6 +126,44 @@ fn test_initialize_rejects_double_init() {
     assert_eq!(result, Err(Ok(ContractError::AlreadyInitialised)));
 }
 
+#[test]
+fn test_initialize_rejects_second_call_from_any_caller() {
+    // Issue #79: single-call-only is an explicit, tested guarantee. A second
+    // initialize from the original admin, the relay, or an unrelated attacker
+    // must all fail with the distinguishable AlreadyInitialised error — never
+    // silently overwrite the trust root.
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let relay = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let attacker_relay = Address::generate(&env);
+
+    client.initialize(&admin, &relay);
+    assert!(client.health());
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.relay_signer(), relay);
+
+    assert_eq!(
+        client.try_initialize(&admin, &relay),
+        Err(Ok(ContractError::AlreadyInitialised))
+    );
+    assert_eq!(
+        client.try_initialize(&attacker, &attacker_relay),
+        Err(Ok(ContractError::AlreadyInitialised))
+    );
+    assert_eq!(
+        client.try_initialize(&attacker, &relay),
+        Err(Ok(ContractError::AlreadyInitialised))
+    );
+
+    // Trust root unchanged after every rejected attempt.
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.relay_signer(), relay);
+    assert_eq!(client.schema_version(), 1);
+}
+
 // ─── register_callback() ──────────────────────────────────────────────────────
 
 #[test]
