@@ -14,7 +14,9 @@
 
 use soroban_sdk::{Address, Env, String};
 
-use crate::types::{ContractError, StorageKey, Transaction};
+use crate::types::{
+    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction, UnbondRequest,
+};
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
@@ -191,5 +193,97 @@ impl StorageClient {
             IDEMPOTENCY_TTL_LEDGERS,
             IDEMPOTENCY_TTL_LEDGERS,
         );
+    }
+}
+
+// ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
+
+impl StorageClient {
+    /// Read a [`ParamEntry`] by name, or `None` if not set.
+    pub fn get_param(env: &Env, name: &String) -> Option<ParamEntry> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Param(name.clone()))
+    }
+
+    /// Persist a [`ParamEntry`].
+    pub fn set_param(env: &Env, name: &String, entry: &ParamEntry) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Param(name.clone()), entry);
+    }
+}
+
+// ─── Wave 2: Collateral Bonding (#143) ────────────────────────────────────────
+
+/// Minimum TTL for bond records — same order of magnitude as transaction records.
+const BOND_MIN_TTL_LEDGERS: u32 = 100_000;
+
+impl StorageClient {
+    /// Read the [`BondRecord`] for a signer, or `None` if not bonded.
+    pub fn get_bond_record(env: &Env, signer: &Address) -> Option<BondRecord> {
+        let key = StorageKey::BondRecord(signer.clone());
+        let record = env.storage().persistent().get(&key)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BOND_MIN_TTL_LEDGERS, BOND_MIN_TTL_LEDGERS);
+        Some(record)
+    }
+
+    /// Persist a [`BondRecord`].
+    pub fn save_bond_record(env: &Env, record: &BondRecord) {
+        let key = StorageKey::BondRecord(record.signer.clone());
+        env.storage().persistent().set(&key, record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BOND_MIN_TTL_LEDGERS, BOND_MIN_TTL_LEDGERS);
+    }
+
+    /// Remove the [`BondRecord`] for a signer (used when bond reaches zero).
+    pub fn remove_bond_record(env: &Env, signer: &Address) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::BondRecord(signer.clone()));
+    }
+
+    /// Read the pending [`UnbondRequest`] for a signer, or `None`.
+    pub fn get_unbond_request(env: &Env, signer: &Address) -> Option<UnbondRequest> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::UnbondRequest(signer.clone()))
+    }
+
+    /// Persist a pending [`UnbondRequest`].
+    pub fn save_unbond_request(env: &Env, signer: &Address, request: &UnbondRequest) {
+        let key = StorageKey::UnbondRequest(signer.clone());
+        env.storage().persistent().set(&key, request);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BOND_MIN_TTL_LEDGERS, BOND_MIN_TTL_LEDGERS);
+    }
+
+    /// Remove the pending [`UnbondRequest`] for a signer (after claim or slash).
+    pub fn remove_unbond_request(env: &Env, signer: &Address) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::UnbondRequest(signer.clone()));
+    }
+}
+
+// ─── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────────
+
+impl StorageClient {
+    /// Read the [`AnchorTierConfig`] for an anchor, or `None` if not set.
+    pub fn get_anchor_tier(env: &Env, anchor: &Address) -> Option<AnchorTierConfig> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::AnchorTier(anchor.clone()))
+    }
+
+    /// Persist an [`AnchorTierConfig`].
+    pub fn set_anchor_tier(env: &Env, config: &AnchorTierConfig) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AnchorTier(config.anchor.clone()), config);
     }
 }

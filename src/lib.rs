@@ -35,6 +35,8 @@ mod validation;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
+mod test_wave2;
+#[cfg(test)]
 mod tests;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
@@ -43,9 +45,30 @@ use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, Transaction, TransactionStatus, SCHEMA_VERSION,
+    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, ParamEntry, SlashEvidence,
+    Transaction, TransactionStatus, UnbondRequest, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
+
+/// Default unbonding delay in ledgers (~24 h at 5 s/ledger).
+/// Used when the `unbond_delay_ledgers` param has not been set by the admin.
+const DEFAULT_UNBOND_DELAY_LEDGERS: i128 = 17_280;
+
+/// Default slash percentage in basis points (10_000 = 100 %).
+/// Used when the `slash_bps` param has not been set by the admin.
+const DEFAULT_SLASH_BPS: i128 = 10_000;
+
+/// Well-known param names read by the contract's own logic.
+/// Operators may also store arbitrary application-level params under other names.
+const PARAM_UNBOND_DELAY: &str = "unbond_delay_ledgers";
+const PARAM_SLASH_BPS: &str = "slash_bps";
+#[allow(dead_code)]
+const PARAM_BASE_FEE_BPS: &str = "base_fee_bps";
+
+/// Maximum length (bytes) for a param name string.
+const MAX_PARAM_NAME_LEN: u32 = 32;
+/// Maximum length (bytes) for an anchor tier label string.
+const MAX_TIER_LABEL_LEN: u32 = 16;
 
 // ─── Public contract interface ───────────────────────────────────────────────
 
@@ -431,5 +454,372 @@ impl SynapseCoreContract {
         // NOTE: `&'static str` is not a Soroban-representable return type, so the
         // package version is returned as a host `String`.
         String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
+    // ── Wave 2: Param Registry (#146) ─────────────────────────────────────────
+
+    /// Set (or update) a named parameter in the on-chain registry.
+    ///
+    /// Admin-gated. Param names are freeform strings (max 32 bytes); values are
+    /// `i128` scaled integers (e.g. basis points, ledger counts, stroops).
+    ///
+    /// # Well-known param names
+    /// | Name                    | Semantics                                     |
+    /// |-------------------------|-----------------------------------------------|
+    /// | `unbond_delay_ledgers`  | Ledgers before an unbond request is claimable |
+    /// | `slash_bps`             | Slash percentage in basis points (0–10_000)   |
+    /// | `base_fee_bps`          | Base fee rate in basis points                 |
+    ///
+    /// # Events
+    /// Emits [`events::EventParamSet`].
+    pub fn set_param(env: Env, name: String, value: i128) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+
+        if name.is_empty() || name.len() > MAX_PARAM_NAME_LEN {
+            return Err(ContractError::InvalidParamName);
+        }
+
+        let entry = ParamEntry {
+            value,
+            updated_at_ledger: env.ledger().sequence(),
+            updated_by: admin.clone(),
+        };
+        StorageClient::set_param(&env, &name, &entry);
+        EventEmitter::param_set(&env, &name, value, &admin);
+        Ok(())
+    }
+
+    /// Read a named parameter from the registry.
+    ///
+    /// Returns the full [`ParamEntry`] (value + audit fields).
+    ///
+    /// # Errors
+    /// - [`ContractError::ParamNotFound`] — param has never been set.
+    pub fn get_param(env: Env, name: String) -> Result<ParamEntry, ContractError> {
+        StorageClient::get_param(&env, &name).ok_or(ContractError::ParamNotFound)
+    }
+
+    // ── Wave 2: Collateral Bonding (#143) ──────────────────────────────────────
+
+    /// Bond (stake) collateral for the calling relay signer.
+    ///
+    /// The signer authorises this call with their own key. If they already have
+    /// a bond record the `amount` is added on top (top-up semantics).
+    ///
+    /// # Note
+    /// This entry point records the intent to bond; actual token custody
+    /// (transfer from signer to contract) will be wired in a future wave once
+    /// the token interface is determined. For now the amount is tracked purely
+    /// in contract storage as an accounting record.
+    ///
+    /// # Events
+    /// Emits [`events::EventBonded`].
+    pub fn bond_collateral(env: Env, signer: Address, amount: i128) -> Result<(), ContractError> {
+        signer.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidBondAmount);
+        }
+
+        let ledger = env.ledger().sequence();
+        let new_record = match StorageClient::get_bond_record(&env, &signer) {
+            Some(existing) => BondRecord {
+                signer: signer.clone(),
+                amount: existing.amount + amount,
+                bonded_at_ledger: existing.bonded_at_ledger,
+                updated_at_ledger: ledger,
+            },
+            None => BondRecord {
+                signer: signer.clone(),
+                amount,
+                bonded_at_ledger: ledger,
+                updated_at_ledger: ledger,
+            },
+        };
+
+        let total = new_record.amount;
+        StorageClient::save_bond_record(&env, &new_record);
+        EventEmitter::bonded(&env, &signer, amount, total);
+        Ok(())
+    }
+
+    /// Initiate an unbond request for the calling relay signer.
+    ///
+    /// The requested `amount` is locked (still tracked as bonded) until the
+    /// unbonding delay elapses and `claim_unbond` is called. This prevents
+    /// collateral from being withdrawn the moment before a slash event is
+    /// submitted.
+    ///
+    /// Only one pending unbond request per signer is allowed at a time.
+    ///
+    /// The delay used is read from the `unbond_delay_ledgers` param if set,
+    /// otherwise falls back to [`DEFAULT_UNBOND_DELAY_LEDGERS`] (~24 h).
+    ///
+    /// # Errors
+    /// - [`ContractError::SignerNotBonded`] — signer has no bond record.
+    /// - [`ContractError::InsufficientBond`] — requested more than bonded.
+    /// - [`ContractError::UnbondAlreadyPending`] — a previous request is not yet claimed.
+    ///
+    /// # Events
+    /// Emits [`events::EventUnbondRequested`].
+    pub fn unbond_collateral(env: Env, signer: Address, amount: i128) -> Result<(), ContractError> {
+        signer.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidBondAmount);
+        }
+
+        let record =
+            StorageClient::get_bond_record(&env, &signer).ok_or(ContractError::SignerNotBonded)?;
+
+        if amount > record.amount {
+            return Err(ContractError::InsufficientBond);
+        }
+
+        if StorageClient::get_unbond_request(&env, &signer).is_some() {
+            return Err(ContractError::UnbondAlreadyPending);
+        }
+
+        // Read the delay from the param registry, falling back to the default.
+        let delay = StorageClient::get_param(&env, &String::from_str(&env, PARAM_UNBOND_DELAY))
+            .map(|e| e.value)
+            .unwrap_or(DEFAULT_UNBOND_DELAY_LEDGERS);
+
+        let now = env.ledger().sequence();
+        // Saturating cast: delay is always positive and fits a u32 in practice.
+        let claimable_at = now.saturating_add(delay as u32);
+
+        let request = UnbondRequest {
+            amount,
+            requested_at_ledger: now,
+            claimable_at_ledger: claimable_at,
+        };
+        StorageClient::save_unbond_request(&env, &signer, &request);
+        EventEmitter::unbond_requested(&env, &signer, amount, claimable_at);
+        Ok(())
+    }
+
+    /// Claim a matured unbond request.
+    ///
+    /// May only be called after the `claimable_at_ledger` recorded in the
+    /// pending unbond request has been reached. Reduces the on-chain bond
+    /// balance by the previously requested amount and removes the request.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingUnbond`] — no pending unbond for this signer.
+    /// - [`ContractError::UnbondDelayNotElapsed`] — too early.
+    ///
+    /// # Events
+    /// Emits [`events::EventUnbondClaimed`].
+    pub fn claim_unbond(env: Env, signer: Address) -> Result<(), ContractError> {
+        signer.require_auth();
+
+        let request = StorageClient::get_unbond_request(&env, &signer)
+            .ok_or(ContractError::NoPendingUnbond)?;
+
+        if env.ledger().sequence() < request.claimable_at_ledger {
+            return Err(ContractError::UnbondDelayNotElapsed);
+        }
+
+        let amount = request.amount;
+
+        // Reduce the bond. If the result is zero, remove the record entirely.
+        if let Some(mut record) = StorageClient::get_bond_record(&env, &signer) {
+            record.amount -= amount;
+            record.updated_at_ledger = env.ledger().sequence();
+            if record.amount == 0 {
+                StorageClient::remove_bond_record(&env, &signer);
+            } else {
+                StorageClient::save_bond_record(&env, &record);
+            }
+        }
+
+        StorageClient::remove_unbond_request(&env, &signer);
+        EventEmitter::unbond_claimed(&env, &signer, amount);
+        Ok(())
+    }
+
+    /// Read the bond record for a signer, or `None` if not bonded.
+    pub fn get_bond_record(env: Env, signer: Address) -> Option<BondRecord> {
+        StorageClient::get_bond_record(&env, &signer)
+    }
+
+    /// Read the pending unbond request for a signer, or `None`.
+    pub fn get_unbond_request(env: Env, signer: Address) -> Option<UnbondRequest> {
+        StorageClient::get_unbond_request(&env, &signer)
+    }
+
+    // ── Wave 2: Slashing (#144) ────────────────────────────────────────────────
+
+    /// Slash a relay signer's bonded collateral on on-chain-provable evidence
+    /// of misbehaviour.
+    ///
+    /// The only accepted evidence type in Wave 2 is a **conflicting-callback**:
+    /// two `CallbackPayload`s sharing the same `transaction_id` but differing
+    /// in at least one substantive field (anything other than `idempotency_key`).
+    ///
+    /// The evidence is verified entirely on-chain — no off-chain oracle or
+    /// subjective judgement is involved. Specifically:
+    ///
+    /// 1. `evidence.payload_a.transaction_id == evidence.tx_id`
+    /// 2. `evidence.payload_b.transaction_id == evidence.tx_id`
+    /// 3. At least one of `stellar_account`, `amount`, `asset_code`,
+    ///    `asset_issuer`, `anchor_transaction_id`, `callback_status` differs
+    ///    between `payload_a` and `payload_b`.
+    ///
+    /// The slash percentage is read from the `slash_bps` param (0–10_000),
+    /// defaulting to 10_000 (100 %) if not set.
+    ///
+    /// # Auth
+    /// Admin-gated. A future wave may add guardian-quorum multi-sig here.
+    ///
+    /// # Errors
+    /// - [`ContractError::SignerNotBonded`] — signer has no bond to slash.
+    /// - [`ContractError::EvidenceTxIdMismatch`] — evidence `tx_id` does not match both payloads.
+    /// - [`ContractError::EvidenceNotConflicting`] — payloads are identical in all substantive fields.
+    ///
+    /// # Events
+    /// Emits [`events::EventSlashed`].
+    pub fn slash_signer(
+        env: Env,
+        signer: Address,
+        evidence: SlashEvidence,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        // Admin-gated for Wave 2. Guardian-quorum can be added here later.
+        AdminClient::require_admin(&env)?;
+        caller.require_auth();
+
+        // 1. Verify the evidence tx_id matches both payloads.
+        if evidence.payload_a.transaction_id != evidence.tx_id
+            || evidence.payload_b.transaction_id != evidence.tx_id
+        {
+            return Err(ContractError::EvidenceTxIdMismatch);
+        }
+
+        // 2. Verify the payloads differ in at least one substantive field
+        //    (idempotency_key is excluded — it is expected to differ per call
+        //    and is not a meaningful conflicting signal).
+        let conflicting = evidence.payload_a.stellar_account != evidence.payload_b.stellar_account
+            || evidence.payload_a.amount != evidence.payload_b.amount
+            || evidence.payload_a.asset_code != evidence.payload_b.asset_code
+            || evidence.payload_a.asset_issuer != evidence.payload_b.asset_issuer
+            || evidence.payload_a.anchor_transaction_id != evidence.payload_b.anchor_transaction_id
+            || evidence.payload_a.callback_status != evidence.payload_b.callback_status;
+
+        if !conflicting {
+            return Err(ContractError::EvidenceNotConflicting);
+        }
+
+        // 3. Load the bond record — there must be collateral to slash.
+        let mut record =
+            StorageClient::get_bond_record(&env, &signer).ok_or(ContractError::SignerNotBonded)?;
+
+        // 4. Compute the slash amount.
+        let slash_bps = StorageClient::get_param(&env, &String::from_str(&env, PARAM_SLASH_BPS))
+            .map(|e| e.value)
+            .unwrap_or(DEFAULT_SLASH_BPS)
+            .clamp(0, 10_000);
+
+        let slashed_amount = (record.amount * slash_bps) / 10_000;
+        let remaining = record.amount - slashed_amount;
+
+        // 5. Also cancel any pending unbond request — a signer cannot unbond
+        //    after being slashed without re-bonding first.
+        StorageClient::remove_unbond_request(&env, &signer);
+
+        // 6. Update or remove the bond record.
+        if remaining == 0 {
+            StorageClient::remove_bond_record(&env, &signer);
+        } else {
+            record.amount = remaining;
+            record.updated_at_ledger = env.ledger().sequence();
+            StorageClient::save_bond_record(&env, &record);
+        }
+
+        EventEmitter::slashed(
+            &env,
+            &signer,
+            slashed_amount,
+            remaining,
+            &evidence.tx_id,
+            &caller,
+        );
+        Ok(())
+    }
+
+    // ── Wave 2: Anchor Rebate (#145) ──────────────────────────────────────────
+
+    /// Set (or update) the rebate tier for an anchor.
+    ///
+    /// Admin-gated. `rebate_bps` must be in `0..=10_000`; `label` is a
+    /// human-readable tier name (max 16 bytes, e.g. "gold", "silver").
+    ///
+    /// # Events
+    /// Emits [`events::EventAnchorTierSet`].
+    pub fn set_anchor_tier(
+        env: Env,
+        anchor: Address,
+        rebate_bps: u32,
+        label: String,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+
+        if rebate_bps > 10_000 {
+            return Err(ContractError::InvalidRebateBps);
+        }
+        if label.len() > MAX_TIER_LABEL_LEN {
+            return Err(ContractError::InvalidTierLabel);
+        }
+
+        let config = AnchorTierConfig {
+            anchor: anchor.clone(),
+            rebate_bps,
+            label: label.clone(),
+            updated_at_ledger: env.ledger().sequence(),
+        };
+        StorageClient::set_anchor_tier(&env, &config);
+        EventEmitter::anchor_tier_set(&env, &anchor, rebate_bps, &label, &admin);
+        Ok(())
+    }
+
+    /// Read the rebate tier config for an anchor.
+    ///
+    /// # Errors
+    /// - [`ContractError::AnchorTierNotFound`] — no tier has been set for this anchor.
+    pub fn get_anchor_tier(env: Env, anchor: Address) -> Result<AnchorTierConfig, ContractError> {
+        StorageClient::get_anchor_tier(&env, &anchor).ok_or(ContractError::AnchorTierNotFound)
+    }
+
+    /// Compute the effective fee for an anchor given a base fee amount.
+    ///
+    /// Effective fee = `base_fee × (10_000 − rebate_bps) / 10_000`.
+    ///
+    /// If no tier has been set for `anchor`, the full `base_fee` is returned
+    /// (zero rebate). Emits [`events::EventRebateApplied`] for audit trail.
+    ///
+    /// The `base_fee` parameter is denominated in the same unit as the
+    /// `base_fee_bps` param (basis points of the transaction amount). Callers
+    /// should read `base_fee_bps` via `get_param` and pass the result here.
+    pub fn compute_effective_fee(
+        env: Env,
+        anchor: Address,
+        base_fee: i128,
+    ) -> Result<i128, ContractError> {
+        if base_fee < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let (rebate_bps, effective_fee) = match StorageClient::get_anchor_tier(&env, &anchor) {
+            Some(config) => {
+                let rebate = config.rebate_bps;
+                let fee = base_fee * (10_000 - rebate as i128) / 10_000;
+                (rebate, fee)
+            }
+            None => (0u32, base_fee),
+        };
+
+        EventEmitter::rebate_applied(&env, &anchor, base_fee, effective_fee, rebate_bps);
+        Ok(effective_fee)
     }
 }

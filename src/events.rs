@@ -140,6 +140,108 @@ pub struct EventPauseToggled {
     pub ledger: u32,
 }
 
+// ─── Wave 2 event data structs ────────────────────────────────────────────────
+
+// ── Param Registry (#146) ──────────────────────────────────────────────────────
+
+/// Emitted by [`SynapseCoreContract::set_param`] when a parameter value is set
+/// or updated by the admin.
+#[contracttype]
+pub struct EventParamSet {
+    /// Name of the parameter.
+    pub name: String,
+    /// New value.
+    pub value: i128,
+    /// Admin that set the value.
+    pub admin: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+// ── Collateral Bonding (#143) ──────────────────────────────────────────────────
+
+/// Emitted by [`SynapseCoreContract::bond_collateral`] when a relay signer
+/// increases their bonded collateral.
+#[contracttype]
+pub struct EventBonded {
+    /// The relay signer address that bonded.
+    pub signer: soroban_sdk::Address,
+    /// Amount added in this call (not the total).
+    pub amount: i128,
+    /// New total bonded amount after this call.
+    pub total: i128,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::unbond_collateral`] when a relay signer
+/// requests an unbond (starts the unbonding delay).
+#[contracttype]
+pub struct EventUnbondRequested {
+    pub signer: soroban_sdk::Address,
+    /// Amount requested to unbond.
+    pub amount: i128,
+    /// Ledger at which `claim_unbond` will become callable.
+    pub claimable_at_ledger: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::claim_unbond`] when a relay signer
+/// successfully claims their unbonded collateral after the delay elapses.
+#[contracttype]
+pub struct EventUnbondClaimed {
+    pub signer: soroban_sdk::Address,
+    /// Amount claimed/released.
+    pub amount: i128,
+    pub ledger: u32,
+}
+
+// ── Slashing (#144) ────────────────────────────────────────────────────────────
+
+/// Emitted by [`SynapseCoreContract::slash_signer`] when a relay signer is
+/// slashed for on-chain-provable misbehaviour.
+#[contracttype]
+pub struct EventSlashed {
+    /// The signer that was slashed.
+    pub signer: soroban_sdk::Address,
+    /// Amount slashed (burned / redirected).
+    pub slashed_amount: i128,
+    /// Remaining bonded amount after slashing.
+    pub remaining_bond: i128,
+    /// The `transaction_id` from the conflicting-callback evidence.
+    pub evidence_tx_id: String,
+    /// Admin (or guardian) that triggered the slash.
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+// ── Anchor Rebate (#145) ────────────────────────────────────────────────────────
+
+/// Emitted by [`SynapseCoreContract::set_anchor_tier`] when the admin sets or
+/// updates an anchor's rebate tier.
+#[contracttype]
+pub struct EventAnchorTierSet {
+    pub anchor: soroban_sdk::Address,
+    /// Rebate in basis points (0–10_000).
+    pub rebate_bps: u32,
+    /// Human-readable tier label.
+    pub label: String,
+    pub admin: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::compute_effective_fee`] when the rebate
+/// is applied to a base fee amount (informational / audit trail).
+#[contracttype]
+pub struct EventRebateApplied {
+    pub anchor: soroban_sdk::Address,
+    /// Base fee before rebate (in the same unit as the fee param).
+    pub base_fee: i128,
+    /// Effective fee after applying the rebate.
+    pub effective_fee: i128,
+    /// Rebate in basis points that was applied.
+    pub rebate_bps: u32,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -291,6 +393,126 @@ impl EventEmitter {
             EventAdminTransferred {
                 old_admin: old_admin.clone(),
                 new_admin: new_admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    // ── Wave 2 emitters ───────────────────────────────────────────────────────
+
+    /// Emit [`EventParamSet`] — param registry update (#146).
+    pub fn param_set(env: &Env, name: &String, value: i128, admin: &soroban_sdk::Address) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("param")),
+            EventParamSet {
+                name: name.clone(),
+                value,
+                admin: admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventBonded`] — collateral bonded (#143).
+    pub fn bonded(env: &Env, signer: &soroban_sdk::Address, amount: i128, total: i128) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("bonded")),
+            EventBonded {
+                signer: signer.clone(),
+                amount,
+                total,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUnbondRequested`] — unbond initiated (#143).
+    pub fn unbond_requested(
+        env: &Env,
+        signer: &soroban_sdk::Address,
+        amount: i128,
+        claimable_at_ledger: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("unbondrq")),
+            EventUnbondRequested {
+                signer: signer.clone(),
+                amount,
+                claimable_at_ledger,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUnbondClaimed`] — unbond claimed (#143).
+    pub fn unbond_claimed(env: &Env, signer: &soroban_sdk::Address, amount: i128) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("unbondcl")),
+            EventUnbondClaimed {
+                signer: signer.clone(),
+                amount,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventSlashed`] — signer slashed (#144).
+    pub fn slashed(
+        env: &Env,
+        signer: &soroban_sdk::Address,
+        slashed_amount: i128,
+        remaining_bond: i128,
+        evidence_tx_id: &String,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("slashed")),
+            EventSlashed {
+                signer: signer.clone(),
+                slashed_amount,
+                remaining_bond,
+                evidence_tx_id: evidence_tx_id.clone(),
+                caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventAnchorTierSet`] — anchor tier updated (#145).
+    pub fn anchor_tier_set(
+        env: &Env,
+        anchor: &soroban_sdk::Address,
+        rebate_bps: u32,
+        label: &String,
+        admin: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("tierset")),
+            EventAnchorTierSet {
+                anchor: anchor.clone(),
+                rebate_bps,
+                label: label.clone(),
+                admin: admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRebateApplied`] — rebate computation (#145).
+    pub fn rebate_applied(
+        env: &Env,
+        anchor: &soroban_sdk::Address,
+        base_fee: i128,
+        effective_fee: i128,
+        rebate_bps: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rebate")),
+            EventRebateApplied {
+                anchor: anchor.clone(),
+                base_fee,
+                effective_fee,
+                rebate_bps,
                 ledger: env.ledger().sequence(),
             },
         );
