@@ -17,6 +17,16 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Event schema
 
+- Added `EventDisputeRaised` (topic `dispute`), emitted by the future
+  `dispute_transaction` entry-point (sibling issue). Schema locked in
+  `src/events.rs` and catalogued in `EVENTS.md`. Additive new event per
+  [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy) — Minor bump.
+- Added `EventDisputeResolved` (topic `dsprslvd`), emitted by the future
+  `resolve_dispute` entry-point (sibling issue). Schema locked. The `upheld`
+  boolean is normatively documented: `true` = dispute upheld, transaction
+  reverted to `Failed`; `false` = dispute rejected, transaction returned to
+  `Completed`. Additive new event — Minor bump.
+
 - Added `EventRelaySignerRotated` (topic `relay`), emitted by
   `set_relay_signer`. Additive new event per
   [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy) — Minor bump.

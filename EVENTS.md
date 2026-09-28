@@ -51,6 +51,8 @@ supported.
 | [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
 | [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
 | [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
+| [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` (sibling issue) | **Schema locked** |
+| [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` (sibling issue) | **Schema locked** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -237,6 +239,67 @@ Verified by snapshot-style test
 | `admin` | `Address` | Admin that toggled |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventDisputeRaised
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `dispute` |
+| **Struct** | `EventDisputeRaised` |
+| **Emitted by** | `dispute_transaction` (sibling issue) |
+| **When** | A dispute is opened against a transaction |
+| **Status** | Schema locked |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction under dispute — shared correlation key with `EventDisputeResolved` |
+| `reason` | `String` | Short human-readable reason code (e.g. `"amount_mismatch"`, `"missing_settlement"`) |
+| `caller` | `Address` | Address that raised the dispute (relay signer or admin) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+**Re-dispute cardinality:** a given `tx_id` may produce more than one
+`dispute` / `dsprslvd` event pair over its lifetime if the dispute
+state machine permits re-disputing after a prior resolution. Subscribers
+MUST correlate pairs by `tx_id` and emission order rather than assuming
+at-most-one per transaction. Once the sibling dispute state-machine issue
+finalises the cardinality policy, this note will be updated to reflect the
+exact rule (once-only or repeatable).
+
+Verified by snapshot-style test `tests::test_dispute_raised_event_payload_snapshot`
+(topics `synapse` / `dispute`).
+
+### EventDisputeResolved
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `dsprslvd` |
+| **Struct** | `EventDisputeResolved` |
+| **Emitted by** | `resolve_dispute` (sibling issue) |
+| **When** | A raised dispute is resolved by the admin |
+| **Status** | Schema locked |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction ID — shared correlation key with `EventDisputeRaised` |
+| `upheld` | `bool` | `true` = dispute upheld (transaction **reverted to `Failed`**); `false` = dispute rejected (transaction **returned to `Completed`**) |
+| `caller` | `Address` | Admin address that resolved the dispute |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+**`upheld` semantics (normative):**
+
+* `upheld = true` — The dispute is **upheld**. The transaction outcome is
+  considered invalid and is **reverted to `Failed`**. Downstream systems
+  (support tooling, audit logs) SHOULD treat this as a terminal failure
+  equivalent to [`EventTransactionFailed`](#eventtransactionfailed).
+
+* `upheld = false` — The dispute is **rejected**. The original outcome
+  stands and the transaction is **returned to `Completed`**. Downstream
+  systems SHOULD resume treating the transaction as settled.
+
+Verified by snapshot-style tests
+`tests::test_dispute_resolved_upheld_true_event_payload_snapshot` and
+`tests::test_dispute_resolved_upheld_false_event_payload_snapshot`
+(topics `synapse` / `dsprslvd`).
+
 ---
 
 ## 4. Guaranteed emission order
@@ -258,6 +321,13 @@ invocation / transaction.
 | `set_relay_signer` | 1. `relay` |
 | `upgrade` | 1. `upgrade` |
 | `pause` / `unpause` | 1. `pause` |
+
+Future entry-points wiring the dispute events (sibling issue):
+
+| Entry-point | Order (first → last) |
+|-------------|----------------------|
+| `dispute_transaction` | 1. `dispute` |
+| `resolve_dispute` | 1. `dsprslvd` |
 
 **Rationale for `complete_transaction`:** Phase 2 indexers that listen only to
 `done` still see completion; those that key off `status` with
@@ -309,7 +379,8 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 
 1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
 2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
-   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`).
+   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`,
+   `dispute`, `dsprslvd`).
 3. Confirm multi-event order in §4 still matches the call sites.
 4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
    and any new event tests; topics in assertions must match §3.
