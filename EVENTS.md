@@ -2,6 +2,7 @@
 
 > **Status:** Locked for Phase 2 / Phase 3 subscribers  
 > **Source of truth:** [`src/events.rs`](./src/events.rs)  
+> **Conformance gate:** [`event_conformance_manifest.toml`](./event_conformance_manifest.toml) — machine-checked by [`src/test_events_conformance.rs`](./src/test_events_conformance.rs) on every `make check`  
 > **Contract version:** `version()` → [`Cargo.toml`](./Cargo.toml) `package.version` (currently **0.1.0**)  
 > **Audience:** Swap Engine (Phase 2), Cross-Chain Bridge (Phase 3), off-chain indexers
 
@@ -304,16 +305,44 @@ For any **Major** event-schema change:
 
 ## 6. Verification checklist (maintainers)
 
+### Automated conformance gate (CI-enforced)
+
+Event-schema conformance is enforced mechanically by two required CI checks
+that run as part of `make check` (`cargo test`):
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_events_conformance::test_events_rs_conforms_to_manifest` | Every struct in `src/events.rs` — field names, types, declaration order, and `symbol_short!` topic — matches `event_conformance_manifest.toml` exactly. |
+| `test_events_conformance::test_events_md_conforms_to_manifest` | This file's catalogue tables contain the struct name, topic, and every field name for each event in the manifest. |
+
+The ground-truth manifest is **[`event_conformance_manifest.toml`](./event_conformance_manifest.toml)**
+at the repository root. It records the canonical event schema in a
+machine-readable form that the conformance tests (`src/test_events_conformance.rs`)
+parse and diff against both `src/events.rs` and this document.
+
+**Design rationale:** Soroban's `#[contracttype]` structs compile away
+completely in the WASM artefact — there is no runtime type registry to reflect
+over. The manifest approach uses `include_str!` source-text parsing (zero new
+dependencies) and is documented in the manifest file itself.
+
+**When changing an event:**
+
+1. Update `src/events.rs` (struct fields and/or emitter).
+2. Update `event_conformance_manifest.toml` to match.
+3. Update the catalogue table(s) in §3 of this file.
+4. Run `make check` — all three artefacts must agree or CI blocks.
+
+### Manual review steps
+
 Before merging any PR that touches `src/events.rs` or event emit sites in
 `src/lib.rs`:
 
-1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
-2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
-   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`).
-3. Confirm multi-event order in §4 still matches the call sites.
-4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
+1. Run `make check` and confirm all conformance tests pass (automated step above).
+2. Confirm multi-event order in §4 still matches the call sites — the
+   conformance tests do not yet check emission order.
+3. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
    and any new event tests; topics in assertions must match §3.
-5. If the schema changed, update [`CHANGELOG.md`](./CHANGELOG.md#event-schema)
+4. If the schema changed, update [`CHANGELOG.md`](./CHANGELOG.md#event-schema)
    and bump `version()` per §5.
 
 ---

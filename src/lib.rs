@@ -33,6 +33,8 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod test_events_conformance;
+#[cfg(test)]
 mod test_pause;
 #[cfg(test)]
 mod tests;
