@@ -33,6 +33,8 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod bench_events;
+#[cfg(test)]
 mod test_pause;
 #[cfg(test)]
 mod tests;
