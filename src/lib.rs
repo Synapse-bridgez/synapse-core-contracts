@@ -33,11 +33,19 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod test_events_conformance;
+#[cfg(test)]
 mod test_pause;
 #[cfg(test)]
 mod test_wave2;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_auth_adversarial;
+#[cfg(test)]
+mod tests_invariants;
+#[cfg(test)]
+mod tests_state_machine;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
 

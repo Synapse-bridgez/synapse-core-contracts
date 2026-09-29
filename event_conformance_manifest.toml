@@ -1,0 +1,264 @@
+# event_conformance_manifest.toml
+#
+# Canonical ground-truth for every event emitted by synapse-core-contract.
+#
+# PURPOSE
+# -------
+# This file is the single source of truth that the automated conformance test
+# (`src/test_events_conformance.rs`) checks against *both*:
+#   1. `src/events.rs`  — Rust struct fields must match in name, type, and order.
+#   2. `EVENTS.md`      — documented catalogue tables must match every entry here.
+#
+# WHY A MANIFEST INSTEAD OF PROC-MACRO REFLECTION?
+# -------------------------------------------------
+# Soroban's `#[contracttype]` structs are fully compiled away in the release
+# artefact; there is no runtime type-system to reflect over in `no_std` / WASM.
+# A proc-macro approach would add a significant build-time dependency and
+# complexity for marginal gain. Instead, the test parses `events.rs` source
+# text via `include_str!` (zero new dependencies) and compares the extracted
+# fields against this manifest, which is hand-edited and reviewed in the same
+# PR as any event change. The trade-off is documented in DECISIONS.md (ADR note
+# in issue #113).
+#
+# KEEPING THIS IN SYNC
+# --------------------
+# Any change to a `#[contracttype]` struct in `src/events.rs`, to a topic
+# symbol in `EventEmitter`, or to the EVENTS.md catalogue tables requires a
+# matching update here. `make check` (or `cargo test`) enforces this
+# mechanically — the conformance test will fail and block CI until all three
+# artefacts (manifest, code, docs) agree.
+#
+# FIELD TYPES
+# -----------
+# Types are recorded exactly as they appear in `src/events.rs` after stripping
+# `pub` and the field name — e.g. `soroban_sdk::Address`, `String`, `u32`,
+# `bool`, `i128`, `TransactionStatus`, `soroban_sdk::BytesN<32>`.
+# The test normalises internal whitespace before comparing.
+#
+# SEMVER
+# ------
+# schema_version here mirrors `SCHEMA_VERSION` in `src/types.rs`. Bump it
+# together with the on-chain constant on any breaking event-schema change.
+
+schema_version = 1
+
+# ─── Events ──────────────────────────────────────────────────────────────────
+#
+# Each [[event]] block describes one emitted event.
+#
+# Required keys:
+#   struct_name   – Rust struct identifier in src/events.rs
+#   topic         – symbol_short! argument used as topics[1]  (topics[0] is always "synapse")
+#   emitter_fn    – EventEmitter method name
+#
+# [[event.fields]] — ordered list matching Rust struct declaration order.
+#   name – field identifier
+#   type – Rust type as written in the struct (whitespace-normalised)
+
+[[event]]
+struct_name = "EventInitialised"
+topic       = "init"
+emitter_fn  = "initialised"
+
+[[event.fields]]
+name = "admin"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "relay_signer"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventTransactionRegistered"
+topic       = "reg"
+emitter_fn  = "transaction_registered"
+
+[[event.fields]]
+name = "tx_id"
+type = "String"
+
+[[event.fields]]
+name = "stellar_account"
+type = "String"
+
+[[event.fields]]
+name = "amount"
+type = "i128"
+
+[[event.fields]]
+name = "asset_code"
+type = "String"
+
+[[event.fields]]
+name = "anchor_transaction_id"
+type = "String"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventStatusChanged"
+topic       = "status"
+emitter_fn  = "status_changed"
+
+[[event.fields]]
+name = "tx_id"
+type = "String"
+
+[[event.fields]]
+name = "old_status"
+type = "TransactionStatus"
+
+[[event.fields]]
+name = "new_status"
+type = "TransactionStatus"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventTransactionCompleted"
+topic       = "done"
+emitter_fn  = "transaction_completed"
+
+[[event.fields]]
+name = "tx_id"
+type = "String"
+
+[[event.fields]]
+name = "stellar_tx_hash"
+type = "String"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventTransactionFailed"
+topic       = "fail"
+emitter_fn  = "transaction_failed"
+
+[[event.fields]]
+name = "tx_id"
+type = "String"
+
+[[event.fields]]
+name = "reason"
+type = "String"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventAdminTransferProposed"
+topic       = "propose"
+emitter_fn  = "admin_transfer_proposed"
+
+[[event.fields]]
+name = "current_admin"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "proposed_admin"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventAdminTransferred"
+topic       = "admin"
+emitter_fn  = "admin_transferred"
+
+[[event.fields]]
+name = "old_admin"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "new_admin"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventRelaySignerRotated"
+topic       = "relay"
+emitter_fn  = "relay_signer_rotated"
+
+[[event.fields]]
+name = "old_signer"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "new_signer"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventContractUpgraded"
+topic       = "upgrade"
+emitter_fn  = "contract_upgraded"
+
+[[event.fields]]
+name = "admin"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "new_wasm_hash"
+type = "soroban_sdk::BytesN<32>"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+[[event.fields]]
+name = "schema_version"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventPauseToggled"
+topic       = "pause"
+emitter_fn  = "pause_toggled"
+
+[[event.fields]]
+name = "paused"
+type = "bool"
+
+[[event.fields]]
+name = "admin"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"

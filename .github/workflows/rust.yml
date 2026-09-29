@@ -2,31 +2,120 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
+      - name: Build wasm (once)
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Upload release wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synapse-core-contract-wasm
+          path: target/wasm32-unknown-unknown/release/synapse_core_contract.wasm
+
+      - name: Verify schema_version() matches migrations.toml (#88)
+        run: |
+          chmod +x scripts/check_schema_migration.sh
+          scripts/check_schema_migration.sh
+
+      - name: Prove schema check fails on mismatched manifest (#88 fixture)
+        run: |
+          scripts/check_schema_migration.sh \
+            --manifest fixtures/ci/migrations.mismatch.toml \
+            --expect-fail
+
+      - name: Verify reference event decoder stays in sync with events.rs
+        run: |
+          # The reference decoder in src/events.rs must cover every catalogued
+          # event topic documented in EVENTS.md. This check fails the build if a
+          # topic is added to EVENTS.md without a corresponding decoder example,
+          # or if a decoder example references a topic that is no longer
+          # catalogued. See docs/event-consumer-guide.md for details.
+          cargo test --all-features event_decoder_covers_catalogued_topics
+
+      # Run the event-emission benchmarks and surface the [bench] output as a
+      # tracked (non-gating) metric in the CI log.  The bench_wave7_cumulative_cost
+      # test asserts regression ceilings, so a genuine budget blow-out will
+      # already fail the "Run tests" step above; this step prints the raw numbers
+      # for trend-tracking across PRs.
+      #
+      # To grep these numbers out of CI logs:
+      #   grep '\[bench\]' <logfile>
+      - name: Event-emission benchmarks (tracked metric)
+        run: |
+          echo "::group::Event emission cost breakdown"
+          cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
+          echo "::endgroup::"
+
+  # ── Mutation testing — Issue #128 ─────────────────────────────────────────
+  #
+  # Validates that the test suite detects real logic bugs rather than only
+  # achieving high line coverage. cargo-mutants systematically corrupts the
+  # contract's core logic (flips comparisons, removes guards, alters return
+  # values) and confirms the test suite catches each mutation.
+  #
+  # Exit codes:
+  #   0 — all mutants killed (perfect kill rate)
+  #   2 — some mutants survived  ← this job treats as failure
+  #   3 — some tests timed out   ← also treated as failure
+  #
+  # The job is intentionally a separate parallel job so it never blocks the
+  # main `check` job, and its results can be reviewed independently.
+  mutants:
+    runs-on: ubuntu-latest
+    # Only run on PRs and main pushes (not on every draft event).
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Run mutation tests
+        # --in-place: mutate the working tree directly (faster than copying).
+        # Exit 2 (survived mutants) and exit 3 (timeouts) are failures here.
+        # The mutants.toml in the repo root controls which files are mutated,
+        # the per-mutant timeout, and the parallelism level.
+        run: cargo mutants --in-place
+        # Upload the mutation report as an artifact so engineers can inspect
+        # which mutants survived without re-running locally.
+        continue-on-error: false
 
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo test --verbose
-
-      - name: Build wasm
-        run: cargo build --target wasm32-unknown-unknown --release
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants.out/
+          retention-days: 14

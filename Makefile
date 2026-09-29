@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build setup
+.PHONY: check fmt clippy test wasm build bench setup mutants
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
@@ -26,7 +26,27 @@ wasm:
 build:
 	cargo build --verbose
 
+## Run event-emission benchmarks and print the [bench] summary lines.
+## The regression ceilings in src/bench_events.rs are asserted as part of
+## `make test`; this target surfaces the raw numbers for local inspection.
+## Grep-friendly: all cost lines are prefixed with "[bench]".
+bench:
+	cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
+
 ## One-time contributor setup: install the pre-commit hook.
 setup:
 	git config core.hooksPath .git-hooks
 	@echo "Pre-commit hook installed. Run 'make check' to verify your environment."
+
+## Run cargo-mutants against core contract logic (issue #128).
+##
+## Requires cargo-mutants to be installed:
+##   cargo install cargo-mutants
+##
+## Exit code 0  — all mutants killed (100% kill rate).
+## Exit code 2  — some mutants survived (see mutants.out/).
+## Exit code 3  — some tests timed out.
+##
+## CI uses a minimum-kill-rate budget (see .github/workflows/rust.yml).
+mutants:
+	cargo mutants --in-place

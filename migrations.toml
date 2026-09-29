@@ -1,0 +1,21 @@
+# Migration metadata manifest (#88)
+#
+# Every schema_version() value the release WASM can report MUST have an exact
+# matching entry here with a human-readable migration note. CI builds the
+# release WASM once, deploys it to an ephemeral Soroban test Env, invokes
+# schema_version(), and fails the build if that value has no entry below.
+#
+# Content quality of the note is a human review concern; presence + exact
+# version match are enforced mechanically.
+
+[[migrations]]
+schema_version = 1
+note = "Initial un-namespaced StorageKey layout (pre-#89)."
+
+[[migrations]]
+schema_version = 2
+note = """
+Namespaced StorageKey::Ns(STORAGE_KEY_NAMESPACE, DataKey) layout (#89). \
+Singleton keys migrate via migrate_storage_keys() / upgrade_and_migrate(). \
+Also introduces optional upgrade quorum (#87) and previous_wasm_hash (#90).
+"""

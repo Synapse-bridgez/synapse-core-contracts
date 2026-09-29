@@ -224,6 +224,50 @@ pub struct EventAnchorTierSet {
     pub rebate_bps: u32,
     /// Human-readable tier label.
     pub label: String,
+    pub adm
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted when a raised dispute is resolved.
+///
+/// Subscribers correlate this with the preceding [`EventDisputeRaised`] for
+/// the same `tx_id` to reconstruct the full dispute lifecycle.
+///
+/// # `upheld` semantics
+///
+/// * `upheld = true`  — The dispute is **upheld**: the transaction is
+///   considered invalid and the outcome is **reverted to `Failed`**.
+///   Downstream systems (support tooling, audit logs) should treat this as
+///   a terminal failure equivalent to [`EventTransactionFailed`].
+///
+/// * `upheld = false` — The dispute is **rejected**: the original outcome
+///   stands and the transaction is **returned to `Completed`**.
+///   Downstream systems should resume treating the transaction as settled.
+#[contracttype]
+pub struct EventDisputeResolved {
+    /// The transaction ID — shared correlation key with [`EventDisputeRaised`].
+    pub tx_id: String,
+    /// Whether the dispute was upheld (`true` → reverted to `Failed`) or
+    /// rejected (`false` → returned to `Completed`). See doc-comment above
+    /// for the full semantics.
+    pub upheld: bool,
+    /// Address that resolved the dispute (admin only).
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+// ── Anchor Rebate (#145) ────────────────────────────────────────────────────────
+
+/// Emitted by [`SynapseCoreContract::set_anchor_tier`] when the admin sets or
+/// updates an anchor's rebate tier.
+#[contracttype]
+pub struct EventAnchorTierSet {
+    pub anchor: soroban_sdk::Address,
+    /// Rebate in basis points (0–10_000).
+    pub rebate_bps: u32,
+    /// Human-readable tier label.
+    pub label: String,
     pub admin: soroban_sdk::Address,
     pub ledger: u32,
 }
@@ -239,6 +283,10 @@ pub struct EventRebateApplied {
     pub effective_fee: i128,
     /// Rebate in basis points that was applied.
     pub rebate_bps: u32,
+    pub ledger: u32,
+}
+
+
     pub ledger: u32,
 }
 
@@ -478,6 +526,33 @@ impl EventEmitter {
         );
     }
 
+    /// Emit [`EventDisputeRaised`].
+    ///
+    /// Topics: `synapse` / `dispute`.
+    #[allow(dead_code)]
+    pub fn dispute_raised(
+        env: &Env,
+        tx_id: &String,
+        reason: &String,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("dispute")),
+            EventDisputeRaised {
+                tx_id: tx_id.clone(),
+                reason: reason.clone(),
+                caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+                caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
     /// Emit [`EventAnchorTierSet`] — anchor tier updated (#145).
     pub fn anchor_tier_set(
         env: &Env,
@@ -513,6 +588,35 @@ impl EventEmitter {
                 base_fee,
                 effective_fee,
                 rebate_bps,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventDisputeResolved`].
+    ///
+    /// Topics: `synapse` / `dsprslvd`.
+    ///
+    /// `upheld = true`  → dispute upheld, transaction reverted to `Failed`.
+    /// `upheld = false` → dispute rejected, transaction returned to `Completed`.
+    #[allow(dead_code)]
+    pub fn dispute_resolved(
+        env: &Env,
+        tx_id: &String,
+        upheld: bool,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("dsprslvd")),
+            EventDisputeResolved {
+                tx_id: tx_id.clone(),
+                upheld,
+                caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
                 ledger: env.ledger().sequence(),
             },
         );
