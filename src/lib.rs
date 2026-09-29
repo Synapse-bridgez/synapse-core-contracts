@@ -34,7 +34,8 @@
 //! self-check, `simulate_upgrade`, upgrade history, namespaced schema v2).
 //! Those tests are gated behind `#[cfg(synapse_quarantine)]`, which is never
 //! set, so the rest of the suite can build and gate CI. Restoring an entry
-//! point should remove the matching `cfg` in the same change.
+//! point should remove the matching `cfg` in the same change. Tracked in
+//! issue #199.
 
 mod admin;
 mod events;
