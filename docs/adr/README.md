@@ -20,6 +20,7 @@ to the old one; the old file is never modified or deleted.
 | [0004](./0004-timelocked-upgrade.md) | Timelocked upgrade propose / finalize / cancel | Accepted | 2026-Q3 |
 | [0005](./0005-upgrade-and-migrate.md) | Bounded upgrade_and_migrate + migration registry | Accepted | 2026-Q3 |
 | [0006](./0006-schema-compat-range.md) | Schema-version compatibility ranges (amends 0003) | Accepted | 2026-Q3 |
+| [0007](./0007-guardian-emergency-admin-revocation.md) | Guardian-quorum emergency admin revocation | Proposed | 2026-Q3 |
 
 ---
 
