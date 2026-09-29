@@ -174,6 +174,24 @@ pub struct ContractMetadata {
     pub build_commit: String,
 }
 
+// ─── Relay signer set (#161) ──────────────────────────────────────────────────
+
+/// Current relay-signer roster and quorum threshold returned by
+/// [`crate::SynapseCoreContract::get_relay_signer_set`].
+///
+/// Roster/threshold only — deliberately carries no per-signer state (liveness,
+/// quarantine, etc.); that belongs to the separate heartbeat query. The
+/// `signers` vector is the authoritative current membership and `threshold` is
+/// the number of signers that must agree to authorize a relay action.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySignerSet {
+    /// Current relay-signer roster.
+    pub signers: soroban_sdk::Vec<soroban_sdk::Address>,
+    /// Number of signers required to authorize a relay action.
+    pub threshold: u32,
+}
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Discriminants used as ledger storage keys.
@@ -210,45 +228,6 @@ pub enum StorageKey {
     /// Per-parameter record keyed by param name string.
     Param(String),
 
-    // ── Wave 2: Collateral Bonding (#143) ────────────────────────────────────
-    /// Per-signer bond record keyed by the signer address.
-    BondRecord(soroban_sdk::Address),
-    /// Per-signer unbond request keyed by the signer address.
-    /// Absent when no unbond is pending.
-    UnbondRequest(soroban_sdk::Address),
+    // ── Wave 2: Collateral Bonding (#143) ────
 
-    // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
-    /// Per-anchor tier config keyed by the anchor address.
-    AnchorTier(soroban_sdk::Address),
-}
-
-// ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
-
-/// A single on-chain parameter entry.
-///
-/// Stored in persistent ledger storage keyed by [`StorageKey::Param`].
-/// All tunable values (fee rate, unbond delay, slash percentage, fee ceiling,
-/// etc.) live here rather than as independent ad-hoc admin-settable fields.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ParamEntry {
-    /// Param value. Represented as `i128` to accommodate both integer counts
-    /// and scaled basis-point rates (e.g. 9_500 = 95.00 %).
-    pub value: i128,
-    /// Ledger sequence at which this param was last updated.
-    pub updated_at_ledger: u32,
-    /// Address that last set this param (always the admin).
-    pub updated_by: soroban_sdk::Address,
-}
-
-// ─── Wave 2: Collateral Bonding (#143) ────────────────────────────────────────
-
-/// Collateral bond record for a relay signer.
-///
-/// Stored in persistent ledger storage keyed by [`StorageKey::BondRecord`].
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BondRecord {
-    /// The signer whose collateral is bonde
-
-/* … truncated 7656 chars — edit only what you need near the top … */
+/* … truncated 1640 chars — edit only what you need near the top … */
