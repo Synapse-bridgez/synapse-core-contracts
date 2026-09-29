@@ -398,19 +398,25 @@ by the idempotency key alone.
 
 ---
 
-### R-05: In-place upgrade — no timelock
+### R-05: In-place upgrade — timelock window
 
 **Risk:** An admin (or compromised admin multisig) can upgrade the contract
-WASM immediately, without a delay that would allow users to exit.
+WASM immediately, without a delay that would allow users / guardians to
+react.
+
+**Status:** **Mitigated** (issue #81 / ADR-0004). Production upgrades SHOULD
+use `propose_upgrade` → wait → `finalize_upgrade`. Immediate `upgrade()`
+remains for emergency / rollback paths and is still multisig-gated.
 
 **Compensating controls:**
-- Multisig requirement means M-of-N keys must sign the upgrade transaction.
-- `EventContractUpgraded` is emitted; monitoring can detect and alert within
-  seconds.
-- A timelock enhancement is planned (see `DECISIONS.md §7`) but not in scope
-  for Phase 1.
+- Configurable ledger delay (`set_upgrade_delay`, default ≈ 24h).
+- `get_pending_upgrade()` + distinct `up_prop` / `up_fin` / `up_can` events
+  for monitoring and subscriber tooling.
+- Multisig requirement means M-of-N keys must sign propose and finalize.
+- `EventContractUpgraded` still emitted on the actual WASM swap.
 
-**Residual risk:** Medium. Accepted for Phase 1. Monitoring is mandatory.
+**Residual risk:** Low–Medium. Immediate `upgrade()` bypasses the timelock
+by design for emergencies; operational policy should restrict its use.
 
 ---
 

@@ -45,7 +45,12 @@ supported.
 | [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
 | [`EventBatchProcessed`](#eventbatchprocessed) | `batch` | `EventEmitter::batch_processed` | `batch_register_callback` | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
-| [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
+| [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` / `finalize_upgrade` / `upgrade_and_migrate` / `rollback_upgrade` | **Live** |
+| [`EventUpgradeProposed`](#eventupgradeproposed) | `up_prop` | `EventEmitter::upgrade_proposed` | `propose_upgrade` | **Live** |
+| [`EventUpgradeFinalized`](#eventupgradefinalized) | `up_fin` | `EventEmitter::upgrade_finalized` | `finalize_upgrade` | **Live** |
+| [`EventUpgradeCancelled`](#eventupgradecancelled) | `up_can` | `EventEmitter::upgrade_cancelled` | `cancel_upgrade` | **Live** |
+| [`EventUpgradeRolledBack`](#eventupgraderolledback) | `rollback` | `EventEmitter::upgrade_rolled_back` | `rollback_upgrade` | **Live** |
+| [`EventUpgradeMigrated`](#eventupgrademigrated) | `migrate` | `EventEmitter::upgrade_migrated` | `upgrade_and_migrate` | **Live** |
 | [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` | **Live** |
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
 | [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
@@ -313,6 +318,71 @@ SHOULD consume both, in this order.
 | `new_wasm_hash` | `BytesN<32>` | New contract wasm hash |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventUpgradeProposed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `up_prop` |
+| **Struct** | `EventUpgradeProposed` |
+| **Emitted by** | `propose_upgrade` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `admin` | `Address` | Admin that proposed |
+| `wasm_hash` | `BytesN<32>` | Pending WASM hash |
+| `expected_schema_version` | `u32` | Schema arg checked at propose + finalize |
+| `eta_ledger` | `u32` | First ledger finalize is legal |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventUpgradeFinalized
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `up_fin` |
+| **Struct** | `EventUpgradeFinalized` |
+| **Emitted by** | `finalize_upgrade` |
+| **Status** | Live |
+
+Emitted in addition to `EventContractUpgraded` after a successful timelocked swap.
+
+### EventUpgradeCancelled
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `up_can` |
+| **Struct** | `EventUpgradeCancelled` |
+| **Emitted by** | `cancel_upgrade` |
+| **Status** | Live |
+
+### EventUpgradeRolledBack
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `rollback` |
+| **Struct** | `EventUpgradeRolledBack` |
+| **Emitted by** | `rollback_upgrade` |
+| **Status** | Live |
+
+Distinct from a forward `upgrade` event so monitors can alert differently.
+
+### EventUpgradeMigrated
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `migrate` |
+| **Struct** | `EventUpgradeMigrated` |
+| **Emitted by** | `upgrade_and_migrate` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `admin` | `Address` | Admin that authorised |
+| `migration_id` | `u32` | Registry id that ran |
+| `storage_touches` | `u32` | Touches reported by the routine |
+| `new_wasm_hash` | `BytesN<32>` | Installed WASM |
+| `ledger` | `u32` | Ledger sequence at emit |
+
 ### EventPauseToggled
 
 | | |
@@ -458,6 +528,11 @@ names, types, and order are frozen.
 | `accept_admin` | 1. `admin` |
 | `set_relay_signer` | 1. `relay` |
 | `upgrade` | 1. `upgrade` |
+| `propose_upgrade` | 1. `up_prop` |
+| `finalize_upgrade` | 1. `upgrade`<br>2. `up_fin` |
+| `cancel_upgrade` | 1. `up_can` |
+| `rollback_upgrade` | 1. `upgrade`<br>2. `rollback` |
+| `upgrade_and_migrate` | 1. `upgrade`<br>2. `migrate` |
 | `pause` / `unpause` | 1. `pause` |
 | `set_signer_attestation` | 1. `attest` |
 | `renounce_admin` | 1. `renounce` |
@@ -568,6 +643,7 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
 2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
    `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`,
+   `up_prop`, `up_fin`, `up_can`, `rollback`, `migrate`,
    `attest`, `renounce`, `guardian`, `apause`, `aunpause`).
 3. Confirm multi-event order in §4 still matches the call sites.
 4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
