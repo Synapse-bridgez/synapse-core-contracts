@@ -257,6 +257,29 @@ pub struct EventPauseToggled {
     pub ledger: u32,
 }
 
+/// Emitted by [`SynapseCoreContract::set_upgrade_quorum`] when the optional
+/// upgrade M-of-N co-signer set is configured or cleared (#87).
+#[contracttype]
+pub struct EventUpgradeQuorumSet {
+    /// Admin that wrote the config.
+    pub admin: soroban_sdk::Address,
+    /// Configured threshold (0 when cleared).
+    pub threshold: u32,
+    /// Member count (0 when cleared).
+    pub member_count: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::propose_upgrade`] when an upgrade is
+/// staged awaiting quorum co-signatures (#87).
+#[contracttype]
+pub struct EventUpgradeProposed {
+    pub proposer: soroban_sdk::Address,
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub expected_schema_version: u32,
+    pub ledger: u32,
+}
+
 /// Emitted when a relay signer updates its self-reported build fingerprint
 /// (#77). This is an operational signal, **not** a cryptographic proof that
 /// the off-chain binary matches the hash.
@@ -656,6 +679,24 @@ impl EventEmitter {
         );
     }
 
+    /// Emit [`EventUpgradeQuorumSet`].
+    pub fn upgrade_quorum_set(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        threshold: u32,
+        member_count: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("uqset")),
+            EventUpgradeQuorumSet {
+                admin: admin.clone(),
+                threshold,
+                member_count,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
     /// Emit [`EventSignerAttestationSet`].
     pub fn signer_attestation_set(
         env: &Env,
@@ -746,6 +787,24 @@ impl EventEmitter {
         );
     }
 
+    /// Emit [`EventUpgradeProposed`].
+    pub fn upgrade_proposed(
+        env: &Env,
+        proposer: &soroban_sdk::Address,
+        new_wasm_hash: &soroban_sdk::BytesN<32>,
+        expected_schema_version: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("uprop")),
+            EventUpgradeProposed {
+                proposer: proposer.clone(),
+                new_wasm_hash: new_wasm_hash.clone(),
+                expected_schema_version,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
     /// Emit [`EventAdminRenounced`].
     pub fn admin_renounced(
         env: &Env,
@@ -778,24 +837,6 @@ impl EventEmitter {
         env.events().publish(
             (symbol_short!("synapse"), symbol_short!("guardian")),
             EventGuardianSet {
-                guardian: guardian.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-    /// Emit [`EventGuardianPaused`].
-    pub fn guardian_paused(env: &Env, guardian: &soroban_sdk::Address) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("gpause")),
-            EventGuardianPaused {
-                guardian: guardian.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-
                 guardian: guardian.clone(),
                 ledger: env.ledger().sequence(),
             },
@@ -876,6 +917,11 @@ impl EventEmitter {
         env.events().publish(
             (symbol_short!("synapse"), symbol_short!("apause")),
             EventAutoPaused {
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
                 ledger: env.ledger().sequence(),
             },
         );

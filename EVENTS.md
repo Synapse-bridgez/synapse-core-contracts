@@ -52,6 +52,8 @@ supported.
 | [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
 | [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
 | [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
+| [`EventUpgradeQuorumSet`](#eventupgradequorumset) | `uqset` | `EventEmitter::upgrade_quorum_set` | `set_upgrade_quorum` | **Live** |
+| [`EventUpgradeProposed`](#eventupgradeproposed) | `uprop` | `EventEmitter::upgrade_proposed` | `propose_upgrade` | **Live** |
 | [`EventSignerAttestationSet`](#eventsignerattestationset) | `attest` | `EventEmitter::signer_attestation_set` | `set_signer_attestation` | **Live** |
 | [`EventAdminRenounced`](#eventadminrenounced) | `renounce` | `EventEmitter::admin_renounced` | `renounce_admin` | **Live** |
 | [`EventGuardianSet`](#eventguardianset) | `guardian` | `EventEmitter::guardian_set` | `set_guardian` | **Live** |
@@ -204,6 +206,40 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 |-------|------|---------|
 | `old_signer` | `Address` | Previous relay signer |
 | `new_signer` | `Address` | New relay signer |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventUpgradeQuorumSet
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `uqset` |
+| **Struct** | `EventUpgradeQuorumSet` |
+| **Emitted by** | `set_upgrade_quorum` |
+| **When** | Optional upgrade M-of-N quorum is configured or cleared (#87) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `admin` | `Address` | Admin that wrote the config |
+| `threshold` | `u32` | M (0 when cleared) |
+| `member_count` | `u32` | N (0 when cleared) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventUpgradeProposed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `uprop` |
+| **Struct** | `EventUpgradeProposed` |
+| **Emitted by** | `propose_upgrade` |
+| **When** | Upgrade staged awaiting quorum co-signatures (#87) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `proposer` | `Address` | Admin that proposed |
+| `new_wasm_hash` | `BytesN<32>` | Proposed WASM hash |
+| `expected_schema_version` | `u32` | Schema version checked at propose time |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventContractUpgraded
