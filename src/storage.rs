@@ -12,9 +12,12 @@
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
-use crate::types::{ContractError, StorageKey, Transaction};
+use crate::types::{
+    DEFAULT_AMOUNT_CEILING, ContractError, PendingRelaySigner, RelaySignerSet, StorageKey, Transaction,
+    TransactionStatus, TransitionRecord, MAX_HISTORY_LEN,
+};
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
@@ -66,7 +69,11 @@ impl StorageClient {
         env.storage()
             .persistent()
             .get(&StorageKey::Admin)
-            .ok_or(ContractError::NotInitialised)
+            .ok_or(if Self::is_admin_vacant(env) {
+                ContractError::AdminVacant
+            } else {
+                ContractError::NotInitialised
+            })
     }
 
     /// Persist an admin address.
@@ -77,18 +84,110 @@ impl StorageClient {
     // ── Relay signer ──────────────────────────────────────────────────────────
 
     /// Read the trusted relay signer address.
+    ///
+    /// With an N-of-M set this is the primary (first) signer.
     pub fn get_relay_signer(env: &Env) -> Result<Address, ContractError> {
-        env.storage()
-            .persistent()
-            .get(&StorageKey::RelaySigner)
+        Self::get_relay_signer_set(env)?
+            .signers
+            .get(0)
             .ok_or(ContractError::NotInitialised)
     }
 
-    /// Persist the relay signer address.
+    /// Persist the relay signer address (replaces the primary signer when a
+    /// signer set exists).
     pub fn set_relay_signer(env: &Env, signer: &Address) {
         env.storage()
             .persistent()
             .set(&StorageKey::RelaySigner, signer);
+        if let Some(mut set) = Self::get_relay_signer_set_opt(env) {
+            set.signers.set(0, signer.clone());
+            Self::set_relay_signer_set(env, &set);
+        }
+    }
+
+    fn get_relay_signer_set_opt(env: &Env) -> Option<RelaySignerSet> {
+        env.storage().persistent().get(&StorageKey::RelaySignerSet)
+    }
+
+    /// Read the relay signer set. Pre-N-of-M deployments migrate lazily:
+    /// the legacy single `RelaySigner` becomes `threshold = 1, signers = [it]`.
+    pub fn get_relay_signer_set(env: &Env) -> Result<RelaySignerSet, ContractError> {
+        if let Some(set) = Self::get_relay_signer_set_opt(env) {
+            return Ok(set);
+        }
+        let legacy: Address = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::RelaySigner)
+            .ok_or(ContractError::NotInitialised)?;
+        Ok(RelaySignerSet {
+            signers: soroban_sdk::vec![env, legacy],
+            threshold: 1,
+        })
+    }
+
+    /// Persist the relay signer set.
+    pub fn set_relay_signer_set(env: &Env, set: &RelaySignerSet) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::RelaySignerSet, set);
+    }
+
+    /// Record a signer's approval at the current ledger.
+    pub fn set_relay_approval(env: &Env, signer: &Address) {
+        env.storage().temporary().set(
+            &StorageKey::RelayApproval(signer.clone()),
+            &env.ledger().sequence(),
+        );
+    }
+
+    /// Ledger at which `signer` last approved, if any.
+    pub fn get_relay_approval(env: &Env, signer: &Address) -> Option<u32> {
+        env.storage()
+            .temporary()
+            .get(&StorageKey::RelayApproval(signer.clone()))
+    }
+
+    /// Consume (remove) `signer`'s approval.
+    pub fn clear_relay_approval(env: &Env, signer: &Address) {
+        env.storage()
+            .temporary()
+            .remove(&StorageKey::RelayApproval(signer.clone()));
+    }
+
+    // ── Relay signer timelock ─────────────────────────────────────────────────
+
+    /// Read the pending relay-signer change, if any.
+    pub fn get_pending_relay_signer(env: &Env) -> Option<PendingRelaySigner> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingRelaySigner)
+    }
+
+    /// Persist (overwriting any existing) pending relay-signer change.
+    pub fn set_pending_relay_signer(env: &Env, p: &PendingRelaySigner) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PendingRelaySigner, p);
+    }
+
+    /// Clear the pending relay-signer change.
+    pub fn clear_pending_relay_signer(env: &Env) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::PendingRelaySigner);
+    }
+
+    /// Timelock delay in ledgers; defaults to the ~24h constant.
+    pub fn get_relay_signer_delay(env: &Env) -> Option<u32> {
+        env.storage().persistent().get(&StorageKey::RelaySignerDelay)
+    }
+
+    /// Persist the timelock delay in ledgers.
+    pub fn set_relay_signer_delay(env: &Env, delay: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::RelaySignerDelay, &delay);
     }
 
     // ── Admin transfer (two-step) ─────────────────────────────────────────────
@@ -108,6 +207,81 @@ impl StorageClient {
     /// Clear the pending admin nominee after a transfer is accepted.
     pub fn clear_pending_admin(env: &Env) {
         env.storage().persistent().remove(&StorageKey::PendingAdmin);
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::PendingAdminExpiry);
+    }
+
+    /// Next expected nonce for `addr` (0 if never used).
+    pub fn get_nonce(env: &Env, addr: &Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Nonce(addr.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Persist the next expected nonce for `addr`.
+    pub fn set_nonce(env: &Env, addr: &Address, next: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Nonce(addr.clone()), &next);
+    }
+
+    /// Allowed anchor/issuer IDs for `signer`; empty means unrestricted.
+    pub fn get_relay_anchors(env: &Env, signer: &Address) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::RelayAnchors(signer.clone()))
+            .unwrap_or(Vec::new(env))
+    }
+
+    /// Replace the anchor allowlist for `signer`.
+    pub fn set_relay_anchors(env: &Env, signer: &Address, anchors: &Vec<String>) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::RelayAnchors(signer.clone()), anchors);
+    }
+
+    /// Read the pending relay-signer nominee.
+    pub fn get_pending_relay_signer(env: &Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingRelaySigner)
+    }
+
+    /// Store (`Some`) or clear (`None`) the pending relay-signer nominee.
+    pub fn set_pending_relay_signer(env: &Env, nominee: Option<&Address>) {
+        match nominee {
+            Some(a) => env
+                .storage()
+                .persistent()
+                .set(&StorageKey::PendingRelaySigner, a),
+            None => env
+                .storage()
+                .persistent()
+                .remove(&StorageKey::PendingRelaySigner),
+        }
+    }
+
+    /// Read the optional expiry timestamp of the pending admin proposal.
+    pub fn get_pending_admin_expiry(env: &Env) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingAdminExpiry)
+    }
+
+    /// Set (or clear, with `None`) the pending admin proposal expiry.
+    pub fn set_pending_admin_expiry(env: &Env, expiry: Option<u64>) {
+        match expiry {
+            Some(t) => env
+                .storage()
+                .persistent()
+                .set(&StorageKey::PendingAdminExpiry, &t),
+            None => env
+                .storage()
+                .persistent()
+                .remove(&StorageKey::PendingAdminExpiry),
+        }
     }
 
     /// Read the outgoing admin recorded at the last successful `accept_admin`.
@@ -282,14 +456,274 @@ impl StorageClient {
     }
 
     /// Persist (insert or update) a [`Transaction`].
+    ///
+    /// Also keeps the per-status index in sync. Trade-off: each status change
+    /// costs one extra read plus up to two index writes (removal is O(n) in
+    /// the size of the old status bucket), in exchange for O(page) reads in
+    /// `get_transactions_by_status`.
     pub fn save_transaction(env: &Env, tx: &Transaction) {
         let key = StorageKey::Transaction(tx.id.clone());
+        let old = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Transaction>(&key);
+        match old {
+            Some(old) if old.status == tx.status => {}
+            Some(old) => {
+                Self::index_remove(env, &old.status, &tx.id);
+                Self::index_push(env, &tx.status, &tx.id);
+            }
+            None => Self::index_push(env, &tx.status, &tx.id),
+        }
         env.storage().persistent().set(&key, tx);
         env.storage().persistent().extend_ttl(
             &key,
             TRANSACTION_MIN_TTL_LEDGERS,
             TRANSACTION_MIN_TTL_LEDGERS,
         );
+    }
+
+    // ── Merge markers ─────────────────────────────────────────────────────────
+
+    /// Return the canonical tx id `tx_id` was merged into, if any.
+    pub fn get_merged_into(env: &Env, tx_id: &String) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::MergedInto(tx_id.clone()))
+    }
+
+    /// Persist the `MergedInto(canonical)` marker for `duplicate`.
+    pub fn set_merged_into(env: &Env, duplicate: &String, canonical: &String) {
+        let key = StorageKey::MergedInto(duplicate.clone());
+        env.storage().persistent().set(&key, canonical);
+    }
+
+    // ── Transaction history ───────────────────────────────────────────────────
+
+    /// Append a transition record to the transaction's history (persistent).
+    ///
+    /// Bounded at [`MAX_HISTORY_LEN`]; once full the oldest entry is dropped
+    /// so the newest are kept and the transition itself is never blocked.
+    pub fn append_history(env: &Env, tx_id: &String, status: TransactionStatus, caller: &Address) {
+        let key = StorageKey::History(tx_id.clone());
+        let mut h: Vec<TransitionRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if h.len() >= MAX_HISTORY_LEN {
+            h.pop_front();
+        }
+        h.push_back(TransitionRecord {
+            status,
+            caller: caller.clone(),
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&key, &h);
+    }
+        env.storage().persistent().extend_ttl(
+            &key,
+            TRANSACTION_MIN_TTL_LEDGERS,
+            TRANSACTION_MIN_TTL_LEDGERS,
+        );
+    }
+
+    // ── Forwarding routes ─────────────────────────────────────────────────────
+
+    /// Return the configured `next_phase` for `tx_id`, if any.
+    pub fn get_forward_route(env: &Env, tx_id: &String) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ForwardRoute(tx_id.clone()))
+    }
+
+    /// Set (`Some`) or clear (`None`) the forwarding route for `tx_id`.
+    pub fn set_forward_route(env: &Env, tx_id: &String, next_phase: Option<u32>) {
+        let key = StorageKey::ForwardRoute(tx_id.clone());
+        match next_phase {
+            Some(p) => env.storage().persistent().set(&key, &p),
+            None => env.storage().persistent().remove(&key),
+        }
+    }
+
+    /// Read a transaction's history, oldest first (empty if none recorded).
+    pub fn get_history(env: &Env, tx_id: &String) -> Vec<TransitionRecord> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::History(tx_id.clone()))
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    // ── Per-signer outstanding-Pending cap ────────────────────────────────────
+
+    /// Configured cap on outstanding `Pending` transactions per signer
+    /// (`None` = unlimited).
+    pub fn get_max_pending_per_signer(env: &Env) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::MaxPendingPerSigner)
+    }
+
+    /// Persist the per-signer outstanding-Pending cap.
+    pub fn set_max_pending_per_signer(env: &Env, cap: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::MaxPendingPerSigner, &cap);
+    }
+
+    /// Current outstanding `Pending` count for `signer`.
+    pub fn get_pending_count(env: &Env, signer: &Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingCount(signer.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Record that `signer` registered `tx_id` and bump its counter.
+    pub fn inc_pending(env: &Env, signer: &Address, tx_id: &String) {
+        let n = Self::get_pending_count(env, signer) + 1;
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PendingCount(signer.clone()), &n);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::TxSigner(tx_id.clone()), signer);
+    }
+
+    /// Decrement the counter of the signer that registered `tx_id`, called
+    /// when the transaction leaves `Pending`. Never underflows.
+    pub fn dec_pending(env: &Env, tx_id: &String) {
+        let key = StorageKey::TxSigner(tx_id.clone());
+        if let Some(signer) = env.storage().persistent().get::<StorageKey, Address>(&key) {
+            let n = Self::get_pending_count(env, &signer);
+            debug_assert!(n > 0, "pending counter underflow");
+            env.storage().persistent().set(
+                &StorageKey::PendingCount(signer),
+                &n.saturating_sub(1),
+            );
+            env.storage().persistent().remove(&key);
+        }
+    }
+
+    // ── Dispute overlay flag ──────────────────────────────────────────────────
+
+    /// Whether `tx_id` is currently flagged as disputed (overlay on status).
+    pub fn is_disputed(env: &Env, tx_id: &String) -> bool {
+        env.storage()
+            .persistent()
+            .has(&StorageKey::Disputed(tx_id.clone()))
+    }
+
+    /// Set or clear the dispute overlay flag.
+    pub fn set_disputed(env: &Env, tx_id: &String, disputed: bool) {
+        let key = StorageKey::Disputed(tx_id.clone());
+        if disputed {
+            env.storage().persistent().set(&key, &true);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+    }
+
+    // ── Amount ceilings ───────────────────────────────────────────────────────
+
+    /// Effective ceiling for `anchor`: explicit entry, else the default.
+    pub fn get_amount_ceiling(env: &Env, anchor: &String) -> i128 {
+        let p = env.storage().persistent();
+        p.get(&StorageKey::AnchorCeiling(anchor.clone()))
+            .or_else(|| p.get(&StorageKey::DefaultCeiling))
+            .unwrap_or(DEFAULT_AMOUNT_CEILING)
+    }
+
+    /// Set an explicit ceiling for `anchor`.
+    pub fn set_anchor_ceiling(env: &Env, anchor: &String, ceiling: i128) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AnchorCeiling(anchor.clone()), &ceiling);
+    }
+
+    /// Set the default ceiling for anchors without an explicit entry.
+    pub fn set_default_ceiling(env: &Env, ceiling: i128) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::DefaultCeiling, &ceiling);
+    }
+
+    // ── Expiry window ─────────────────────────────────────────────────────────
+
+    /// Read the `Pending` expiry window in seconds, if configured.
+    pub fn get_expiry_window(env: &Env) -> Option<u64> {
+        env.storage().persistent().get(&StorageKey::ExpiryWindow)
+    }
+
+    /// Persist the `Pending` expiry window in seconds.
+    pub fn set_expiry_window(env: &Env, seconds: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ExpiryWindow, &seconds);
+    }
+
+    // ── Standby signer ────────────────────────────────────────────────────────
+
+    /// Read the admin-approved standby relay signer, if any.
+    pub fn get_standby_signer(env: &Env) -> Option<Address> {
+        env.storage().persistent().get(&StorageKey::StandbySigner)
+    }
+
+    /// Persist the admin-approved standby relay signer.
+    pub fn set_standby_signer(env: &Env, signer: &Address) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::StandbySigner, signer);
+    }
+
+    fn index_push(env: &Env, status: &TransactionStatus, id: &String) {
+        let key = StorageKey::StatusIndex(status.clone());
+        let mut ids = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Vec<String>>(&key)
+            .unwrap_or(Vec::new(env));
+        ids.push_back(id.clone());
+        env.storage().persistent().set(&key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TRANSACTION_MIN_TTL_LEDGERS, TRANSACTION_MIN_TTL_LEDGERS);
+    }
+
+    fn index_remove(env: &Env, status: &TransactionStatus, id: &String) {
+        let key = StorageKey::StatusIndex(status.clone());
+        if let Some(mut ids) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Vec<String>>(&key)
+        {
+            if let Some(pos) = ids.first_index_of(id) {
+                ids.remove(pos);
+                env.storage().persistent().set(&key, &ids);
+            }
+        }
+    }
+
+    /// Return up to `limit` transaction IDs in `status`, starting at `start`.
+    pub fn get_ids_by_status(
+        env: &Env,
+        status: &TransactionStatus,
+        start: u32,
+        limit: u32,
+    ) -> Vec<String> {
+        let ids = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Vec<String>>(&StorageKey::StatusIndex(status.clone()))
+            .unwrap_or(Vec::new(env));
+        let end = start.saturating_add(limit).min(ids.len());
+        let mut out = Vec::new(env);
+        let mut i = start;
+        while i < end {
+            out.push_back(ids.get_unchecked(i));
+            i += 1;
+        }
+        out
     }
 
     // ── Idempotency keys ──────────────────────────────────────────────────────
@@ -313,5 +747,105 @@ impl StorageClient {
             IDEMPOTENCY_TTL_LEDGERS,
             IDEMPOTENCY_TTL_LEDGERS,
         );
+    }
+
+    // ── Relay-signer liveness ─────────────────────────────────────────────────
+
+    /// Last heartbeat ledger timestamp recorded for `signer`, if any.
+    pub fn get_last_heartbeat(env: &Env, signer: &Address) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::LastHeartbeat(signer.clone()))
+    }
+
+    /// Record `ts` as `signer`'s last heartbeat.
+    pub fn set_last_heartbeat(env: &Env, signer: &Address, ts: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::LastHeartbeat(signer.clone()), &ts);
+    }
+
+    /// Staleness window in seconds; `0` (default) disables quarantine.
+    pub fn get_heartbeat_window(env: &Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::HeartbeatWindow)
+            .unwrap_or(0)
+    }
+
+    /// Persist the staleness window in seconds.
+    pub fn set_heartbeat_window(env: &Env, secs: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::HeartbeatWindow, &secs);
+    }
+
+    // ── Role scopes ───────────────────────────────────────────────────────────
+
+    /// Scopes granted to `who` (empty when none).
+    pub fn get_scopes(env: &Env, who: &Address) -> soroban_sdk::Vec<crate::types::RoleScope> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Scopes(who.clone()))
+            .unwrap_or(soroban_sdk::Vec::new(env))
+    }
+
+    /// Persist the scope set for `who`.
+    pub fn set_scopes(
+        env: &Env,
+        who: &Address,
+        scopes: &soroban_sdk::Vec<crate::types::RoleScope>,
+    ) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Scopes(who.clone()), scopes);
+    }
+
+    // ── Guardians ─────────────────────────────────────────────────────────────
+
+    /// Current guardian set (empty when none configured).
+    pub fn get_guardians(env: &Env) -> soroban_sdk::Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Guardians)
+            .unwrap_or(soroban_sdk::Vec::new(env))
+    }
+
+    /// Persist the guardian set.
+    pub fn set_guardians(env: &Env, guardians: &soroban_sdk::Vec<Address>) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Guardians, guardians);
+    }
+
+    // ── Emergency admin revocation ────────────────────────────────────────────
+
+    /// Guardian quorum M (0 = unset).
+    pub fn get_guardian_threshold(env: &Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::GuardianThreshold)
+            .unwrap_or(0)
+    }
+
+    /// Persist the guardian quorum M.
+    pub fn set_guardian_threshold(env: &Env, m: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::GuardianThreshold, &m);
+    }
+
+    /// Whether the admin was revoked via break-glass.
+    pub fn is_admin_vacant(env: &Env) -> bool {
+        env.storage().persistent().has(&StorageKey::AdminVacant)
+    }
+
+    /// Remove the admin and mark the role vacant.
+    pub fn vacate_admin(env: &Env) {
+        env.storage().persistent().remove(&StorageKey::Admin);
+        env.storage().persistent().remove(&StorageKey::PendingAdmin);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AdminVacant, &true);
     }
 }
