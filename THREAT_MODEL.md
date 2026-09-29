@@ -356,6 +356,17 @@ single point of failure.
 - The admin key must not be the same as the deployer or relay signer key.
 - A timelock on `upgrade()` (requiring a 24–48 h delay between scheduling
   and execution) is noted as a future enhancement in `DECISIONS.md §7`.
+- **Admin rate limiting (#75):** privileged admin calls share a configurable
+  fixed ledger-time window budget (`set_admin_rate_limit`). Hitting the
+  ceiling returns `ContractError::AdminRateLimited`, widening the window for
+  a guardian/monitoring response after key compromise. Recovery paths
+  (`unpause`, `unpause_auto`, `renounce_admin`, `set_admin_rate_limit`) are
+  exempt so legitimate incident response cannot be locked out.
+- **Safe renounce (#76):** `renounce_admin` cannot leave a zero-admin state.
+  It succeeds only after a successor has completed `accept_admin` and is the
+  live admin; the outgoing key may then acknowledge step-down. An
+  OpenZeppelin-style void renounce is structurally unreachable
+  (`ContractError::NoAcceptedSuccessor`).
 
 **Residual risk:** High if multisig is not enforced. Low if enforced. Accepted for Phase 1 with multisig requirement.
 
@@ -394,19 +405,25 @@ by the idempotency key alone.
 
 ---
 
-### R-05: In-place upgrade — no timelock
+### R-05: In-place upgrade — timelock window
 
 **Risk:** An admin (or compromised admin multisig) can upgrade the contract
-WASM immediately, without a delay that would allow users to exit.
+WASM immediately, without a delay that would allow users / guardians to
+react.
+
+**Status:** **Mitigated** (issue #81 / ADR-0004). Production upgrades SHOULD
+use `propose_upgrade` → wait → `finalize_upgrade`. Immediate `upgrade()`
+remains for emergency / rollback paths and is still multisig-gated.
 
 **Compensating controls:**
-- Multisig requirement means M-of-N keys must sign the upgrade transaction.
-- `EventContractUpgraded` is emitted; monitoring can detect and alert within
-  seconds.
-- A timelock enhancement is planned (see `DECISIONS.md §7`) but not in scope
-  for Phase 1.
+- Configurable ledger delay (`set_upgrade_delay`, default ≈ 24h).
+- `get_pending_upgrade()` + distinct `up_prop` / `up_fin` / `up_can` events
+  for monitoring and subscriber tooling.
+- Multisig requirement means M-of-N keys must sign propose and finalize.
+- `EventContractUpgraded` still emitted on the actual WASM swap.
 
-**Residual risk:** Medium. Accepted for Phase 1. Monitoring is mandatory.
+**Residual risk:** Low–Medium. Immediate `upgrade()` bypasses the timelock
+by design for emergencies; operational policy should restrict its use.
 
 ---
 

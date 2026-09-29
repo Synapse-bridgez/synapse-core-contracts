@@ -1,0 +1,8 @@
+# Deliberately mismatched migration manifest for CI negative testing (#88).
+# schema_version() of the built WASM is 2; this file only documents version 999.
+# scripts/check_schema_migration.sh --manifest fixtures/ci/migrations.mismatch.toml
+# MUST exit non-zero.
+
+[[migrations]]
+schema_version = 999
+note = "Intentionally wrong — proves the CI check fails on exact-match miss."

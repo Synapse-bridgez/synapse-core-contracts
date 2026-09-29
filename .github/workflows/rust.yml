@@ -2,31 +2,63 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Check formatting
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Format check
         run: cargo fmt --all -- --check
-
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose
 
-      - name: Build wasm
+      - name: Build wasm (once)
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Upload release wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synapse-core-contract-wasm
+          path: target/wasm32-unknown-unknown/release/synapse_core_contract.wasm
+
+      - name: Verify schema_version() matches migrations.toml (#88)
+        run: |
+          chmod +x scripts/check_schema_migration.sh
+          scripts/check_schema_migration.sh
+
+      - name: Prove schema check fails on mismatched manifest (#88 fixture)
+        run: |
+          scripts/check_schema_migration.sh \
+            --manifest fixtures/ci/migrations.mismatch.toml \
+            --expect-fail
+
+      - name: Verify reference event decoder stays in sync with events.rs
+        run: |
+          # The reference decoder in src/events.rs must cover every catalogued
+          # event topic documented in EVENTS.md. This check fails the build if a
+          # topic is added to EVENTS.md without a corresponding decoder example,
+          # or if a decoder example references a topic that is no longer
+          # catalogued. See docs/event-consumer-guide.md for details.
+          cargo test --all-features event_decoder_covers_catalogued_topics

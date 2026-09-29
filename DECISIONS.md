@@ -195,13 +195,43 @@ The admin key is the **single most important secret** in the Synapse Bridge ecos
 - Admin operations SHOULD be logged and monitored off-chain
 - The admin key SHOULD NOT be the same key used for deployment or relay signing
 
+### Optional on-chain upgrade quorum (#87)
+
+Off-chain multisig custody of the admin key is necessary but opaque to the
+contract. Deployments that want an *on-chain* guarantee that `upgrade()` cannot
+proceed on a single admin signature alone may configure an optional
+`UpgradeQuorum { threshold, members }` via `set_upgrade_quorum`.
+
+- Default: `None` — today's single-admin behaviour (full backward compatibility)
+- When set: `upgrade(…, cosigners)` and `propose_upgrade` / `approve_upgrade`
+  require at least `threshold` distinct member `require_auth()` co-signatures.
+  Admin alone is rejected with `InsufficientUpgradeQuorum`.
+
+### Storage key namespacing (#89)
+
+All ledger keys are `StorageKey::Ns(STORAGE_KEY_NAMESPACE, DataKey)`. Additive
+schema changes stay inside the current namespace; a relocating bump uses a new
+namespace plus `migrate_storage_keys` / `upgrade_and_migrate`. See
+`migrations.toml` for the human-readable note CI cross-checks against
+`schema_version()` (#88).
+
+### Previous WASM hash (#90)
+
+`initialize` records the genesis WASM hash; every successful `upgrade` copies
+it into `previous_wasm_hash` before installing the new blob.
+`get_previous_wasm_hash()` lets explorers verify upgrade provenance without
+replaying the full event log.
+
 ---
 
-## 7. Future Enhancements (Out of Scope for Phase 1)
+## 7. Future Enhancements
 
-- **Timelocked upgrade**: Require a two-step process where `schedule_upgrade()` sets a pending hash and `execute_upgrade()` can only be called after N ledgers
-- **Emergency pause before upgrade**: Require the contract to be paused before an upgrade can execute, preventing race conditions with in-flight callbacks
+- ~~**Timelocked upgrade**~~ — **Done** (issue #81 / ADR-0004):
+  `propose_upgrade` / `finalize_upgrade` / `cancel_upgrade`
+- **Emergency pause before upgrade**: Require the contract to be paused before an upgrade can execute, preventing race conditions with in-flight callbacks (still F-05)
 - **DAO-controlled admin**: Replace the single-address admin with a Soroban DAO contract
+- **Resumable multi-call migrations**: For transforms exceeding
+  `MAX_MIGRATION_STORAGE_TOUCHES` (ADR-0005 v1 documents the limitation)
 
 ---
 
@@ -292,3 +322,14 @@ Unit tests in `validation.rs` cover:
 - [SEP-23: Strkeys](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md)
 - [Stellar Go `strkey` + CRC16-XModem](https://github.com/stellar/go/tree/master/strkey)
 
+
+## Timelocked relay-signer rotation
+
+`propose_relay_signer` / `finalize_relay_signer` / `cancel_relay_signer_change`
+mirror the two-step admin transfer (ADR-0002): pending state in persistent storage,
+one event per step, admin-gated. Delay is in ledgers (default 17_280, about 24h;
+configurable via `set_relay_signer_delay`). A second proposal replaces the pending
+one and restarts the delay. Assumptions: with the N-of-M set (ADR-0004) only the
+primary signer slot is rotated; the legacy immediate `set_relay_signer` stays for
+backward compatibility until a non-zero delay is configured, after which it returns
+`TimelockRequired`.
