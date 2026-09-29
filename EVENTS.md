@@ -45,10 +45,10 @@ supported.
 | [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
-| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Live** |
+| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` | **Live** |
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
-| [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `complete_transaction` (route configured) | 1. `status`<br>2. `done`<br>3. `fwd` (`EventForwardingIntent { tx_id, next_phase }`, additive) |
-| `fail_transaction` | **Live** |
+| [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
+| [`EventTransactionExpired`](#eventtransactionexpired) | `expire` | `EventEmitter::transaction_expired` | `expire_transaction` | **Live** |
 | [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
 | [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
 | [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
@@ -111,7 +111,7 @@ Field tables list fields in **declaration / XDR order**. Do not reorder.
 |--|--|
 | **Topics** | `synapse`, `status` |
 | **Struct** | `EventStatusChanged` |
-| **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction` |
+| **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` |
 | **When** | Every successful status-machine transition |
 | **Status** | Live |
 
@@ -121,6 +121,7 @@ Field tables list fields in **declaration / XDR order**. Do not reorder.
 | `old_status` | `TransactionStatus` | Status before transition |
 | `new_status` | `TransactionStatus` | Status after transition |
 | `ledger` | `u32` | Ledger sequence at emit |
+| `reason` | `Option<String>` | **Additive (v0.1.0).** Optional human-readable reason for the transition. `None` for all pre-existing emitters; populated only by future emitters that need it. |
 
 `TransactionStatus` variants (discriminant order as in `types.rs`):
 `Pending`, `Processing`, `Completed`, `Failed`.
@@ -143,6 +144,7 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `tx_id` | `String` | Transaction id |
 | `stellar_tx_hash` | `String` | Confirmed Stellar tx hash |
 | `ledger` | `u32` | Ledger sequence at emit |
+| `settlement_asset` | `Option<String>` | **Additive (v0.1.0).** Optional SEP-11 asset code for the settled leg. `None` for all pre-existing emitters; populated only by future emitters that need it. |
 
 ### EventTransactionFailed
 
@@ -159,6 +161,27 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `tx_id` | `String` | Transaction id |
 | `reason` | `String` | Short failure code |
 | `ledger` | `u32` | Ledger sequence at emit |
+
+### EventTransactionExpired
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `expire` |
+| **Struct** | `EventTransactionExpired` |
+| **Emitted by** | `expire_transaction` |
+| **When** | A stale `Pending` transaction is auto-expired. Emitted exactly once per successful `expire_transaction` call; never on a rejected/failed attempt. |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction id |
+| `expired_at` | `u32` | Ledger sequence at which the transaction was expired |
+
+**Emission order:** `expire_transaction` emits
+[`EventStatusChanged`](#eventstatuschanged) (`Pending` → `Failed`) first, then
+`EventTransactionExpired`. Subscribers that only care about the expiry signal
+SHOULD filter on the `expire` topic; those tracking the full state machine
+SHOULD consume both, in this order.
 
 ### EventAdminTransferProposed
 
@@ -183,13 +206,13 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | **Topics** | `synapse`, `admin` |
 | **Struct** | `EventAdminTransferred` |
 | **Emitted by** | `accept_admin` |
-| **When** | Nominee accepts a pending admin transfer, completing it |
+| **When** | Nominee accepts a pending admin transfer, completing the handover |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `old_admin` | `Address` | Previous admin |
-| `new_admin` | `Address` | New admin |
+| `old_admin` | `Address` | Admin before the transfer |
+| `new_admin` | `Address` | Admin after the transfer |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventRelaySignerRotated
@@ -199,7 +222,7 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | **Topics** | `synapse`, `relay` |
 | **Struct** | `EventRelaySignerRotated` |
 | **Emitted by** | `set_relay_signer` |
-| **When** | Trusted relay signer successfully rotated |
+| **When** | Admin rotates the trusted relay signer |
 | **Status** | Live |
 
 | Field | Type | Meaning |
@@ -355,13 +378,58 @@ Verified by snapshot-style test
 | `roles` | `UnpauseRoles` | Winning pair: `AdminGuardian` / `AdminRelay` / `GuardianRelay` |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventRelaySignerRotated
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `relay` |
+| **Struct** | `EventRelaySignerRotated` |
+| **Emitted by** | `set_relay_signer` |
+| **When** | Admin rotates the trusted relay signer |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `old_signer` | `Address` | Previous relay signer |
+| `new_signer` | `Address` | New relay signer |
+| `ledger` | `u32` | Ledger sequence at emit |
+
 ---
 
-## 4. Guaranteed emission order
+## 4. Additive trailing-field pattern (required convention)
 
-When a single entry-point publishes **more than one** event, order is stable and
-part of the API. Subscribers MAY rely on relative order within the same
-invocation / transaction.
+Soroban encodes `#[contracttype]` structs as XDR maps keyed by field name, so
+adding a field is wire-compatible **only** when the addition is done in a way
+that old decoders can still tolerate. To make the semver policy in
+[§ Semver policy](#semver-policy) concrete and reusable, all future additive
+event changes MUST follow this pattern:
+
+1. **Append, never insert or reorder.** New fields are added at the **end** of
+---
+
+## 4. Additive trailing-field pattern (required convention)
+
+Soroban encodes `#[contracttype]` structs as XDR maps keyed by field name, so
+adding a field is wire-compatible **only** when the addition is done in a way
+that old decoders can still tolerate. To make the semver policy in
+[§ Semver policy](#semver-policy) concrete and reusable, all future additive
+event changes MUST follow this pattern:
+
+1. **Append, never insert or reorder.** New fields are added at the **end** of
+the struct, after every existing field (including `ledger`). Existing field
+names, types, and order are frozen.
+2. **Wrap the new field in `Option<T>`.** Every additive field MUST be typed
+   `Option<T>` so that emitters that do not populate it can pass `None` and old
+   subscribers that ignore it can decode the payload without the key.
+3. **Emit `None` from all pre-existing call sites.** When the field is added,
+   every existing emitter is updated to pass `None`; only new emitters that
+   actually have the value populate `Some(..)`. This keeps the change a
+   **minor** (or patch) bump, never a major one.
+4. **Document the field inline.** Each additive field carries an
+   `**Additive (vX.Y.Z).**` note in its catalogue table row describing its
+   meaning and the version it was introduced in.
+5. **Never remove or retype a field.** Removal, rename, or type change of an
+   existing field is a **major** bump and requires a new event name/topic.
 
 | Entry-point | Order (first → last) |
 |-------------|----------------------|
@@ -383,18 +451,40 @@ invocation / transaction.
 | `unpause_auto` (quorum met) | 1. `aunpause` |
 | `unpause_auto` (vote only) | *(no events)* |
 
-**Rationale for `complete_transaction`:** Phase 2 indexers that listen only to
-`done` still see completion; those that key off `status` with
-`new_status == Completed` see the transition first, then the hash-bearing
-`done` payload. Reordering would break dual-subscriber setups.
+### Worked examples
+
+Two high-traffic events already demonstrate the pattern:
+
+- [`EventStatusChanged`](#eventstatuschanged) — trailing `reason: Option<String>`
+  appended after `ledger`; all four existing emitters pass `None`.
+- [`EventTransactionCompleted`](#eventtransactioncompleted) — trailing
+  `settlement_asset: Option<String>` appended after `ledger`; the existing
+  emitter passes `None`.
+
+### Subscriber compatibility
+
+A subscriber decoding with the **old** (pre-additive-field) schema against a
+**new** payload MUST NOT break. Because the new field is a trailing `Option<T>`,
+old decoders that ignore unknown trailing keys continue to work, and new
+decoders reading an old payload see the field as `None`. This is verified by the
+compatibility test in `src/events.rs`
+(`test_additive_field_old_decoder_compatibility`), which decodes a new-shape
+payload using old-shape decoding logic and asserts graceful handling.
 
 ---
 
 ## 5. Semver policy
 
-The string returned by `version()` is the contract package semver
-(`Cargo.toml` → `package.version`). **Event-schema compatibility follows that
-version**, independently of unrelated code churn.
+| Change | Bump |
+|--------|------|
+| Add a new event (new topic) | minor |
+| Add an **additive trailing `Option<T>` field** per [§ 4](#4-additive-trailing-field-pattern-required-convention) | minor or patch |
+| Fix a typo in a doc-comment / meaning column | patch |
+| Rename a topic, struct, or field | **major** |
+| Remove a field | **major** |
+| Reorder fields | **major** |
+| Change a field’s type | **major** |
+| Change multi-event emission order | **major** |
 
 | Change | Version bump | Advance notice |
 |--------|--------------|----------------|
@@ -412,6 +502,9 @@ version**, independently of unrelated code churn.
 is the only additive pattern allowed without a major bump; inserting a field in
 the middle is a **Major** (reorder). Prefer a **new event** over mid-struct
 inserts when in doubt.
+
+When in doubt, treat the change as **major** and open a discussion in
+[`DECISIONS.md`](./DECISIONS.md) before merging.
 
 ### Advance notice
 
