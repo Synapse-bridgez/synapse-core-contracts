@@ -266,3 +266,6 @@ wired.
 - #102: [High] Add a cold-storage export entry point for pre-eviction off-chain archival
 <!-- handsoff-issue-109 -->
 - #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
+
+<!-- handsoff-issue-160 -->
+- #160: [High] Add rate-limited guards on unbounded-pagination read-only queries
