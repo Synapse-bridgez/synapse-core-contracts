@@ -26,7 +26,7 @@
 //! | Metric | Approx. impact |
 //! |--------|----------------|
 //! | Algorithm | 56× base32 nibble + CRC16 over 33 bytes |
-//! | Estimated CPU instructions | low thousands (≪ one storage write) |
+//! | Metered CPU instructions (release WASM) | ~30k per check (≪ one storage write); see COST_MODEL.md §12.5 |
 //! | Release WASM size delta | on the order of 1–2 KiB |
 //! | Fee impact | negligible vs ~0.01 XLM `register_callback` write cost |
 //!
@@ -102,26 +102,54 @@ fn base32_decode_strkey(
     Ok(out)
 }
 
+/// CRC16-XModem of each 4-bit value, built at compile time from
+/// [`CRC16_XMODEM_POLY`]. 32 bytes of data section.
+const CRC16_NIBBLE_TABLE: [u16; 16] = {
+    let mut table = [0u16; 16];
+    let mut n = 0;
+    while n < 16 {
+        let mut crc = (n as u16) << 12;
+        let mut bit = 0;
+        while bit < 4 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ CRC16_XMODEM_POLY
+            } else {
+                crc << 1
+            };
+            bit += 1;
+        }
+        table[n] = crc;
+        n += 1;
+    }
+    table
+};
+
 /// CRC16-XModem (init 0, no final XOR) used by Stellar strkeys.
+///
+/// Processes a nibble per step via [`CRC16_NIBBLE_TABLE`] — two lookups per
+/// byte instead of eight shift/branch rounds — which is the bulk of the
+/// strkey rejection cost (#120). Equivalence with the bitwise definition is
+/// tested exhaustively for single bytes and on random buffers below.
 fn crc16_xmodem(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for &byte in data {
-        crc ^= (byte as u16) << 8;
-        for _ in 0..8 {
-            if crc & 0x8000 != 0 {
-                crc = (crc << 1) ^ CRC16_XMODEM_POLY;
-            } else {
-                crc <<= 1;
-            }
-        }
+        crc = (crc << 4) ^ CRC16_NIBBLE_TABLE[(((crc >> 12) as u8) ^ (byte >> 4)) as usize];
+        crc = (crc << 4) ^ CRC16_NIBBLE_TABLE[(((crc >> 12) as u8) ^ (byte & 0x0f)) as usize];
     }
     crc
 }
 
 /// Verify a Stellar ed25519 public-key strkey (G-address) per SEP-23.
 ///
-/// Steps: length → base32 decode → version byte → CRC16-XModem (little-endian).
+/// Steps: `G` prefix → base32 decode → version byte → CRC16-XModem
+/// (little-endian). The prefix check is a one-byte pre-filter for the version
+/// byte check: `6 << 3` base32-encodes to a leading `'G'` and no other first
+/// character can decode to it, so it rejects exactly the inputs the version
+/// check would, without paying for the 56-character decode first.
 fn verify_ed25519_public_key_strkey(encoded: &[u8; STRKEY_ENCODED_LEN as usize]) -> Result<(), ()> {
+    if encoded[0] != b'G' {
+        return Err(());
+    }
     let decoded = base32_decode_strkey(encoded)?;
     if decoded[0] != VERSION_ED25519_PUBLIC_KEY {
         return Err(());
@@ -142,16 +170,29 @@ pub struct Validator;
 impl Validator {
     /// Validate an incoming [`CallbackPayload`] before writing to ledger.
     ///
-    /// Runs every sub-check and returns the first error encountered.
+    /// Runs every sub-check and returns the first error encountered. Checks
+    /// are ordered cheapest-first (#120) so malformed input is turned away
+    /// before the two strkey CRC16 verifications, which dominate the cost:
+    ///
+    /// 1. `amount` — a guest-side integer compare, no host call.
+    /// 2. `idempotency_key`, `transaction_id`, `anchor_transaction_id`,
+    ///    `callback_status` — one host `len()` each.
+    /// 3. `asset_code` — `len()` + ≤12-byte copy + ASCII scan.
+    /// 4. `stellar_account`, `asset_issuer` — 56-byte copy, base32 decode,
+    ///    CRC16 over 33 bytes each.
+    ///
+    /// Every check is independent, so the order never changes *whether* a
+    /// payload is accepted; with several invalid fields it only changes which
+    /// error is reported first.
     pub fn validate_payload(env: &Env, payload: &CallbackPayload) -> Result<(), ContractError> {
-        Self::validate_stellar_account(env, &payload.stellar_account)?;
         Self::validate_amount(payload.amount)?;
-        Self::validate_asset_code(env, &payload.asset_code)?;
-        Self::validate_asset_issuer(env, &payload.asset_issuer)?;
         Self::validate_idempotency_key(env, &payload.idempotency_key)?;
         Self::validate_transaction_id(&payload.transaction_id)?;
         Self::validate_anchor_transaction_id(&payload.anchor_transaction_id)?;
         Self::validate_callback_status(&payload.callback_status)?;
+        Self::validate_asset_code(env, &payload.asset_code)?;
+        Self::validate_stellar_account(env, &payload.stellar_account)?;
+        Self::validate_asset_issuer(env, &payload.asset_issuer)?;
         Ok(())
     }
 
@@ -331,6 +372,141 @@ mod tests {
         assert_eq!(
             Validator::validate_asset_issuer(&env, &issuer),
             Err(ContractError::InvalidAssetIssuer)
+        );
+    }
+
+    /// Bitwise reference CRC16-XModem (the textbook definition).
+    fn crc16_xmodem_bitwise(data: &[u8]) -> u16 {
+        let mut crc: u16 = 0;
+        for &byte in data {
+            crc ^= (byte as u16) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 != 0 {
+                    (crc << 1) ^ CRC16_XMODEM_POLY
+                } else {
+                    crc << 1
+                };
+            }
+        }
+        crc
+    }
+
+    #[test]
+    fn crc16_table_matches_bitwise_reference() {
+        // Standard check value for CRC-16/XMODEM.
+        assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
+        assert_eq!(crc16_xmodem(&[]), 0);
+        for b in 0..=255u8 {
+            assert_eq!(
+                crc16_xmodem(&[b]),
+                crc16_xmodem_bitwise(&[b]),
+                "byte {b:#04x}"
+            );
+        }
+        // Deterministic LCG buffers at every length up to a decoded strkey payload.
+        let mut state: u32 = 0x1234_5678;
+        let mut buf = [0u8; STRKEY_DECODED_LEN];
+        for len in 0..=STRKEY_DECODED_LEN {
+            for _ in 0..64 {
+                for byte in buf.iter_mut().take(len) {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    *byte = (state >> 24) as u8;
+                }
+                assert_eq!(crc16_xmodem(&buf[..len]), crc16_xmodem_bitwise(&buf[..len]));
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_prefilter_rejects_exactly_what_version_check_would() {
+        // For every non-'G' first character, the full decode path must also
+        // reject — the prefilter may never turn an accept into a reject.
+        let mut buf = [0u8; 56];
+        buf.copy_from_slice(FIXTURE_VALID.as_bytes());
+        for c in b"ABCDEFHIJKLMNOPQRSTUVWXYZ234567" {
+            buf[0] = *c;
+            let decoded = base32_decode_strkey(&buf).unwrap();
+            assert_ne!(
+                decoded[0], VERSION_ED25519_PUBLIC_KEY,
+                "first char {}",
+                *c as char
+            );
+            assert!(verify_ed25519_public_key_strkey(&buf).is_err());
+        }
+    }
+
+    /// A payload where bit `i` of `invalid_mask` makes field `i` invalid.
+    /// Returns the payload and the error each invalid field maps to.
+    fn payload_with_invalid(env: &Env, invalid_mask: u8) -> (CallbackPayload, [ContractError; 8]) {
+        let pick = |bit: u8, bad: &str, good: &str| {
+            String::from_str(
+                env,
+                if invalid_mask & (1 << bit) != 0 {
+                    bad
+                } else {
+                    good
+                },
+            )
+        };
+        let payload = CallbackPayload {
+            amount: if invalid_mask & 1 != 0 { 0 } else { 1 },
+            idempotency_key: pick(1, "", "idem-1"),
+            transaction_id: pick(2, &"t".repeat(65), "tx-1"),
+            anchor_transaction_id: pick(3, &"a".repeat(65), "anchor-1"),
+            callback_status: pick(4, &"s".repeat(33), "pending_external"),
+            asset_code: pick(5, "usdc", "USDC"),
+            stellar_account: pick(6, FIXTURE_CHECKSUM_INVALID, FIXTURE_VALID),
+            asset_issuer: pick(7, FIXTURE_CHECKSUM_INVALID, FIXTURE_VALID),
+            callback_type: crate::types::CallbackType::Deposit,
+        };
+        let errors = [
+            ContractError::InvalidAmount,
+            ContractError::MissingIdempotencyKey,
+            ContractError::StringTooLong,
+            ContractError::StringTooLong,
+            ContractError::StringTooLong,
+            ContractError::InvalidAssetCode,
+            ContractError::InvalidStellarAccount,
+            ContractError::InvalidAssetIssuer,
+        ];
+        (payload, errors)
+    }
+
+    /// #120: check order is a pure cost optimisation. For every combination
+    /// of invalid fields, the payload is rejected iff at least one field is
+    /// invalid, and the reported error always belongs to an invalid field.
+    #[test]
+    fn validate_payload_accept_reject_is_order_independent() {
+        let env = Env::default();
+        for mask in 0..=u8::MAX {
+            let (payload, errors) = payload_with_invalid(&env, mask);
+            match Validator::validate_payload(&env, &payload) {
+                Ok(()) => assert_eq!(mask, 0, "mask {mask:#010b} accepted"),
+                Err(e) => {
+                    assert_ne!(mask, 0, "valid payload rejected with {e:?}");
+                    assert!(
+                        (0..8).any(|i| mask & (1 << i) != 0 && errors[i] == e),
+                        "mask {mask:#010b}: {e:?} does not match any invalid field"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #120: documents the cheapest-first precedence when several fields are
+    /// invalid — the cheap guard reports before any strkey CRC16 runs.
+    #[test]
+    fn validate_payload_reports_cheapest_failure_first() {
+        let env = Env::default();
+        let (payload, _) = payload_with_invalid(&env, 0b1100_0001);
+        assert_eq!(
+            Validator::validate_payload(&env, &payload),
+            Err(ContractError::InvalidAmount)
+        );
+        let (payload, _) = payload_with_invalid(&env, 0b1110_0000);
+        assert_eq!(
+            Validator::validate_payload(&env, &payload),
+            Err(ContractError::InvalidAssetCode)
         );
     }
 

@@ -186,8 +186,11 @@ attack vector.
 
 `stellar_account` / `asset_issuer` are validated with a hand-rolled SEP-23
 base32 decode + CRC16-XModem check (see [`DECISIONS.md`](./DECISIONS.md)
-§ Strkey CRC16).  Per-call CPU is low thousands of instructions — negligible
-beside the ~0.01 XLM storage write for `register_callback`.  Release WASM grew
+§ Strkey CRC16).  Metered on the release WASM (§12) each strkey check costs
+~30k instructions after #120's nibble-table CRC (~55k with the original
+bitwise loop) — still negligible beside the ~0.01 XLM storage write for
+`register_callback`, but the largest guest-side cost in validation, which is
+why `validate_payload` runs it last (§12.5).  Release WASM grew
 by **418 bytes** (19 820 → 20 238) under `opt-level = "z"`; fee impact is
 dominated by ledger writes, not validation.
 
@@ -462,3 +465,26 @@ Resource-usage gate failed (#119): 1 finding(s) against resource_baseline.toml
 
   REGRESSION  register_callback: cpu_insns 442300 vs baseline 353840 (+25.0%; threshold +15%)
 ```
+
+### 12.5 Validation short-circuit (#120)
+
+`Validator::validate_payload` now runs checks cheapest-first — `amount`, then
+the four host-`len()` checks, then `asset_code`, and the two strkey
+verifications last — and strkey verification rejects a non-`G` prefix before
+the base32 decode. CRC16 uses a 16-entry nibble table (+49 B WASM) instead of
+eight shift/branch rounds per byte. Accept/reject outcomes are unchanged for
+every combination of invalid fields (exhaustively tested); only the error
+reported first changes when several fields are invalid.
+
+Net `cpu_insns` per call, release WASM (`resource_baseline.toml`):
+
+| Scenario | Before | After | Δ |
+|----------|-------:|------:|--:|
+| reject: `amount = 0` | 110 115 | 56 662 | −48.5% |
+| reject: empty `idempotency_key` | 166 174 | 57 094 | −65.6% |
+| reject: `callback_status` too long | 168 406 | 59 326 | −64.7% |
+| reject: lowercase `asset_code` | 111 889 | 61 100 | −45.3% |
+| reject: `stellar_account` CRC mismatch | 110 115 | 90 397 | −17.9% |
+| reject: `asset_issuer` CRC mismatch (worst case) | 165 742 | 119 294 | −28.0% |
+| `register_callback` (accepted) | 353 840 | 304 728 | −13.8% |
+| `register_callback` (idempotent replay) | 190 807 | 141 695 | −25.7% |
