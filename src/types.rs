@@ -217,31 +217,60 @@ pub struct ParamEntry {
 
 /// In-flight timelocked upgrade proposal.
 ///
-/// Written by `propose_upgrade()` and cleared by `finalize_upgrade()` /
-/// `cancel_upgrade()`. Surfaced read-only via
-/// [`crate::SynapseCoreContract::get_pending_upgrade`] so guardians,
-/// monitoring, and dashboards can observe the review window without parsing
-/// event history. Stored in persistent ledger storage keyed by
-/// [`StorageKey::PendingUpgrade`].
+/// Stored in persistent ledger storage keyed by [`StorageKey::PendingUpgrade`].
+/// Absent when no upgrade is pending. See `SynapseCoreContract::propose_upgrade`
+/// and `SynapseCoreContract::execute_upgrade`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingUpgrade {
-    /// Hash of the candidate WASM blob uploaded via `upload_contract_wasm`.
+    /// Hash of the new WASM blob to install once the timelock elapses.
     pub wasm_hash: soroban_sdk::BytesN<32>,
-    /// Schema version the candidate WASM is expected to implement.
-    pub target_schema_version: u32,
-    /// Ledger sequence at which the proposal becomes finalizable.
-    pub eta_ledger: u32,
-    /// Admin address that proposed the upgrade.
-    pub proposed_by: soroban_sdk::Address,
+    /// Ledger sequence at which the proposal was created.
+    pub proposed_at_ledger: u32,
+    /// Ledger sequence at which the proposal becomes executable.
+    pub executable_at_ledger: u32,
 }
 
-// ─── Wave 2: Collateral Bonding (#143) ────────────────────────────────────────
+// ─── Storage tier report (#168) ───────────────────────────────────────────────
 
-/// Collateral bond record for a relay signer.
+/// Per-tier storage breakdown row, mirroring a single row of the storage-tier
+/// table in `COST_MODEL.md`.
 ///
-/// Stored in persistent ledger storage keyed by [`StorageKey::BondRecord`].
+/// Units match the document exactly: `entries` is a raw count of ledger
+/// entries, `bytes` is the serialized byte footprint of those entries, and
+/// `rent_stroops` is the projected rent in stroops for the tier's entries.
 #[contracttype]
-#[derive(Clone, Debug)]
-pub struct BondRecord {
-    /// The signer whose collateral is bonde
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageTierRow {
+    /// Tier name, matching the `COST_MODEL.md` tier labels
+    /// (e.g. "instance", "persistent", "temporary").
+    pub tier: String,
+    /// Number of live ledger entries in this tier.
+    pub entries: u32,
+    /// Serialized byte footprint of this tier's entries.
+    pub bytes: u32,
+    /// Projected rent for this tier's entries, in stroops.
+    pub rent_stroops: i128,
+}
+
+/// `COST_MODEL.md`-aligned storage cost-model report returned by
+/// `SynapseCoreContract::get_storage_tier_report()`.
+///
+/// Structured to mirror the document's existing cost-projection tables
+/// directly — same units, same breakdown categories — so operators can compare
+/// live on-chain reality against the document's stated projections without any
+/// off-chain translation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CostModelReport {
+    /// Ledger sequence at which the report was generated.
+    pub generated_at_ledger: u32,
+    /// Per-tier breakdown rows, one per storage tier, in `COST_MODEL.md` order.
+    pub tiers: soroban_sdk::Vec<StorageTierRow>,
+    /// Total live ledger entries across all tiers.
+    pub total_entries: u32,
+    /// Total serialized byte footprint across all tiers.
+    pub total_bytes: u32,
+    /// Total projected rent across all tiers, in stroops.
+    pub total_rent_stroops: i128,
+}
