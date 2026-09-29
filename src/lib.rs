@@ -35,15 +35,17 @@ mod validation;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
+mod test_recovery;
+#[cfg(test)]
 mod tests;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    CallbackPayload, ContractError, RoleScope, Transaction, TransactionStatus, SCHEMA_VERSION,
+    CallbackPayload, ContractError, PendingRelaySigner, RelaySignerSet, RoleScope, Transaction, TransactionStatus, MAX_BATCH_SIZE, MAX_PAGE_LIMIT, MAX_RETRIES, DEFAULT_RELAY_SIGNER_DELAY_LEDGERS, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -113,8 +115,15 @@ impl SynapseCoreContract {
         }
 
         // Only the trusted relay signer may forward Anchor Platform callbacks.
-        let relay = StorageClient::get_relay_signer(&env)?;
-        relay.require_auth();
+        AdminClient::require_relay_quorum(&env, None)?;
+
+        // Anchor allowlist: an empty allowlist means "all anchors" (backward
+        // compatible default, weaker; tighten post-deployment). The anchor
+        // identity is the payload's `asset_issuer`.
+        let allowed = StorageClient::get_relay_anchors(&env, &relay);
+        if !allowed.is_empty() && !allowed.contains(&payload.asset_issuer) {
+            return Err(ContractError::AnchorNotAllowed);
+        }
 
         // Quarantine: a signer with a stale heartbeat cannot take new intake.
         // Existing Pending/Processing work stays processable.
@@ -136,6 +145,13 @@ impl SynapseCoreContract {
             return Err(ContractError::DuplicateRequest);
         }
 
+        // Backpressure: bound this signer's outstanding Pending backlog.
+        if let Some(cap) = StorageClient::get_max_pending_per_signer(&env) {
+            if StorageClient::get_pending_count(&env, &relay) >= cap {
+                return Err(ContractError::OutstandingCapExceeded);
+            }
+        }
+
         let ledger = env.ledger().sequence();
         let tx = Transaction {
             id: payload.transaction_id.clone(),
@@ -151,13 +167,89 @@ impl SynapseCoreContract {
             callback_status: payload.callback_status.clone(),
             stellar_tx_hash: String::from_str(&env, ""),
             failure_reason: String::from_str(&env, ""),
+            registered_at: env.ledger().timestamp(),
+            settled_amount: None,
+            assigned_signer: None,
+            tags: Vec::new(&env),
+            retry_count: 0,
         };
 
         StorageClient::save_transaction(&env, &tx);
         StorageClient::set_idempotency_key(&env, &payload.idempotency_key);
+        StorageClient::append_history(&env, &tx.id, TransactionStatus::Pending, &relay);
+        StorageClient::inc_pending(&env, &relay, &tx.id);
         EventEmitter::transaction_registered(&env, &tx);
 
         Ok(tx.id)
+    }
+
+    /// Register up to [`MAX_BATCH_SIZE`] callbacks atomically.
+    ///
+    /// Relay signer only. Every payload is validated, and checked against
+    /// on-chain and in-batch duplicate `transaction_id`s, *before* any storage
+    /// write; any failure aborts the whole call with no partial writes.
+    /// An empty or oversized batch is rejected with
+    /// [`ContractError::InvalidBatchSize`].
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionRegistered`] per payload followed by one
+    /// [`events::EventBatchProcessed`].
+    pub fn batch_register_callback(
+        env: Env,
+        payloads: Vec<CallbackPayload>,
+        caller: Address,
+    ) -> Result<u32, ContractError> {
+        if StorageClient::is_paused(&env) {
+            return Err(ContractError::ContractPaused);
+        }
+        AdminClient::require_relay_signer(&env, &caller)?;
+        caller.require_auth();
+
+        let n = payloads.len();
+        if n == 0 || n > MAX_BATCH_SIZE {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        // Pass 1: validate everything; no writes.
+        for i in 0..n {
+            let p = payloads.get_unchecked(i);
+            Validator::validate_payload(&env, &p)?;
+            if StorageClient::transaction_exists(&env, &p.transaction_id) {
+                return Err(ContractError::DuplicateRequest);
+            }
+            for j in 0..i {
+                if payloads.get_unchecked(j).transaction_id == p.transaction_id {
+                    return Err(ContractError::DuplicateRequest);
+                }
+            }
+        }
+
+        // Pass 2: write.
+        let ledger = env.ledger().sequence();
+        for p in payloads.iter() {
+            let tx = Transaction {
+                id: p.transaction_id.clone(),
+                stellar_account: p.stellar_account.clone(),
+                amount: p.amount,
+                asset_code: p.asset_code.clone(),
+                asset_issuer: p.asset_issuer.clone(),
+                status: TransactionStatus::Pending,
+                created_at_ledger: ledger,
+                updated_at_ledger: ledger,
+                anchor_transaction_id: p.anchor_transaction_id.clone(),
+                callback_type: p.callback_type.clone(),
+                callback_status: p.callback_status.clone(),
+                stellar_tx_hash: String::from_str(&env, ""),
+                failure_reason: String::from_str(&env, ""),
+                retry_count: 0,
+            };
+            StorageClient::save_transaction(&env, &tx);
+            StorageClient::set_idempotency_key(&env, &p.idempotency_key);
+            EventEmitter::transaction_registered(&env, &tx);
+        }
+        EventEmitter::batch_processed(&env, n, &caller);
+
+        Ok(n)
     }
 
     // ── Status transitions ────────────────────────────────────────────────────
@@ -178,6 +270,8 @@ impl SynapseCoreContract {
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
+        StorageClient::append_history(&env, &tx_id, TransactionStatus::Processing, &caller);
+        StorageClient::dec_pending(&env, &tx_id);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Processing);
 
         Ok(())
@@ -197,6 +291,7 @@ impl SynapseCoreContract {
         Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
 
         let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        AdminClient::assert_can_drive_tx(&env, &caller, &tx.assigned_signer)?;
         if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -206,9 +301,139 @@ impl SynapseCoreContract {
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
+        StorageClient::append_history(&env, &tx_id, TransactionStatus::Completed, &caller);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
         EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
+        // Additive phase-router hook: only when a route is configured.
+        if let Some(next_phase) = StorageClient::get_forward_route(&env, &tx_id) {
+            if next_phase != 0 {
+                EventEmitter::forwarding_intent(&env, &tx_id, next_phase);
+            }
+        }
 
+        Ok(())
+    }
+
+    /// Mark a `Processing` transaction as `Completed` with a settled amount
+    /// strictly between zero and the originally registered amount.
+    ///
+    /// Purely a recording mechanism: the shortfall is not refunded or fee'd
+    /// here. `complete_transaction` remains the full-amount path.
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] then
+    /// [`events::EventTransactionPartiallyCompleted`].
+    pub fn partial_complete_transaction(
+        env: Env,
+        tx_id: String,
+        settled_amount: i128,
+        stellar_tx_hash: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        AdminClient::assert_can_drive_tx(&env, &caller, &tx.assigned_signer)?;
+        if tx.status != TransactionStatus::Processing {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        Validator::validate_settled_amount(settled_amount, tx.amount)?;
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Completed;
+        tx.stellar_tx_hash = stellar_tx_hash.clone();
+        tx.settled_amount = Some(settled_amount);
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
+        EventEmitter::transaction_partially_completed(
+            &env,
+            &tx_id,
+            tx.amount,
+            settled_amount,
+            &stellar_tx_hash,
+        );
+        Ok(())
+    }
+
+    /// Approve a standby relay signer that in-flight transactions may be
+    /// reassigned to. Admin-gated.
+    ///
+    /// TODO: superseded by the N-of-M relay-signer set once that lands.
+    pub fn set_standby_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_standby_signer(&env, &signer);
+        EventEmitter::standby_signer_set(&env, &signer);
+        Ok(())
+    }
+
+    /// Rebind one in-flight (`Pending`/`Processing`) transaction's
+    /// authorization to `new_signer`. Admin-gated recovery path for a revoked
+    /// or compromised signer; does not touch global relay-signer state.
+    ///
+    /// `new_signer` must be the current relay signer or the admin-approved
+    /// standby (TODO: gate on the signer set once it exists).
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStatusTransition`] if the transaction is terminal.
+    /// - [`ContractError::SignerNotTrusted`] if `new_signer` is not trusted.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionReassigned`].
+    pub fn reassign_relay_signer_for_transaction(
+        env: Env,
+        tx_id: String,
+        new_signer: Address,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        let admin = StorageClient::get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::Unauthorised);
+        }
+        caller.require_auth();
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        let relay = StorageClient::get_relay_signer(&env)?;
+        let standby = StorageClient::get_standby_signer(&env);
+        if new_signer != relay && standby.as_ref() != Some(&new_signer) {
+            return Err(ContractError::SignerNotTrusted);
+        }
+        let old_signer = tx.assigned_signer.clone().unwrap_or(relay);
+        tx.assigned_signer = Some(new_signer.clone());
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::transaction_reassigned(&env, &tx_id, &old_signer, &new_signer);
+        Ok(())
+    }
+
+    /// Append an operational tag to a transaction. Admin or relay signer.
+    ///
+    /// Append-only; count and per-tag length are capped in `validation.rs`.
+    ///
+    /// # Errors
+    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
+    /// - [`ContractError::TooManyTags`] once the per-transaction cap is hit.
+    /// - [`ContractError::StringTooLong`] / [`ContractError::EmptyTag`] for a bad tag.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionTagged`].
+    pub fn add_transaction_tag(
+        env: Env,
+        tx_id: String,
+        tag: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        Validator::validate_tag(&tag, tx.tags.len())?;
+        tx.tags.push_back(tag.clone());
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::transaction_tagged(&env, &tx_id, &tag, tx.tags.len());
         Ok(())
     }
 
@@ -235,10 +460,271 @@ impl SynapseCoreContract {
         tx.updated_at_ledger = env.ledger().sequence();
 
         StorageClient::save_transaction(&env, &tx);
+        StorageClient::append_history(&env, &tx_id, TransactionStatus::Failed, &caller);
+        if old_status == TransactionStatus::Pending {
+            StorageClient::dec_pending(&env, &tx_id);
+        }
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
         EventEmitter::transaction_failed(&env, &tx_id, &reason);
 
         Ok(())
+    }
+
+    /// **Break-glass admin recovery** (not a routine operation): link
+    /// `duplicate_tx_id` to its canonical original after a replay slipped
+    /// through as a separate `transaction_id`.
+    ///
+    /// The duplicate is never deleted: its data stays queryable, it gets a
+    /// `MergedInto(canonical_tx_id)` marker (see [`Self::get_merged_into`]),
+    /// and its record is moved to `Failed` with `failure_reason = "merged"`
+    /// so `get_transaction` cannot pass for an active record. `reason` is
+    /// the evidence-backed justification and is carried in the event.
+    ///
+    /// # Errors
+    /// - [`ContractError::MergeSelf`] if both ids are equal.
+    /// - [`ContractError::AlreadyMerged`] if either side is already merged.
+    /// - [`ContractError::DuplicateSettled`] if the duplicate is `Completed`.
+    /// - [`ContractError::TransactionNotFound`] if either record is missing.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionsMerged`].
+    pub fn merge_duplicate_transactions(
+        env: Env,
+        canonical_tx_id: String,
+        duplicate_tx_id: String,
+        caller: Address,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::Unauthorised);
+        }
+        if canonical_tx_id == duplicate_tx_id {
+            return Err(ContractError::MergeSelf);
+        }
+        Validator::validate_failure_reason(&reason)?;
+        StorageClient::get_transaction(&env, &canonical_tx_id)?;
+        let mut dup = StorageClient::get_transaction(&env, &duplicate_tx_id)?;
+        if StorageClient::get_merged_into(&env, &duplicate_tx_id).is_some()
+            || StorageClient::get_merged_into(&env, &canonical_tx_id).is_some()
+        {
+            return Err(ContractError::AlreadyMerged);
+        }
+        if dup.status == TransactionStatus::Completed {
+            return Err(ContractError::DuplicateSettled);
+        }
+        dup.status = TransactionStatus::Failed;
+        dup.failure_reason = String::from_str(&env, "merged");
+        dup.updated_at_ledger = env.ledger().sequence();
+        StorageClient::save_transaction(&env, &dup);
+        StorageClient::set_merged_into(&env, &duplicate_tx_id, &canonical_tx_id);
+        EventEmitter::transactions_merged(&env, &canonical_tx_id, &duplicate_tx_id, &admin, &reason);
+        Ok(())
+    }
+
+    /// Configure the phase-router forwarding route for `tx_id`. Admin-gated.
+    ///
+    /// `next_phase == 0` clears the route (the default: no forwarding).
+    /// When set, `complete_transaction` emits `EventForwardingIntent` after
+    /// the `status`/`done` events. Never performs a cross-contract call.
+    pub fn set_forwarding_route(
+        env: Env,
+        tx_id: String,
+        next_phase: u32,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_forward_route(
+            &env,
+            &tx_id,
+            if next_phase == 0 { None } else { Some(next_phase) },
+        );
+        Ok(())
+    }
+
+    /// Return the configured forwarding `next_phase` for `tx_id`, or `None`.
+    pub fn get_forwarding_route(env: Env, tx_id: String) -> Option<u32> {
+        StorageClient::get_forward_route(&env, &tx_id)
+    }
+
+    // ── Disputes ──────────────────────────────────────────────────────────────
+
+    /// Freeze a `Completed` transaction pending review.
+    ///
+    /// Disputed is an overlay flag; the stored status stays `Completed` so
+    /// nothing is lost. Callable by the relay signer or admin.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStatusTransition`] if not `Completed`.
+    /// - [`ContractError::AlreadyDisputed`] if already disputed.
+    pub fn dispute_transaction(
+        env: Env,
+        tx_id: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        let tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Completed {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        if StorageClient::is_disputed(&env, &tx_id) {
+            return Err(ContractError::AlreadyDisputed);
+        }
+        StorageClient::set_disputed(&env, &tx_id, true);
+        Ok(())
+    }
+
+    /// Resolve a dispute. **Admin only** — unlike every other lifecycle
+    /// action this is deliberately NOT relay-signer-eligible.
+    ///
+    /// If `upheld`, the transaction moves `Completed -> Failed` with reason
+    /// `dispute_upheld`; otherwise the flag is cleared and the transaction
+    /// is exactly as it was (`Completed`).
+    pub fn resolve_dispute(env: Env, tx_id: String, upheld: bool) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if !StorageClient::is_disputed(&env, &tx_id) {
+            return Err(ContractError::NotDisputed);
+        }
+        StorageClient::set_disputed(&env, &tx_id, false);
+        if upheld {
+            let old_status = tx.status.clone();
+            tx.status = TransactionStatus::Failed;
+            tx.failure_reason = String::from_str(&env, "dispute_upheld");
+            tx.updated_at_ledger = env.ledger().sequence();
+            StorageClient::save_transaction(&env, &tx);
+            StorageClient::append_history(&env, &tx_id, TransactionStatus::Failed, &admin);
+            EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
+        }
+        Ok(())
+    }
+
+    /// Whether `tx_id` is currently under dispute.
+    pub fn is_disputed(env: Env, tx_id: String) -> bool {
+        StorageClient::is_disputed(&env, &tx_id)
+    }
+
+    /// Set the maximum age (seconds) a `Pending` transaction may reach before
+    /// anyone can expire it. Admin-gated. `0` is rejected as invalid.
+    pub fn set_expiry_window(env: Env, seconds: u64) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        if seconds == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        StorageClient::set_expiry_window(&env, seconds);
+        EventEmitter::expiry_window_set(&env, seconds);
+        Ok(())
+    }
+
+    /// Return the configured `Pending` expiry window in seconds, if any.
+    pub fn expiry_window(env: Env) -> Option<u64> {
+        StorageClient::get_expiry_window(&env)
+    }
+
+    /// Move a stale `Pending` transaction to terminal `Expired`.
+    ///
+    /// Deliberately **permissionless** (no auth): expiry is a pure function of
+    /// ledger time versus the admin-configured window, so anyone may trigger
+    /// it and no privileged off-chain scheduler is needed. Only `Pending`
+    /// transactions can expire; `Processing` implies active relay engagement.
+    ///
+    /// # Errors
+    /// - [`ContractError::ExpiryNotConfigured`] if no window is set.
+    /// - [`ContractError::InvalidStatusTransition`] if not `Pending`.
+    /// - [`ContractError::ExpiryNotElapsed`] if `now < registered_at + window`.
+    pub fn expire_transaction(env: Env, tx_id: String) -> Result<(), ContractError> {
+        let window =
+            StorageClient::get_expiry_window(&env).ok_or(ContractError::ExpiryNotConfigured)?;
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Pending {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        let deadline = tx.registered_at.saturating_add(window);
+        if env.ledger().timestamp() < deadline {
+            return Err(ContractError::ExpiryNotElapsed);
+        }
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Expired;
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Expired);
+        EventEmitter::transaction_expired(&env, &tx_id, tx.registered_at);
+
+        Ok(())
+    }
+
+    /// Cancel a `Pending` or `Processing` transaction (terminal `Cancelled`).
+    ///
+    /// Callable only by the admin or the relay signer. `Completed` and
+    /// `Failed` records are rejected with [`ContractError::CannotCancel`];
+    /// an already-`Cancelled` record with [`ContractError::AlreadyCancelled`].
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] and
+    /// [`events::EventTransactionCancelled`].
+    pub fn cancel_transaction(
+        env: Env,
+        tx_id: String,
+        reason: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_failure_reason(&reason)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        match tx.status {
+            TransactionStatus::Pending | TransactionStatus::Processing => {}
+            TransactionStatus::Cancelled => return Err(ContractError::AlreadyCancelled),
+            _ => return Err(ContractError::CannotCancel),
+        }
+        let old_status = tx.status.clone();
+        tx.status = TransactionStatus::Cancelled;
+        tx.failure_reason = reason.clone();
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Cancelled);
+        EventEmitter::transaction_cancelled(&env, &tx_id, &reason, &caller);
+
+        Ok(())
+    }
+
+    /// Move a `Failed` transaction back to `Pending` for reprocessing.
+    ///
+    /// Relay or admin only. Each call increments [`Transaction::retry_count`];
+    /// once it reaches [`MAX_RETRIES`] further calls fail with
+    /// [`ContractError::RetryLimitExceeded`]. The counter lives on the
+    /// persistent record, so it survives contract upgrades.
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] and
+    /// [`events::EventTransactionRetried`].
+    pub fn retry_transaction(env: Env, tx_id: String, caller: Address) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Failed {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        if tx.retry_count >= MAX_RETRIES {
+            return Err(ContractError::RetryLimitExceeded);
+        }
+        tx.retry_count += 1;
+        tx.status = TransactionStatus::Pending;
+        tx.failure_reason = String::from_str(&env, "");
+        tx.updated_at_ledger = env.ledger().sequence();
+
+        StorageClient::save_transaction(&env, &tx);
+        EventEmitter::status_changed(
+            &env,
+            &tx_id,
+            TransactionStatus::Failed,
+            TransactionStatus::Pending,
+        );
+        EventEmitter::transaction_retried(&env, &tx_id, tx.retry_count);
+
+        Ok(())
+    }
     }
 
     // ── Read-only queries ─────────────────────────────────────────────────────
@@ -251,9 +737,45 @@ impl SynapseCoreContract {
         StorageClient::get_transaction(&env, &tx_id)
     }
 
+    /// Return a page of transaction IDs currently in `status`, in
+    /// registration-into-status order.
+    ///
+    /// * `cursor` — zero-based offset; pass `0` for the first page, then the
+    ///   previous `cursor + returned.len()`. An empty page means the end.
+    /// * `limit`  — page size, `1..=MAX_PAGE_LIMIT` (else
+    ///   [`ContractError::InvalidPageLimit`]).
+    ///
+    /// Read-only and not gated by the pause flag.
+    pub fn get_transactions_by_status(
+        env: Env,
+        status: TransactionStatus,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<Vec<String>, ContractError> {
+        if limit == 0 || limit > MAX_PAGE_LIMIT {
+            return Err(ContractError::InvalidPageLimit);
+        }
+        Ok(StorageClient::get_ids_by_status(&env, &status, cursor, limit))
+    }
+
     /// Return the current [`TransactionStatus`] without fetching the full record.
     pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
         StorageClient::get_transaction(&env, &tx_id).map(|tx| tx.status)
+    }
+
+    /// Return the canonical tx id `tx_id` was merged into by
+    /// [`Self::merge_duplicate_transactions`], or `None` if not merged.
+    pub fn get_merged_into(env: Env, tx_id: String) -> Option<String> {
+        StorageClient::get_merged_into(&env, &tx_id)
+    }
+
+    /// Return the append-only transition history of `tx_id`, oldest first.
+    ///
+    /// Holds at most [`types::MAX_HISTORY_LEN`] entries (oldest evicted first).
+    /// Transactions registered before this feature have no history.
+    pub fn get_transaction_history(env: Env, tx_id: String) -> Vec<TransitionRecord> {
+        StorageClient::get_history(&env, &tx_id)
+    }
     }
 
     /// Check whether an idempotency key has already been processed.
@@ -311,7 +833,41 @@ impl SynapseCoreContract {
         let current_admin = AdminClient::require_admin(&env)?;
         Validator::validate_admin_nominee(&env, &new_admin)?;
         StorageClient::set_pending_admin(&env, &new_admin);
+        StorageClient::set_pending_admin_expiry(&env, None);
         EventEmitter::admin_transfer_proposed(&env, &current_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Like [`Self::propose_admin`] but the proposal is only acceptable up to
+    /// and including `expiry` (ledger timestamp, seconds).
+    ///
+    /// # Errors
+    /// - [`ContractError::AdminProposalExpired`] if `expiry` is already in the past.
+    pub fn propose_admin_with_expiry(
+        env: Env,
+        new_admin: Address,
+        expiry: u64,
+    ) -> Result<(), ContractError> {
+        if expiry < env.ledger().timestamp() {
+            return Err(ContractError::AdminProposalExpired);
+        }
+        Self::propose_admin(env.clone(), new_admin)?;
+        StorageClient::set_pending_admin_expiry(&env, Some(expiry));
+        Ok(())
+    }
+
+    /// Withdraw a pending admin proposal. Current-admin-only.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingAdminTransfer`] if nothing is pending
+    ///   (e.g. it was already accepted).
+    pub fn cancel_admin_proposal(env: Env, caller: Address) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::Unauthorised);
+        }
+        StorageClient::get_pending_admin(&env).ok_or(ContractError::NoPendingAdminTransfer)?;
+        StorageClient::clear_pending_admin(&env);
         Ok(())
     }
 
@@ -334,11 +890,64 @@ impl SynapseCoreContract {
         }
         caller.require_auth();
 
+        // Expiry is inclusive: accepting at exactly `expiry` still succeeds.
+        if let Some(expiry) = StorageClient::get_pending_admin_expiry(&env) {
+            if env.ledger().timestamp() > expiry {
+                return Err(ContractError::AdminProposalExpired);
+            }
+        }
+
         let old_admin = StorageClient::get_admin(&env)?;
         StorageClient::set_admin(&env, &caller);
         StorageClient::clear_pending_admin(&env);
         EventEmitter::admin_transferred(&env, &old_admin, &caller);
         Ok(())
+    }
+
+    /// Set the maximum outstanding `Pending` transactions any single relay
+    /// signer may hold. Admin-gated. `register_callback` fails with
+    /// [`ContractError::OutstandingCapExceeded`] once a signer is at the cap.
+    /// Lowering the cap never affects already-registered transactions.
+    pub fn set_max_outstanding_pending_per_signer(
+        env: Env,
+        cap: u32,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_max_pending_per_signer(&env, cap);
+        Ok(())
+    }
+
+    /// Return the outstanding `Pending` count for `signer`.
+    pub fn outstanding_pending(env: Env, signer: Address) -> u32 {
+        StorageClient::get_pending_count(&env, &signer)
+    }
+
+    /// Set the max registerable amount for an anchor (identified by the
+    /// payload's `asset_issuer`). Admin-gated. Applies to future
+    /// registrations only; existing transactions are unaffected.
+    pub fn set_anchor_amount_ceiling(
+        env: Env,
+        anchor: String,
+        ceiling: i128,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        Validator::validate_amount(ceiling)?;
+        StorageClient::set_anchor_ceiling(&env, &anchor, ceiling);
+        Ok(())
+    }
+
+    /// Set the default ceiling for anchors with no explicit entry (initially
+    /// [`types::DEFAULT_AMOUNT_CEILING`]). Admin-gated.
+    pub fn set_default_amount_ceiling(env: Env, ceiling: i128) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        Validator::validate_amount(ceiling)?;
+        StorageClient::set_default_ceiling(&env, ceiling);
+        Ok(())
+    }
+
+    /// Return the effective amount ceiling for `anchor`.
+    pub fn get_amount_ceiling(env: Env, anchor: String) -> i128 {
+        StorageClient::get_amount_ceiling(&env, &anchor)
     }
 
     /// Rotate the trusted relay signer address.
@@ -348,6 +957,11 @@ impl SynapseCoreContract {
     /// observe the rotation the same way it does [`Self::accept_admin`].
     pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
         AdminClient::require_admin(&env)?;
+        // Once a timelock delay is explicitly configured, the immediate path
+        // is closed; rotation must go through propose/finalize.
+        if StorageClient::get_relay_signer_delay(&env).unwrap_or(0) > 0 {
+            return Err(ContractError::TimelockRequired);
+        }
         let old_signer = StorageClient::get_relay_signer(&env)?;
         StorageClient::set_relay_signer(&env, &new_signer);
         EventEmitter::relay_signer_rotated(&env, &old_signer, &new_signer);
@@ -421,6 +1035,224 @@ impl SynapseCoreContract {
     /// Return whether `who` has been explicitly granted `scope`.
     pub fn has_scope(env: Env, who: Address, scope: RoleScope) -> bool {
         StorageClient::get_scopes(&env, &who).contains(scope)
+    }
+
+    /// Set the anchor/issuer IDs `signer` may register callbacks for. Admin only.
+    ///
+    /// An empty list means unrestricted (all anchors) - the migration-friendly
+    /// default. Callbacks outside a non-empty list fail with
+    /// [`ContractError::AnchorNotAllowed`].
+    pub fn set_relay_anchors(
+        env: Env,
+        signer: Address,
+        anchors: Vec<String>,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_relay_anchors(&env, &signer, &anchors);
+        Ok(())
+    }
+
+    /// Return the anchor allowlist for `signer` (empty = unrestricted).
+    pub fn relay_anchors(env: Env, signer: Address) -> Vec<String> {
+        StorageClient::get_relay_anchors(&env, &signer)
+    }
+
+    // ── Replay-protected (nonce) variants of privileged calls ────────────────
+
+    /// Return the next expected nonce for `addr` (0 if never used).
+    pub fn get_nonce(env: Env, addr: Address) -> u64 {
+        StorageClient::get_nonce(&env, &addr)
+    }
+
+    /// Nonce-checked [`Self::propose_admin`]. The admin's nonce must equal
+    /// [`Self::get_nonce`]; it is incremented on success. The plain variants
+    /// are retained for backward compatibility (see CHANGELOG).
+    pub fn propose_admin_with_nonce(
+        env: Env,
+        new_admin: Address,
+        nonce: u64,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        AdminClient::consume_nonce(&env, &admin, nonce)?;
+        Self::propose_admin(env, new_admin)
+    }
+
+    /// Nonce-checked [`Self::pause`].
+    pub fn pause_with_nonce(env: Env, nonce: u64) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        AdminClient::consume_nonce(&env, &admin, nonce)?;
+        Self::pause(env)
+    }
+
+    /// Nonce-checked [`Self::unpause`].
+    pub fn unpause_with_nonce(env: Env, nonce: u64) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        AdminClient::consume_nonce(&env, &admin, nonce)?;
+        Self::unpause(env)
+    }
+
+    /// Nonce-checked status transition start (`caller` is admin or relay).
+    pub fn start_processing_with_nonce(
+        env: Env,
+        tx_id: String,
+        caller: Address,
+        nonce: u64,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        AdminClient::consume_nonce(&env, &caller, nonce)?;
+        Self::start_processing(env, tx_id, caller)
+    }
+
+    // ── Timelocked relay-signer rotation ──────────────────────────────────────
+
+    /// Configure the timelock delay (ledgers) for relay-signer rotation.
+    /// Admin-gated. A non-zero value also disables the immediate
+    /// [`Self::set_relay_signer`] path.
+    pub fn set_relay_signer_delay(env: Env, delay_ledgers: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_relay_signer_delay(&env, delay_ledgers);
+        Ok(())
+    }
+
+    /// Start a timelocked rotation of the primary relay signer to `new_signer`.
+    /// Admin-gated. A second proposal while one is pending **replaces** it
+    /// (restarting the delay). With an N-of-M set (#65) only the primary
+    /// signer slot is replaced; membership/threshold changes stay immediate
+    /// admin operations.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerProposed`].
+    pub fn propose_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let delay = StorageClient::get_relay_signer_delay(&env)
+            .unwrap_or(DEFAULT_RELAY_SIGNER_DELAY_LEDGERS);
+        let eta_ledger = env.ledger().sequence().saturating_add(delay);
+        StorageClient::set_pending_relay_signer(
+            &env,
+            &PendingRelaySigner {
+                new_signer: new_signer.clone(),
+                eta_ledger,
+            },
+        );
+        EventEmitter::relay_signer_proposed(&env, &new_signer, eta_ledger);
+        Ok(())
+    }
+
+    /// Complete a pending rotation once `eta_ledger` has been reached.
+    ///
+    /// # Errors
+    /// [`ContractError::NoPendingRelaySigner`], [`ContractError::TimelockNotElapsed`].
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerRotated`].
+    pub fn finalize_relay_signer(env: Env) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let p = StorageClient::get_pending_relay_signer(&env)
+            .ok_or(ContractError::NoPendingRelaySigner)?;
+        if env.ledger().sequence() < p.eta_ledger {
+            return Err(ContractError::TimelockNotElapsed);
+        }
+        let old_signer = StorageClient::get_relay_signer(&env)?;
+        StorageClient::set_relay_signer(&env, &p.new_signer);
+        StorageClient::clear_pending_relay_signer(&env);
+        EventEmitter::relay_signer_rotated(&env, &old_signer, &p.new_signer);
+        Ok(())
+    }
+
+    /// Abort a pending rotation. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerChangeCancelled`].
+    pub fn cancel_relay_signer_change(env: Env) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let p = StorageClient::get_pending_relay_signer(&env)
+            .ok_or(ContractError::NoPendingRelaySigner)?;
+        StorageClient::clear_pending_relay_signer(&env);
+        EventEmitter::relay_signer_change_cancelled(&env, &p.new_signer);
+        Ok(())
+    }
+
+    /// Return the pending relay-signer rotation, if any.
+    pub fn pending_relay_signer(env: Env) -> Option<PendingRelaySigner> {
+        StorageClient::get_pending_relay_signer(&env)
+    }
+
+    // ── Relay signer set (N-of-M) ─────────────────────────────────────────────
+
+    /// Return the relay signer set (lazily migrated from a legacy single
+    /// signer as `threshold = 1`).
+    pub fn relay_signer_set(env: Env) -> Result<RelaySignerSet, ContractError> {
+        StorageClient::get_relay_signer_set(&env)
+    }
+
+    /// Register the calling relay signer's approval for the next gated relay
+    /// call (multi-invocation quorum pattern; valid for a short ledger window
+    /// and consumed by the gated call). `signer` must be a set member.
+    pub fn approve_relay_call(env: Env, signer: Address) -> Result<(), ContractError> {
+        let set = StorageClient::get_relay_signer_set(&env)?;
+        if !set.signers.contains(&signer) {
+            return Err(ContractError::NotRelaySigner);
+        }
+        signer.require_auth();
+        StorageClient::set_relay_approval(&env, &signer);
+        Ok(())
+    }
+
+    /// Add a signer to the relay set. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerAdded`].
+    pub fn add_relay_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        if set.signers.contains(&signer) {
+            return Err(ContractError::SignerAlreadyExists);
+        }
+        set.signers.push_back(signer.clone());
+        StorageClient::set_relay_signer_set(&env, &set);
+        EventEmitter::relay_signer_added(&env, &signer);
+        Ok(())
+    }
+
+    /// Remove a signer from the relay set. Admin-gated; rejected if it would
+    /// leave fewer signers than the current threshold.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerRemoved`].
+    pub fn remove_relay_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        let idx = set
+            .signers
+            .first_index_of(&signer)
+            .ok_or(ContractError::SignerNotFound)?;
+        if set.signers.len() - 1 < set.threshold {
+            return Err(ContractError::InvalidThreshold);
+        }
+        set.signers.remove(idx);
+        StorageClient::set_relay_signer_set(&env, &set);
+        StorageClient::clear_relay_approval(&env, &signer);
+        EventEmitter::relay_signer_removed(&env, &signer);
+        Ok(())
+    }
+
+    /// Change the quorum threshold. Admin-gated; must satisfy
+    /// `1 <= threshold <= signers.len()`.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelayThresholdChanged`].
+    pub fn set_relay_threshold(env: Env, threshold: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        if threshold == 0 || threshold > set.signers.len() {
+            return Err(ContractError::InvalidThreshold);
+        }
+        let old = set.threshold;
+        set.threshold = threshold;
+        StorageClient::set_relay_signer_set(&env, &set);
+        EventEmitter::relay_threshold_changed(&env, old, threshold);
+        Ok(())
+    }
     }
 
     // ── Contract upgrade ───────────────────────────────────────────────────────
