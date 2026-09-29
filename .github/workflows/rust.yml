@@ -30,10 +30,30 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Test
-        run: cargo test --all-features
-      - name: Build wasm
+
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
+      - name: Build wasm (once)
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Upload release wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synapse-core-contract-wasm
+          path: target/wasm32-unknown-unknown/release/synapse_core_contract.wasm
+
+      - name: Verify schema_version() matches migrations.toml (#88)
+        run: |
+          chmod +x scripts/check_schema_migration.sh
+          scripts/check_schema_migration.sh
+
+      - name: Prove schema check fails on mismatched manifest (#88 fixture)
+        run: |
+          scripts/check_schema_migration.sh \
+            --manifest fixtures/ci/migrations.mismatch.toml \
+            --expect-fail
+
       - name: Verify reference event decoder stays in sync with events.rs
         run: |
           # The reference decoder in src/events.rs must cover every catalogued

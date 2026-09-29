@@ -46,12 +46,20 @@ supported.
 | [`EventBatchProcessed`](#eventbatchprocessed) | `batch` | `EventEmitter::batch_processed` | `batch_register_callback` | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
-| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction` | **Live** |
+| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` | **Live** |
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
 | [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
+| [`EventTransactionExpired`](#eventtransactionexpired) | `expire` | `EventEmitter::transaction_expired` | `expire_transaction` | **Live** |
 | [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
 | [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
 | [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
+| [`EventUpgradeQuorumSet`](#eventupgradequorumset) | `uqset` | `EventEmitter::upgrade_quorum_set` | `set_upgrade_quorum` | **Live** |
+| [`EventUpgradeProposed`](#eventupgradeproposed) | `uprop` | `EventEmitter::upgrade_proposed` | `propose_upgrade` | **Live** |
+| [`EventSignerAttestationSet`](#eventsignerattestationset) | `attest` | `EventEmitter::signer_attestation_set` | `set_signer_attestation` | **Live** |
+| [`EventAdminRenounced`](#eventadminrenounced) | `renounce` | `EventEmitter::admin_renounced` | `renounce_admin` | **Live** |
+| [`EventGuardianSet`](#eventguardianset) | `guardian` | `EventEmitter::guardian_set` | `set_guardian` | **Live** |
+| [`EventAutoPaused`](#eventautopaused) | `apause` | `EventEmitter::auto_paused` | `trip_auto_pause` | **Live** |
+| [`EventAutoUnpaused`](#eventautounpaused) | `aunpause` | `EventEmitter::auto_unpaused` | `unpause_auto` (quorum met) | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -135,7 +143,7 @@ batch-size-of-one edge case (`N == 1`), where `batch_size == 1` and
 |--|--|
 | **Topics** | `synapse`, `status` |
 | **Struct** | `EventStatusChanged` |
-| **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction` |
+| **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` |
 | **When** | Every successful status-machine transition |
 | **Status** | Live |
 
@@ -145,6 +153,7 @@ batch-size-of-one edge case (`N == 1`), where `batch_size == 1` and
 | `old_status` | `TransactionStatus` | Status before transition |
 | `new_status` | `TransactionStatus` | Status after transition |
 | `ledger` | `u32` | Ledger sequence at emit |
+| `reason` | `Option<String>` | **Additive (v0.1.0).** Optional human-readable reason for the transition. `None` for all pre-existing emitters; populated only by future emitters that need it. |
 
 `TransactionStatus` variants (discriminant order as in `types.rs`):
 `Pending`, `Processing`, `Completed`, `Failed`.
@@ -167,6 +176,7 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `tx_id` | `String` | Transaction id |
 | `stellar_tx_hash` | `String` | Confirmed Stellar tx hash |
 | `ledger` | `u32` | Ledger sequence at emit |
+| `settlement_asset` | `Option<String>` | **Additive (v0.1.0).** Optional SEP-11 asset code for the settled leg. `None` for all pre-existing emitters; populated only by future emitters that need it. |
 
 ### EventTransactionFailed
 
@@ -183,6 +193,27 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `tx_id` | `String` | Transaction id |
 | `reason` | `String` | Short failure code |
 | `ledger` | `u32` | Ledger sequence at emit |
+
+### EventTransactionExpired
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `expire` |
+| **Struct** | `EventTransactionExpired` |
+| **Emitted by** | `expire_transaction` |
+| **When** | A stale `Pending` transaction is auto-expired. Emitted exactly once per successful `expire_transaction` call; never on a rejected/failed attempt. |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction id |
+| `expired_at` | `u32` | Ledger sequence at which the transaction was expired |
+
+**Emission order:** `expire_transaction` emits
+[`EventStatusChanged`](#eventstatuschanged) (`Pending` → `Failed`) first, then
+`EventTransactionExpired`. Subscribers that only care about the expiry signal
+SHOULD filter on the `expire` topic; those tracking the full state machine
+SHOULD consume both, in this order.
 
 ### EventAdminTransferProposed
 
@@ -207,13 +238,13 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | **Topics** | `synapse`, `admin` |
 | **Struct** | `EventAdminTransferred` |
 | **Emitted by** | `accept_admin` |
-| **When** | Nominee accepts a pending admin transfer, completing it |
+| **When** | Nominee accepts a pending admin transfer, completing the handover |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `old_admin` | `Address` | Previous admin |
-| `new_admin` | `Address` | New admin |
+| `old_admin` | `Address` | Admin before the transfer |
+| `new_admin` | `Address` | Admin after the transfer |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventRelaySignerRotated
@@ -223,13 +254,47 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | **Topics** | `synapse`, `relay` |
 | **Struct** | `EventRelaySignerRotated` |
 | **Emitted by** | `set_relay_signer` |
-| **When** | Trusted relay signer successfully rotated |
+| **When** | Admin rotates the trusted relay signer |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `old_signer` | `Address` | Previous relay signer |
 | `new_signer` | `Address` | New relay signer |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventUpgradeQuorumSet
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `uqset` |
+| **Struct** | `EventUpgradeQuorumSet` |
+| **Emitted by** | `set_upgrade_quorum` |
+| **When** | Optional upgrade M-of-N quorum is configured or cleared (#87) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `admin` | `Address` | Admin that wrote the config |
+| `threshold` | `u32` | M (0 when cleared) |
+| `member_count` | `u32` | N (0 when cleared) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventUpgradeProposed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `uprop` |
+| **Struct** | `EventUpgradeProposed` |
+| **Emitted by** | `propose_upgrade` |
+| **When** | Upgrade staged awaiting quorum co-signatures (#87) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `proposer` | `Address` | Admin that proposed |
+| `new_wasm_hash` | `BytesN<32>` | Proposed WASM hash |
+| `expected_schema_version` | `u32` | Schema version checked at propose time |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventContractUpgraded
@@ -263,9 +328,167 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `paused` | `bool` | New pause state |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventSignerAttestationSet
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `attest` |
+| **Struct** | `EventSignerAttestationSet` |
+| **Emitted by** | `set_signer_attestation` |
+| **When** | Every attestation write, including no-op same-hash updates |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `signer` | `Address` | Relay signer that self-reported the fingerprint |
+| `build_hash` | `BytesN<32>` | Self-reported build/commit fingerprint (not cryptographically verified on-chain) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventAdminRenounced
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `renounce` |
+| **Struct** | `EventAdminRenounced` |
+| **Emitted by** | `renounce_admin` |
+| **When** | Outgoing admin acknowledges step-down after a live successor accepted |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `former_admin` | `Address` | Outgoing admin |
+| `successor` | `Address` | Live admin installed by prior `accept_admin` |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventGuardianSet
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `guardian` |
+| **Struct** | `EventGuardianSet` |
+| **Emitted by** | `set_guardian` |
+| **When** | Guardian address set or rotated |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `guardian` | `Address` | New guardian |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventAutoPaused
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `apause` |
+| **Struct** | `EventAutoPaused` |
+| **Emitted by** | `trip_auto_pause` |
+| **When** | Automatic circuit-breaker pause engaged |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventAutoUnpaused
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `aunpause` |
+| **Struct** | `EventAutoUnpaused` |
+| **Emitted by** | `unpause_auto` (when 2-of-3 quorum is met) |
+| **When** | Automatic pause released by a role pair |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `roles` | `UnpauseRoles` | Winning pair: `AdminGuardian` / `AdminRelay` / `GuardianRelay` |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventRelaySignerRotated
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `relay` |
+| **Struct** | `EventRelaySignerRotated` |
+| **Emitted by** | `set_relay_signer` |
+| **When** | Admin rotates the trusted relay signer |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `old_signer` | `Address` | Previous relay signer |
+| `new_signer` | `Address` | New relay signer |
+| `ledger` | `u32` | Ledger sequence at emit |
+
 ---
 
-## 4. Ordering guarantees
+## 4. Additive trailing-field pattern (required convention)
+
+Soroban encodes `#[contracttype]` structs as XDR maps keyed by field name, so
+adding a field is wire-compatible **only** when the addition is done in a way
+that old decoders can still tolerate. To make the semver policy in
+[§ Semver policy](#semver-policy) concrete and reusable, all future additive
+event changes MUST follow this pattern:
+
+1. **Append, never insert or reorder.** New fields are added at the **end** of
+the struct, after every existing field (including `ledger`). Existing field
+names, types, and order are frozen.
+2. **Wrap the new field in `Option<T>`.** Every additive field MUST be typed
+   `Option<T>` so that emitters that do not populate it can pass `None` and old
+   subscribers that ignore it can decode the payload without the key.
+3. **Emit `None` from all pre-existing call sites.** When the field is added,
+   every existing emitter is updated to pass `None`; only new emitters that
+   actually have the value populate `Some(..)`. This keeps the change a
+   **minor** (or patch) bump, never a major one.
+4. **Document the field inline.** Each additive field carries an
+   `**Additive (vX.Y.Z).**` note in its catalogue table row describing its
+   meaning and the version it was introduced in.
+5. **Never remove or retype a field.** Removal, rename, or type change of an
+   existing field is a **major** bump and requires a new event name/topic.
+
+| Entry-point | Order (first → last) |
+|-------------|----------------------|
+| `initialize` | 1. `init` |
+| `register_callback` (first write) | 1. `reg` |
+| `register_callback` (idempotent hit) | *(no events)* |
+| `start_processing` | 1. `status` (`Pending` → `Processing`) |
+| `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
+| `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
+| `propose_admin` | 1. `propose` |
+| `accept_admin` | 1. `admin` |
+| `set_relay_signer` | 1. `relay` |
+| `upgrade` | 1. `upgrade` |
+| `pause` / `unpause` | 1. `pause` |
+| `set_signer_attestation` | 1. `attest` |
+| `renounce_admin` | 1. `renounce` |
+| `set_guardian` | 1. `guardian` |
+| `trip_auto_pause` | 1. `apause` |
+| `unpause_auto` (quorum met) | 1. `aunpause` |
+| `unpause_auto` (vote only) | *(no events)* |
+
+### Worked examples
+
+Two high-traffic events already demonstrate the pattern:
+
+- [`EventStatusChanged`](#eventstatuschanged) — trailing `reason: Option<String>`
+  appended after `ledger`; all four existing emitters pass `None`.
+- [`EventTransactionCompleted`](#eventtransactioncompleted) — trailing
+  `settlement_asset: Option<String>` appended after `ledger`; the existing
+  emitter passes `None`.
+
+### Subscriber compatibility
+
+A subscriber decoding with the **old** (pre-additive-field) schema against a
+**new** payload MUST NOT break. Because the new field is a trailing `Option<T>`,
+old decoders that ignore unknown trailing keys continue to work, and new
+decoders reading an old payload see the field as `None`. This is verified by the
+compatibility test in `src/events.rs`
+(`test_additive_field_old_decoder_compatibility`), which decodes a new-shape
+payload using old-shape decoding logic and asserts graceful handling.
+
+---
+
+## 5. Ordering guarantees
 
 Within a single transaction, events are emitted in the order the emitters are
 called. The following orderings are part of the contract surface:
@@ -291,11 +514,77 @@ skew the count.
 
 ## Semver policy
 
-- **Patch** — documentation-only clarifications that do not change topics,
-  field names, types, or ordering.
-- **Minor** — additive changes: a new event, or a new trailing field on an
-  existing struct (subscribers must tolerate unknown trailing fields).
-- **Major** — any change to existing topic names, field names, field types,
-  field order, or the ordering guarantees in § 4.
+| Change | Bump |
+|--------|------|
+| Add a new event (new topic) | minor |
+| Add an **additive trailing `Option<T>` field** per [§ 4](#4-additive-trailing-field-pattern-required-convention) | minor or patch |
+| Fix a typo in a doc-comment / meaning column | patch |
+| Rename a topic, struct, or field | **major** |
+| Remove a field | **major** |
+| Reorder fields | **major** |
+| Change a field’s type | **major** |
+| Change multi-event emission order | **major** |
+
+| Change | Version bump | Advance notice |
+|--------|--------------|----------------|
+| Add a **new optional field at the end** of an existing event struct\* | **Minor** or **Patch** | Recommended |
+| Add a **new event** (new topic[1] + struct) | **Minor** | Recommended |
+| Document-only / non-behavioural clarifications | **Patch** | Not required |
+| **Remove** a field | **Major** | **Required** — notify Phase 2 / Phase 3 |
+| **Rename** a field or topic symbol | **Major** | **Required** |
+| **Reorder** fields in a `#[contracttype]` struct | **Major** | **Required** |
+| **Change** a field’s type | **Major** | **Required** |
+| Change which events fire on a transition, or **emission order** | **Major** | **Required** |
+| Change topic[0] away from `synapse` | **Major** | **Required** |
+
+\*Soroban `#[contracttype]` structs are positional in XDR. “Additive at the end”
+is the only additive pattern allowed without a major bump; inserting a field in
+the middle is a **Major** (reorder). Prefer a **new event** over mid-struct
+inserts when in doubt.
 
 Adding `EventBatchProcessed` is a **minor** (additive) change.
+
+When in doubt, treat the change as **major** and open a discussion in
+[`DECISIONS.md`](./DECISIONS.md) before merging.
+
+### Advance notice
+
+For any **Major** event-schema change:
+
+1. Open / update an issue tagged for subscriber teams **before** merging.
+2. Record the planned break under [`CHANGELOG.md` → Event schema → Unreleased](./CHANGELOG.md#event-schema).
+3. Bump `version()` major in the same release that ships the break.
+4. Keep the old behaviour available until the noticed cutover date when
+   operationally possible (dual-emit is allowed only within a documented
+   migration window and itself requires changelog entries).
+
+---
+
+## 6. Verification checklist (maintainers)
+
+Before merging any PR that touches `src/events.rs` or event emit sites in
+`src/lib.rs`:
+
+1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
+2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
+   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`,
+   `attest`, `renounce`, `guardian`, `apause`, `aunpause`).
+3. Confirm multi-event order in §4 still matches the call sites.
+4. Run snapshot-style tests (e.g. `test_pause::test_upgrade_emits_contract_upgraded_event`)
+   and any new event tests; topics in assertions must match §3.
+5. If the schema changed, update [`CHANGELOG.md`](./CHANGELOG.md#event-schema)
+   and bump `version()` per §5.
+
+---
+
+## 7. References
+
+- Implementation: [`src/events.rs`](./src/events.rs)
+- Status enum: [`src/types.rs`](./src/types.rs) (`TransactionStatus`)
+- Upgradability / admin trust: [`DECISIONS.md`](./DECISIONS.md)
+- Version probe: `SynapseCoreContract::version`
+
+## Addendum: `merged` event
+
+`EventTransactionsMerged { canonical_tx_id, duplicate_tx_id, admin, reason, ledger }`,
+topic `merged`, emitted once by `merge_duplicate_transactions` (break-glass admin action).
