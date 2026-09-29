@@ -46,7 +46,7 @@ jobs:
         run: cargo build --target wasm32-unknown-unknown --release
 
       - name: Gate unit tests (comparison logic, baseline coverage)
-        run: cargo test --lib bench_resources::
+        run: cargo test --lib "bench_resources::"
 
       - name: Resource-usage gate
         run: scripts/check_resource_budget.sh
