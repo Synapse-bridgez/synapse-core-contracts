@@ -525,3 +525,57 @@ Net cost per call, release WASM:
 | `invocation_overhead` | 3 023 843 → 2 997 803 (−0.9%) | 1 770 917 → 1 768 066 (−0.2%) |
 
 The release WASM also shrank from 53 475 to 53 432 bytes.
+
+## 13. Release WASM size gate (#122)
+
+`scripts/check_wasm_size.sh` (CI: `.github/workflows/resource-gate.yml`;
+local: `make wasm-size`) measures `make wasm`'s output — the same release
+profile (`opt-level = "z"`, `lto = true`, `strip = "symbols"`,
+`panic = "abort"`) that `DEPLOYMENT.md` uploads — against
+[`wasm_size.toml`](./wasm_size.toml).
+
+### 13.1 Network limit
+
+Read from the live network config via RPC `getLedgerEntries` on 2026-09-29;
+mainnet and testnet are identical:
+
+| Setting | Value | Relevance |
+|---------|------:|-----------|
+| `contract_max_size_bytes` (ConfigSettingID 0) | **131 072** | Hard cap on an uploaded WASM — the binding limit |
+| `txMaxSizeBytes` (bandwidth, ID 5) | 132 096 | Upload tx envelope must also fit |
+| `txMaxWriteBytes` (ledger cost, ID 2) | 132 096 | Upload writes the code entry |
+
+Re-check after protocol upgrades (`stellar network settings`, or the same RPC
+query) and update `network_limit_bytes` / `ceiling_bytes` if they change.
+
+### 13.2 Checks
+
+| Check | Setting | Fails when |
+|-------|---------|-----------|
+| Regression | `baseline_bytes`, `max_growth_pct = 5` | size > baseline × 1.05 |
+| Ceiling | `ceiling_bytes = 98 304` | size > 96 KiB (75% of the network limit, leaving 32 KiB headroom for future in-place upgrades) |
+
+At introduction the WASM is **53 432 bytes** — 54% of the ceiling, 41% of
+the network limit — so no size-reduction follow-up is needed.
+
+Failure output names the delta, e.g.:
+
+```text
+REGRESSION: release WASM grew 16429 bytes (+30.7%),
+  53432 -> 69861 bytes; allowed growth is +5% (max 56103 bytes).
+```
+
+### 13.3 Self-test fixtures
+
+CI builds the contract with `--features size-gate-fixture`, which links a
+deliberately bloated dummy export (`src/size_gate_fixture.rs`, a 16 KiB
+pseudo-random table) and asserts the gate **fails** on it; it also asserts
+the real WASM fails an artificially low `--ceiling 50000`. The feature is
+wasm-only and never part of a deployable build.
+
+### 13.4 Accepting intended growth
+
+Run `scripts/check_wasm_size.sh --update` (with the workflow's pinned
+toolchain — size depends on `rustc`), commit `wasm_size.toml`, and state the
+growth and its reason in the PR. Raising `ceiling_bytes` itself needs a
+separate, explicit decision since it eats into upgrade headroom.

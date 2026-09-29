@@ -43,6 +43,9 @@ mod storage;
 mod types;
 mod validation;
 
+#[cfg(all(feature = "size-gate-fixture", target_family = "wasm"))]
+mod size_gate_fixture;
+
 #[cfg(test)]
 mod bench_events;
 #[cfg(test)]

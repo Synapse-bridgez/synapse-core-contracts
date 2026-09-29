@@ -12,6 +12,12 @@ crate-type = ["cdylib"]
 [dependencies]
 soroban-sdk = { version = "22.0.0", features = ["alloc"] }
 
+[features]
+# CI self-test for the WASM size gate (#122): links a deliberately bloated
+# dummy export so `scripts/check_wasm_size.sh --expect-fail` can prove the gate
+# trips. Never enable for a deployable build. See src/size_gate_fixture.rs.
+size-gate-fixture = []
+
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils", "alloc"] }
 

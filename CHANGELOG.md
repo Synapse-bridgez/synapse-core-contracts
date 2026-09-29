@@ -53,6 +53,9 @@ separately from general code changes. Full topic/field contracts live in
 - Resource-usage regression gate (#119): CI meters every hot entry point of
   the release WASM against `resource_baseline.toml` and fails on a >15%
   regression. See COST_MODEL.md §12 for the baseline-update process.
+- Release WASM size gate (#122): CI fails if `make wasm`'s output grows >5%
+  over `wasm_size.toml`'s baseline or exceeds a 96 KiB ceiling (75% of
+  Soroban's 131 072-byte `contract_max_size_bytes`). See COST_MODEL.md §13.
 
 ### Changed
 

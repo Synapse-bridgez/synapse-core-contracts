@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build bench resource-gate setup mutants
+.PHONY: check fmt clippy test wasm build bench resource-gate wasm-size setup mutants
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
@@ -40,6 +40,13 @@ bench:
 ## To accept an intended change: scripts/check_resource_budget.sh --update
 resource-gate: wasm
 	scripts/check_resource_budget.sh
+
+## Release WASM size gate (#122): fail if `make wasm`'s output grew more than
+## max_growth_pct over wasm_size.toml's baseline, or exceeds its ceiling (75%
+## of Soroban's contract_max_size_bytes). Accept intended growth with:
+##   scripts/check_wasm_size.sh --update
+wasm-size: wasm
+	scripts/check_wasm_size.sh
 
 ## One-time contributor setup: install the pre-commit hook.
 setup:
