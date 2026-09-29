@@ -269,3 +269,6 @@ wired.
 
 <!-- handsoff-issue-160 -->
 - #160: [High] Add rate-limited guards on unbounded-pagination read-only queries
+
+<!-- handsoff-issue-162 -->
+- #162: [High] Implement `verify_transaction_proof()` producing a Merkle-style inclusion proof
