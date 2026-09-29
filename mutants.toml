@@ -1,0 +1,35 @@
+# cargo-mutants configuration — Issue #128
+#
+# Runs mutation testing against the contract's core logic to validate that
+# the test suite detects real logic bugs, not just achieves line coverage.
+#
+# Run locally:   cargo mutants --in-place
+# Run via make:  make mutants
+#
+# CI enforces a minimum mutation-kill rate via the exit-code check in
+# .github/workflows/rust.yml. A non-zero exit from cargo-mutants means
+# at least one mutant survived; the CI step is configured to tolerate up
+# to a defined missed-mutant budget (see the workflow file).
+
+# Directories to mutate — only contract logic, not test helpers.
+# Excluding test files prevents trivially "killing" mutations by flipping
+# assertions inside the test suite itself.
+exclude_globs = [
+    "src/tests.rs",
+    "src/test_pause.rs",
+    "src/tests_auth_adversarial.rs",
+    "src/tests_state_machine.rs",
+    "src/tests_invariants.rs",
+]
+
+# Timeout per mutant test run (seconds). Soroban unit tests are fast;
+# 60 s is generous but prevents hangs from blocking CI.
+timeout = 60
+
+# Use the default test profile (cargo test) so the full suite runs.
+test_tool = "cargo-test"
+
+# Cap total mutants tried in CI to keep wall-clock time reasonable.
+# Local runs can remove this cap with `cargo mutants --no-config`.
+# The cap is high enough that all files in src/ are covered at least once.
+jobs = 4

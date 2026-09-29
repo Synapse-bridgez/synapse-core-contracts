@@ -38,6 +38,12 @@ mod test_events_conformance;
 mod test_pause;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_auth_adversarial;
+#[cfg(test)]
+mod tests_invariants;
+#[cfg(test)]
+mod tests_state_machine;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
 

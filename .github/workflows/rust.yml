@@ -76,3 +76,46 @@ jobs:
           echo "::group::Event emission cost breakdown"
           cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
           echo "::endgroup::"
+
+  # ── Mutation testing — Issue #128 ─────────────────────────────────────────
+  #
+  # Validates that the test suite detects real logic bugs rather than only
+  # achieving high line coverage. cargo-mutants systematically corrupts the
+  # contract's core logic (flips comparisons, removes guards, alters return
+  # values) and confirms the test suite catches each mutation.
+  #
+  # Exit codes:
+  #   0 — all mutants killed (perfect kill rate)
+  #   2 — some mutants survived  ← this job treats as failure
+  #   3 — some tests timed out   ← also treated as failure
+  #
+  # The job is intentionally a separate parallel job so it never blocks the
+  # main `check` job, and its results can be reviewed independently.
+  mutants:
+    runs-on: ubuntu-latest
+    # Only run on PRs and main pushes (not on every draft event).
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation tests
+        # --in-place: mutate the working tree directly (faster than copying).
+        # Exit 2 (survived mutants) and exit 3 (timeouts) are failures here.
+        # The mutants.toml in the repo root controls which files are mutated,
+        # the per-mutant timeout, and the parallelism level.
+        run: cargo mutants --in-place
+        # Upload the mutation report as an artifact so engineers can inspect
+        # which mutants survived without re-running locally.
+        continue-on-error: false
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants.out/
+          retention-days: 14
