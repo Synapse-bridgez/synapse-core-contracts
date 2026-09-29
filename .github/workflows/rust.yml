@@ -62,3 +62,17 @@ jobs:
           # or if a decoder example references a topic that is no longer
           # catalogued. See docs/event-consumer-guide.md for details.
           cargo test --all-features event_decoder_covers_catalogued_topics
+
+      # Run the event-emission benchmarks and surface the [bench] output as a
+      # tracked (non-gating) metric in the CI log.  The bench_wave7_cumulative_cost
+      # test asserts regression ceilings, so a genuine budget blow-out will
+      # already fail the "Run tests" step above; this step prints the raw numbers
+      # for trend-tracking across PRs.
+      #
+      # To grep these numbers out of CI logs:
+      #   grep '\[bench\]' <logfile>
+      - name: Event-emission benchmarks (tracked metric)
+        run: |
+          echo "::group::Event emission cost breakdown"
+          cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
+          echo "::endgroup::"
