@@ -15,7 +15,8 @@
 use soroban_sdk::{Address, Env, String};
 
 use crate::types::{
-    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction, UnbondRequest,
+    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction,
+    TransactionStatus, UnbondRequest,
 };
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
@@ -172,6 +173,57 @@ impl StorageClient {
         );
     }
 
+    // ── Per-status transaction counters (#154) ────────────────────────────────
+
+    /// Read the maintained running counter for a single [`TransactionStatus`].
+    ///
+    /// Defaults to `0` when the counter has never been written, so a freshly
+    /// initialised contract reports zero transactions in every status.
+    pub fn get_status_count(env: &Env, status: &TransactionStatus) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::StatusCount(status.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Persist the running counter for a single [`TransactionStatus`].
+    pub fn set_status_count(env: &Env, status: &TransactionStatus, count: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::StatusCount(status.clone()), &count);
+    }
+
+    /// Increment the running counter for `status` by one.
+    ///
+    /// Called on every entry into a status so the aggregate stays correct
+    /// without deriving counts from the per-status ID index on the fly.
+    pub fn increment_status_count(env: &Env, status: &TransactionStatus) {
+        let next = Self::get_status_count(env, status).saturating_add(1);
+        Self::set_status_count(env, status, next);
+    }
+
+    /// Decrement the running counter for `status` by one, saturating at zero.
+    ///
+    /// Called on every exit from a status so the aggregate stays correct
+    /// without deriving counts from the per-status ID index on the fly.
+    pub fn decrement_status_count(env: &Env, status: &TransactionStatus) {
+        let next = Self::get_status_count(env, status).saturating_sub(1);
+        Self::set_status_count(env, status, next);
+    }
+
+    /// Record a transition from `from` to `to`, keeping both running counters
+    /// in sync.  `from` is `None` for the initial insertion of a transaction.
+    pub fn record_status_transition(
+        env: &Env,
+        from: Option<&TransactionStatus>,
+        to: &TransactionStatus,
+    ) {
+        if let Some(previous) = from {
+            Self::decrement_status_count(env, previous);
+        }
+        Self::increment_status_count(env, to);
+    }
+
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
     /// Return the ledger sequence at which an idempotency key was first stored,
@@ -216,74 +268,57 @@ impl StorageClient {
 
 // ─── Wave 2: Collateral Bonding (#143) ────────────────────────────────────────
 
-/// Minimum TTL for bond records — same order of magnitude as transaction records.
-const BOND_MIN_TTL_LEDGERS: u32 = 100_000;
+/// Minimum TTL for bond records — same order as transaction records.
+const BOND_MIN_TTL_LEDGERS: u32 = 100_000; // ~1 week
 
 impl StorageClient {
-    /// Read the [`BondRecord`] for a signer, or `None` if not bonded.
-    pub fn get_bond_record(env: &Env, signer: &Address) -> Option<BondRecord> {
-        let key = StorageKey::BondRecord(signer.clone());
-        let record = env.storage().persistent().get(&key)?;
+    /// Read a [`BondRecord`] by its ID, or `None` if not set.
+    pub fn get_bond(env: &Env, bond_id: &String) -> Option<BondRecord> {
         env.storage()
             .persistent()
-            .extend_ttl(&key, BOND_MIN_TTL_LEDGERS, BOND_MIN_TTL_LEDGERS);
-        Some(record)
+            .get(&StorageKey::Bond(bond_id.clone()))
     }
 
-    /// Persist a [`BondRecord`].
-    pub fn save_bond_record(env: &Env, record: &BondRecord) {
-        let key = StorageKey::BondRecord(record.signer.clone());
+    /// Persist a [`BondRecord`], extending its TTL.
+    pub fn set_bond(env: &Env, bond_id: &String, record: &BondRecord) {
+        let key = StorageKey::Bond(bond_id.clone());
         env.storage().persistent().set(&key, record);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BOND_MIN_TTL_LEDGERS, BOND_MIN_TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            BOND_MIN_TTL_LEDGERS,
+            BOND_MIN_TTL_LEDGERS,
+        );
     }
 
-    /// Remove the [`BondRecord`] for a signer (used when bond reaches zero).
-    pub fn remove_bond_record(env: &Env, signer: &Address) {
+    /// Read an [`UnbondRequest`] by its ID, or `None` if not set.
+    pub fn get_unbond_request(env: &Env, request_id: &String) -> Option<UnbondRequest> {
         env.storage()
             .persistent()
-            .remove(&StorageKey::BondRecord(signer.clone()));
+            .get(&StorageKey::UnbondRequest(request_id.clone()))
     }
 
-    /// Read the pending [`UnbondRequest`] for a signer, or `None`.
-    pub fn get_unbond_request(env: &Env, signer: &Address) -> Option<UnbondRequest> {
-        env.storage()
-            .persistent()
-            .get(&StorageKey::UnbondRequest(signer.clone()))
-    }
-
-    /// Persist a pending [`UnbondRequest`].
-    pub fn save_unbond_request(env: &Env, signer: &Address, request: &UnbondRequest) {
-        let key = StorageKey::UnbondRequest(signer.clone());
+    /// Persist an [`UnbondRequest`], extending its TTL.
+    pub fn set_unbond_request(env: &Env, request_id: &String, request: &UnbondRequest) {
+        let key = StorageKey::UnbondRequest(request_id.clone());
         env.storage().persistent().set(&key, request);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BOND_MIN_TTL_LEDGERS, BOND_MIN_TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            BOND_MIN_TTL_LEDGERS,
+            BOND_MIN_TTL_LEDGERS,
+        );
     }
 
-    /// Remove the pending [`UnbondRequest`] for a signer (after claim or slash).
-    pub fn remove_unbond_request(env: &Env, signer: &Address) {
-        env.storage()
-            .persistent()
-            .remove(&StorageKey::UnbondRequest(signer.clone()));
-    }
-}
-
-// ─── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────────
-
-impl StorageClient {
     /// Read the [`AnchorTierConfig`] for an anchor, or `None` if not set.
-    pub fn get_anchor_tier(env: &Env, anchor: &Address) -> Option<AnchorTierConfig> {
+    pub fn get_anchor_tier_config(env: &Env, anchor: &Address) -> Option<AnchorTierConfig> {
         env.storage()
             .persistent()
             .get(&StorageKey::AnchorTier(anchor.clone()))
     }
 
     /// Persist an [`AnchorTierConfig`].
-    pub fn set_anchor_tier(env: &Env, config: &AnchorTierConfig) {
+    pub fn set_anchor_tier_config(env: &Env, anchor: &Address, config: &AnchorTierConfig) {
         env.storage()
             .persistent()
-            .set(&StorageKey::AnchorTier(config.anchor.clone()), config);
+            .set(&StorageKey::AnchorTier(anchor.clone()), config);
     }
 }
