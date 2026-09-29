@@ -51,4 +51,23 @@ impl AdminClient {
         caller.require_auth();
         Ok(())
     }
+
+    /// Set the contract-wide maximum transaction amount ceiling.
+    ///
+    /// This is a single, always-on backstop enforced in `register_callback`
+    /// independently of any per-anchor ceiling.  Only the admin may call it.
+    ///
+    /// Returns `Err(ContractError::Unauthorised)` when auth fails.
+    pub fn set_global_max_amount(env: &Env, amount: i128) -> Result<(), ContractError> {
+        Self::require_admin(env)?;
+        StorageClient::set_global_max_amount(env, amount);
+        Ok(())
+    }
+
+    /// Read the contract-wide maximum transaction amount ceiling.
+    ///
+    /// Returns `None` when no global ceiling has been configured.
+    pub fn get_global_max_amount(env: &Env) -> Option<i128> {
+        StorageClient::get_global_max_amount(env)
+    }
 }
