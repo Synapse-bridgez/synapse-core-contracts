@@ -43,6 +43,7 @@ supported.
 |-------|----------|---------|----------------|--------|
 | [`EventInitialised`](#eventinitialised) | `init` | `EventEmitter::initialised` | `initialize` | **Live** |
 | [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
+| [`EventBatchProcessed`](#eventbatchprocessed) | `batch` | `EventEmitter::batch_processed` | `batch_register_callback` | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` | **Live** |
 | [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` | **Live** |
@@ -104,6 +105,37 @@ Field tables list fields in **declaration / XDR order**. Do not reorder.
 | `asset_code` | `String` | SEP-11 asset code |
 | `anchor_transaction_id` | `String` | Anchor Platform id |
 | `ledger` | `u32` | Ledger sequence at emit |
+
+### EventBatchProcessed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `batch` |
+| **Struct** | `EventBatchProcessed` |
+| **Emitted by** | `batch_register_callback` |
+| **When** | Exactly once per successful batch call, after all per-transaction events for that call |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `caller` | `Address` | Address that invoked the batch entry point |
+| `batch_size` | `u32` | Number of transactions in the batch (accurate even when `1`) |
+| `first_tx_id` | `String` | `tx_id` of the first item in the batch |
+| `last_tx_id` | `String` | `tx_id` of the last item in the batch |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+This is a **compact aggregate signal** only. Per-transaction detail (accounts,
+amounts, asset codes, anchor ids) is available from the corresponding
+[`EventTransactionRegistered`](#eventtransactionregistered) events; subscribers
+SHOULD NOT expect the summary to duplicate batch contents.
+
+**Emission ordering (guaranteed):** within a single `batch_register_callback`
+call, the per-transaction events are emitted first, in batch order, and the
+single `EventBatchProcessed` summary is emitted **last**. A batch of `N`
+transactions therefore produces exactly `N` `EventTransactionRegistered` events
+followed by exactly one `EventBatchProcessed` event. This holds for the
+batch-size-of-one edge case (`N == 1`), where `batch_size == 1` and
+`first_tx_id == last_tx_id`.
 
 ### EventStatusChanged
 
@@ -278,13 +310,8 @@ SHOULD consume both, in this order.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `admin` | `Address` | Admin that authorised the upgrade |
-| `new_wasm_hash` | `BytesN<32>` | SHA-256 of the new WASM |
+| `new_wasm_hash` | `BytesN<32>` | New contract wasm hash |
 | `ledger` | `u32` | Ledger sequence at emit |
-| `schema_version` | `u32` | On-chain schema version `expected_schema_version` was checked against (F-04). Additive trailing field, added after the initial 0.1.0 lock — Minor bump. |
-
-Verified by snapshot-style test
-`test_pause::test_upgrade_emits_contract_upgraded_event`
-(topics `synapse` / `upgrade`).
 
 ### EventPauseToggled
 
@@ -293,13 +320,12 @@ Verified by snapshot-style test
 | **Topics** | `synapse`, `pause` |
 | **Struct** | `EventPauseToggled` |
 | **Emitted by** | `pause`, `unpause` |
-| **When** | Circuit breaker engaged or released (idempotent calls still emit) |
+| **When** | Pause state flips |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `paused` | `bool` | `true` = paused, `false` = unpaused |
-| `admin` | `Address` | Admin that toggled |
+| `paused` | `bool` | New pause state |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventSignerAttestationSet
@@ -405,17 +431,6 @@ that old decoders can still tolerate. To make the semver policy in
 event changes MUST follow this pattern:
 
 1. **Append, never insert or reorder.** New fields are added at the **end** of
----
-
-## 4. Additive trailing-field pattern (required convention)
-
-Soroban encodes `#[contracttype]` structs as XDR maps keyed by field name, so
-adding a field is wire-compatible **only** when the addition is done in a way
-that old decoders can still tolerate. To make the semver policy in
-[§ Semver policy](#semver-policy) concrete and reusable, all future additive
-event changes MUST follow this pattern:
-
-1. **Append, never insert or reorder.** New fields are added at the **end** of
 the struct, after every existing field (including `ledger`). Existing field
 names, types, and order are frozen.
 2. **Wrap the new field in `Option<T>`.** Every additive field MUST be typed
@@ -473,7 +488,31 @@ payload using old-shape decoding logic and asserts graceful handling.
 
 ---
 
-## 5. Semver policy
+## 5. Ordering guarantees
+
+Within a single transaction, events are emitted in the order the emitters are
+called. The following orderings are part of the contract surface:
+
+- `initialize`: `EventInitialised` only.
+- `register_callback`: `EventTransactionRegistered` (first write only).
+- `batch_register_callback`: for a batch of `N` items, `N`
+  `EventTransactionRegistered` events in batch order, followed by exactly one
+  `EventBatchProcessed` summary event. The summary is always last, and is
+  emitted even when `N == 1`.
+- `start_processing` / `complete_transaction` / `fail_transaction`:
+  `EventStatusChanged` first, then the terminal event
+  (`EventTransactionCompleted` / `EventTransactionFailed`) where applicable.
+- `propose_admin` / `accept_admin` / `set_relay_signer` / `upgrade` / `pause` /
+  `unpause`: single event each.
+
+Subscribers that need a per-batch aggregate MUST rely on the single trailing
+`EventBatchProcessed` rather than counting per-transaction events, so that
+idempotent replays (which do not re-emit `EventTransactionRegistered`) do not
+skew the count.
+
+---
+
+## Semver policy
 
 | Change | Bump |
 |--------|------|
@@ -502,6 +541,8 @@ payload using old-shape decoding logic and asserts graceful handling.
 is the only additive pattern allowed without a major bump; inserting a field in
 the middle is a **Major** (reorder). Prefer a **new event** over mid-struct
 inserts when in doubt.
+
+Adding `EventBatchProcessed` is a **minor** (additive) change.
 
 When in doubt, treat the change as **major** and open a discussion in
 [`DECISIONS.md`](./DECISIONS.md) before merging.
