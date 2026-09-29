@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, Address, String};
+use soroban_sdk::{contracterror, contracttype, Address, String, Vec};
 
 /// Current on-chain storage schema version.
 ///
@@ -17,6 +17,20 @@ use soroban_sdk::{contracterror, contracttype, Address, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Contract-wide default max amount (stroops) for anchors (keyed by
+/// `asset_issuer`) with no explicit ceiling: 10^15 stroops (100M units at 7
+/// decimals). Admin may override via `set_default_amount_ceiling`.
+pub const DEFAULT_AMOUNT_CEILING: i128 = 1_000_000_000_000_000;
+
+/// Maximum number of times a `Failed` transaction may be retried.
+pub const MAX_RETRIES: u32 = 3;
+
+/// Hard cap on the `limit` accepted by `get_transactions_by_status`.
+pub const MAX_PAGE_LIMIT: u32 = 50;
+
+/// Hard cap on the number of payloads accepted by `batch_register_callback`.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -24,7 +38,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// State machine:
 /// ```text
 /// Pending ──► Processing ──► Completed
-///         └──────────────► Failed
+///   │             │
+///   ├─────────────┴────────► Failed
+///   ├─────────────┴────────► Cancelled
+///   └─────────────┴────────► Expired (permissionless, after expiry window)
 /// ```
 #[contracttype]
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -37,6 +54,11 @@ pub enum TransactionStatus {
     Completed,
     /// Terminal failure — reason stored in [`Transaction::failure_reason`].
     Failed,
+    /// Terminal withdrawal — voided by the relay or admin before settlement.
+    Cancelled,
+    /// Terminal: stayed `Pending` past the configured expiry window and was
+    /// expired via the permissionless `expire_transaction`.
+    Expired,
 }
 
 // ─── Callback type ────────────────────────────────────────────────────────────
@@ -100,6 +122,27 @@ pub struct Transaction {
 
     /// Short failure reason code — populated only on `Failed`.
     pub failure_reason: String,
+
+    /// Number of times this transaction has been moved `Failed -> Pending`
+    /// via `retry_transaction`. Capped at [`MAX_RETRIES`].
+    pub retry_count: u32,
+
+    /// Ledger timestamp (seconds) when the transaction was registered.
+    /// Used to age out stale `Pending` entries.
+    pub registered_at: u64,
+
+    /// Amount actually settled when completed via `partial_complete_transaction`.
+    /// `None` for full completions and non-completed transactions.
+    pub settled_amount: Option<i128>,
+
+    /// Per-transaction relay signer binding set by
+    /// `reassign_relay_signer_for_transaction`. `None` means the global
+    /// relay signer applies.
+    pub assigned_signer: Option<Address>,
+
+    /// Append-only operational tags (bounded count and length; see
+    /// `validation.rs`).
+    pub tags: Vec<String>,
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -141,6 +184,23 @@ pub struct CallbackPayload {
     pub callback_status: String,
 }
 
+/// One entry in a transaction's append-only lifecycle history.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransitionRecord {
+    /// Status the transaction entered.
+    pub status: TransactionStatus,
+    /// Address that drove the transition.
+    pub caller: Address,
+    /// Ledger close timestamp of the transition.
+    pub timestamp: u64,
+}
+
+/// Maximum history entries kept per transaction. When exceeded the oldest
+/// entry is evicted (drop-oldest, keep-newest); history loss never blocks a
+/// state transition.
+pub const MAX_HISTORY_LEN: u32 = 32;
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Discriminants used as ledger storage keys.
@@ -178,8 +238,56 @@ pub enum StorageKey {
     Nonce(Address),
     /// Per-relay-signer allowlist of anchor instance IDs (empty/absent = all).
     RelayAnchors(Address),
-    /// Singleton: address proposed as the next relay signer.
+    /// Singleton: max age in seconds of a `Pending` transaction before it
+    /// may be expired. Absent means expiry is disabled.
+    ExpiryWindow,
+    /// Singleton: admin-approved standby relay signer, a valid reassignment
+    /// target alongside the current `relay_signer`.
+    StandbySigner,
+    /// Per-status index: ordered `Vec<String>` of transaction IDs currently in
+    /// that status. Maintained by `StorageClient::save_transaction`.
+    StatusIndex(TransactionStatus),
+    History(String),
+    MaxPendingPerSigner,
+    PendingCount(Address),
+    TxSigner(String),
+    Disputed(String),
+    AnchorCeiling(String),
+    DefaultCeiling,
+    /// Merge marker: duplicate tx id -> canonical tx id it was merged into.
+    MergedInto(String),
+    /// Per-transaction forwarding route (`next_phase`); absent = no forwarding.
+    ForwardRoute(String),
+    /// Singleton: N-of-M relay signer set ([`RelaySignerSet`]). Absent on
+    /// pre-#65 deployments; the legacy `RelaySigner` key is then migrated
+    /// lazily to `threshold = 1, signers = [relay_signer]`.
+    RelaySignerSet,
+    /// Temporary: a signer's standing approval for the next gated relay call.
+    RelayApproval(Address),
+    /// Singleton: pending timelocked relay-signer change.
     PendingRelaySigner,
+    /// Singleton: timelock delay in ledgers (absent = default).
+    RelaySignerDelay,
+}
+
+/// Pending timelocked relay-signer rotation, finalisable at `eta_ledger`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingRelaySigner {
+    pub new_signer: Address,
+    pub eta_ledger: u32,
+}
+
+/// Default relay-signer timelock: ~24h at ~5s/ledger.
+pub const DEFAULT_RELAY_SIGNER_DELAY_LEDGERS: u32 = 17_280;
+
+/// N-of-M relay signer set: `threshold` distinct members must co-authorise
+/// each relay-gated call.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySignerSet {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -232,6 +340,17 @@ pub enum ContractError {
     TransactionNotFound = 30,
     /// The requested status transition violates the state machine.
     InvalidStatusTransition = 31,
+    /// The transaction is already `Cancelled`; cancelling twice is rejected.
+    AlreadyCancelled = 32,
+    /// Cancellation was requested from a state that cannot be cancelled
+    /// (`Completed` or `Failed`).
+    CannotCancel = 33,
+    /// The transaction has already used all [`MAX_RETRIES`] retries.
+    RetryLimitExceeded = 34,
+    /// A pagination `limit` was zero or exceeded `MAX_PAGE_LIMIT`.
+    InvalidPageLimit = 35,
+    /// A batch was empty or exceeded `MAX_BATCH_SIZE`.
+    InvalidBatchSize = 36,
 
     // ── Idempotency ─────────────────────────────────────────────────────────
     /// Request is a duplicate within the retention window (matches Redis 429).
@@ -246,12 +365,71 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
-    /// The pending admin proposal has passed its expiry timestamp (ADR-0002 amendment).
+    // ── Backpressure ────────────────────────────────────────────────────────
+    /// Relay signer already has the maximum allowed outstanding `Pending` transactions.
+    OutstandingCapExceeded = 70,
+
+    // ── Expiry ──────────────────────────────────────────────────────────────
+    /// `expire_transaction` was called but no expiry window is configured.
+    ExpiryNotConfigured = 71,
+    /// `expire_transaction` was called before the expiry window elapsed.
+    ExpiryNotElapsed = 72,
+
+    // ── Disputes ────────────────────────────────────────────────────────────
+    /// Transaction is already under dispute.
+    AlreadyDisputed = 80,
+    /// Transaction is not under dispute.
+    NotDisputed = 81,
+
+    // ── Partial settlement ──────────────────────────────────────────────────
+    /// `settled_amount` is not strictly between zero and the original amount.
+    InvalidSettledAmount = 82,
+
+    // ── Signer reassignment ─────────────────────────────────────────────────
+    /// `new_signer` is neither the relay signer nor the approved standby.
+    SignerNotTrusted = 83,
+
+    // ── Tagging ─────────────────────────────────────────────────────────────
+    /// The transaction already carries the maximum number of tags.
+    TooManyTags = 90,
+    /// The tag is empty.
+    EmptyTag = 91,
+
+    // ── Amount ceilings ─────────────────────────────────────────────────────
+    /// Amount exceeds the anchor's (or the default) ceiling.
+    AmountCeilingExceeded = 92,
+
+    // ── Recovery / merge (100+ range) ───────────────────────────────────────
+    /// `merge_duplicate_transactions` was given the same id for both sides.
+    MergeSelf = 100,
+    /// The duplicate (or canonical) record is already merged.
+    AlreadyMerged = 101,
+    /// The duplicate is `Completed` (settled); merging would be lossy.
+    DuplicateSettled = 102,
+
+    // ── Relay signer set (110+ range) ───────────────────────────────────────
+    /// Threshold is 0 or exceeds the number of signers.
+    InvalidThreshold = 110,
+    /// Signer is already a member of the set.
+    SignerAlreadyExists = 111,
+    /// Signer is not a member of the set.
+    SignerNotFound = 112,
+    /// Fewer than `threshold` distinct signers authorised the call.
+    QuorumNotMet = 113,
+
+    // ── Relay signer timelock (120+ range) ──────────────────────────────────
+    /// `finalize_relay_signer` / `cancel_relay_signer_change` with nothing pending.
+    NoPendingRelaySigner = 120,
+    /// `finalize_relay_signer` called before the delay elapsed.
+    TimelockNotElapsed = 121,
+    /// A non-zero timelock delay is configured; use propose/finalize.
+    TimelockRequired = 122,
+
+    // ── Admin proposal expiry (ADR-0002 amendment) ──────────────────────────
+    /// The pending admin proposal has passed its expiry timestamp.
     AdminProposalExpired = 200,
     /// A supplied nonce did not match the caller's next expected nonce.
     InvalidNonce = 210,
     /// The relay signer is not allowlisted for the payload's anchor instance ID.
     AnchorNotAllowed = 220,
-    /// `accept_relay_signer` was called with no pending relay-signer proposal.
-    NoPendingRelaySigner = 230,
 }
