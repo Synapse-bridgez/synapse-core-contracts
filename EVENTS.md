@@ -67,6 +67,8 @@ supported.
 | [`EventGuardianSet`](#eventguardianset) | `guardian` | `EventEmitter::guardian_set` | `set_guardian` | **Live** |
 | [`EventAutoPaused`](#eventautopaused) | `apause` | `EventEmitter::auto_paused` | `trip_auto_pause` | **Live** |
 | [`EventAutoUnpaused`](#eventautounpaused) | `aunpause` | `EventEmitter::auto_unpaused` | `unpause_auto` (quorum met) | **Live** |
+| [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` (sibling issue) | **Schema locked** |
+| [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` (sibling issue) | **Schema locked** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -524,6 +526,67 @@ Verified by `test_pause::test_self_check_events_topics`.
 | `new_signer` | `Address` | New relay signer |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventDisputeRaised
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `dispute` |
+| **Struct** | `EventDisputeRaised` |
+| **Emitted by** | `dispute_transaction` (sibling issue) |
+| **When** | A dispute is opened against a transaction |
+| **Status** | Schema locked |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction under dispute — shared correlation key with `EventDisputeResolved` |
+| `reason` | `String` | Short human-readable reason code (e.g. `"amount_mismatch"`, `"missing_settlement"`) |
+| `caller` | `Address` | Address that raised the dispute (relay signer or admin) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+**Re-dispute cardinality:** a given `tx_id` may produce more than one
+`dispute` / `dsprslvd` event pair over its lifetime if the dispute
+state machine permits re-disputing after a prior resolution. Subscribers
+MUST correlate pairs by `tx_id` and emission order rather than assuming
+at-most-one per transaction. Once the sibling dispute state-machine issue
+finalises the cardinality policy, this note will be updated to reflect the
+exact rule (once-only or repeatable).
+
+Verified by snapshot-style test `tests::test_dispute_raised_event_payload_snapshot`
+(topics `synapse` / `dispute`).
+
+### EventDisputeResolved
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `dsprslvd` |
+| **Struct** | `EventDisputeResolved` |
+| **Emitted by** | `resolve_dispute` (sibling issue) |
+| **When** | A raised dispute is resolved by the admin |
+| **Status** | Schema locked |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction ID — shared correlation key with `EventDisputeRaised` |
+| `upheld` | `bool` | `true` = dispute upheld (transaction **reverted to `Failed`**); `false` = dispute rejected (transaction **returned to `Completed`**) |
+| `caller` | `Address` | Admin address that resolved the dispute |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+**`upheld` semantics (normative):**
+
+* `upheld = true` — The dispute is **upheld**. The transaction outcome is
+  considered invalid and is **reverted to `Failed`**. Downstream systems
+  (support tooling, audit logs) SHOULD treat this as a terminal failure
+  equivalent to [`EventTransactionFailed`](#eventtransactionfailed).
+
+* `upheld = false` — The dispute is **rejected**. The original outcome
+  stands and the transaction is **returned to `Completed`**. Downstream
+  systems SHOULD resume treating the transaction as settled.
+
+Verified by snapshot-style tests
+`tests::test_dispute_resolved_upheld_true_event_payload_snapshot` and
+`tests::test_dispute_resolved_upheld_false_event_payload_snapshot`
+(topics `synapse` / `dsprslvd`).
+
 ---
 
 ## 4. Additive trailing-field pattern (required convention)
@@ -595,6 +658,18 @@ decoders reading an old payload see the field as `None`. This is verified by the
 compatibility test in `src/events.rs`
 (`test_additive_field_old_decoder_compatibility`), which decodes a new-shape
 payload using old-shape decoding logic and asserts graceful handling.
+
+Future entry-points wiring the dispute events (sibling issue):
+
+| Entry-point | Order (first → last) |
+|-------------|----------------------|
+| `dispute_transaction` | 1. `dispute` |
+| `resolve_dispute` | 1. `dsprslvd` |
+
+**Rationale for `complete_transaction`:** Phase 2 indexers that listen only to
+`done` still see completion; those that key off `status` with
+`new_status == Completed` see the transition first, then the hash-bearing
+`done` payload. Reordering would break dual-subscriber setups.
 
 ---
 

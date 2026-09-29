@@ -1062,6 +1062,135 @@ fn test_register_callback_rejects_duplicate_transaction_id_after_idempotency_exp
     assert_eq!(tx.stellar_tx_hash, hash);
 }
 
+// ─── Dispute events ────────────────────────────────────────────────────────────
+
+/// Payload-snapshot test for `EventDisputeRaised`.
+///
+/// Verifies that the emitter publishes topics `synapse` / `dispute` and that
+/// all payload fields (tx_id, reason, caller, ledger) are recorded correctly.
+/// Uses `env.as_contract` to call the emitter directly — the dispute
+/// entry-points that will wire these live in a sibling issue.
+#[test]
+fn test_dispute_raised_event_payload_snapshot() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let caller = Address::generate(&env);
+    let tx_id = String::from_str(&env, "tx-dispute-1");
+    let reason = String::from_str(&env, "amount_mismatch");
+
+    env.as_contract(&contract_id, || {
+        crate::events::EventEmitter::dispute_raised(&env, &tx_id, &reason, &caller);
+    });
+
+    let events = env.events().all();
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one event from dispute_raised"
+    );
+
+    let (_, topics, data) = events.get_unchecked(0);
+
+    // Topic verification — matches EVENTS.md: synapse / dispute.
+    assert_eq!(topics.len(), 2);
+    let t0 = Symbol::try_from_val(&env, &topics.get_unchecked(0)).unwrap();
+    let t1 = Symbol::try_from_val(&env, &topics.get_unchecked(1)).unwrap();
+    assert_eq!(t0, symbol_short!("synapse"));
+    assert_eq!(t1, symbol_short!("dispute"));
+
+    // Payload verification.
+    let payload = crate::events::EventDisputeRaised::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.tx_id, tx_id);
+    assert_eq!(payload.reason, reason);
+    assert_eq!(payload.caller, caller);
+    assert_eq!(payload.ledger, env.ledger().sequence());
+}
+
+/// Payload-snapshot test for `EventDisputeResolved` with `upheld = true`.
+///
+/// `upheld = true` means the dispute is upheld: the transaction is reverted to
+/// `Failed`. Verifies topics `synapse` / `dsprslvd` and all payload fields.
+#[test]
+fn test_dispute_resolved_upheld_true_event_payload_snapshot() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let caller = Address::generate(&env);
+    let tx_id = String::from_str(&env, "tx-dispute-2");
+
+    env.as_contract(&contract_id, || {
+        crate::events::EventEmitter::dispute_resolved(&env, &tx_id, true, &caller);
+    });
+
+    let events = env.events().all();
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one event from dispute_resolved"
+    );
+
+    let (_, topics, data) = events.get_unchecked(0);
+
+    // Topic verification — matches EVENTS.md: synapse / dsprslvd.
+    assert_eq!(topics.len(), 2);
+    let t0 = Symbol::try_from_val(&env, &topics.get_unchecked(0)).unwrap();
+    let t1 = Symbol::try_from_val(&env, &topics.get_unchecked(1)).unwrap();
+    assert_eq!(t0, symbol_short!("synapse"));
+    assert_eq!(t1, symbol_short!("dsprslvd"));
+
+    // Payload verification — upheld = true means reverted to Failed.
+    let payload = crate::events::EventDisputeResolved::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.tx_id, tx_id);
+    assert!(
+        payload.upheld,
+        "upheld=true must be preserved in the emitted payload"
+    );
+    assert_eq!(payload.caller, caller);
+    assert_eq!(payload.ledger, env.ledger().sequence());
+}
+
+/// Payload-snapshot test for `EventDisputeResolved` with `upheld = false`.
+///
+/// `upheld = false` means the dispute is rejected: the original outcome stands
+/// and the transaction is returned to `Completed`. Verifies the boolean is
+/// faithfully emitted and the topics are correct.
+#[test]
+fn test_dispute_resolved_upheld_false_event_payload_snapshot() {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let caller = Address::generate(&env);
+    let tx_id = String::from_str(&env, "tx-dispute-3");
+
+    env.as_contract(&contract_id, || {
+        crate::events::EventEmitter::dispute_resolved(&env, &tx_id, false, &caller);
+    });
+
+    let events = env.events().all();
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one event from dispute_resolved"
+    );
+
+    let (_, topics, data) = events.get_unchecked(0);
+
+    // Topic verification.
+    assert_eq!(topics.len(), 2);
+    let t0 = Symbol::try_from_val(&env, &topics.get_unchecked(0)).unwrap();
+    let t1 = Symbol::try_from_val(&env, &topics.get_unchecked(1)).unwrap();
+    assert_eq!(t0, symbol_short!("synapse"));
+    assert_eq!(t1, symbol_short!("dsprslvd"));
+
+    // Payload verification — upheld = false means returned to Completed.
+    let payload = crate::events::EventDisputeResolved::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.tx_id, tx_id);
+    assert!(
+        !payload.upheld,
+        "upheld=false must be preserved in the emitted payload"
+    );
+    assert_eq!(payload.caller, caller);
+    assert_eq!(payload.ledger, env.ledger().sequence());
+}
+
 // ─── Full lifecycle ────────────────────────────────────────────────────────────
 
 #[test]
