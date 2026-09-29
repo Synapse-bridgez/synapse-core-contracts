@@ -15,6 +15,17 @@ Semver policy for this schema lives in [§ Semver policy](#semver-policy) and is
 summarised in the README [design-decisions](./README.md#event-schema-as-a-stable-public-api).
 Schema revisions are logged separately in [`CHANGELOG.md`](./CHANGELOG.md#event-schema).
 
+> **📖 Subscriber safety reading:**
+> Before deploying any event subscriber to production, read
+> **[`docs/event-finality.md`](./docs/event-finality.md)** — it covers Stellar's
+> BFT finality model (no reorgs, 1-ledger confirmation), how to write a correct
+> polling loop, cursor-based reconnect/gap recovery, RPC retention window limits,
+> and the relationship between subscriber deduplication and this contract's
+> idempotency guarantees.
+>
+> **synapse-web teams:** review `docs/event-finality.md §4` against your RPC
+> poller implementation and flag any discrepancies as issues in this repo.
+
 ---
 
 ## 1. Wire format
@@ -801,6 +812,9 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 - Status enum: [`src/types.rs`](./src/types.rs) (`TransactionStatus`)
 - Upgradability / admin trust: [`DECISIONS.md`](./DECISIONS.md)
 - Version probe: `SynapseCoreContract::version`
+- **Subscriber finality & reliability guidance:** [`docs/event-finality.md`](./docs/event-finality.md) —
+  Stellar BFT finality model, confirmation depth, RPC polling loop, gap recovery,
+  retention window, deduplication, and idempotency relationship
 
 ## Addendum: `merged` event
 
