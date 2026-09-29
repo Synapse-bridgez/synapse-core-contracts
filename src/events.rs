@@ -140,6 +140,55 @@ pub struct EventPauseToggled {
     pub ledger: u32,
 }
 
+/// Emitted when a dispute is raised against a transaction.
+///
+/// A dispute may be raised more than once over a transaction's lifetime if
+/// the dispute state machine permits re-disputing after a prior resolution.
+/// Subscribers correlate raised/resolved pairs via the shared `tx_id` field.
+///
+/// Downstream support tooling and admin dashboards subscribe to this event
+/// to surface disputes in real time without polling ledger state.
+#[contracttype]
+pub struct EventDisputeRaised {
+    /// The transaction ID under dispute — shared with [`EventDisputeResolved`]
+    /// as the correlation key.
+    pub tx_id: String,
+    /// Short human-readable reason code supplied by the caller
+    /// (e.g. `"amount_mismatch"`, `"missing_settlement"`).
+    pub reason: String,
+    /// Address that raised the dispute (relay signer or admin).
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted when a raised dispute is resolved.
+///
+/// Subscribers correlate this with the preceding [`EventDisputeRaised`] for
+/// the same `tx_id` to reconstruct the full dispute lifecycle.
+///
+/// # `upheld` semantics
+///
+/// * `upheld = true`  — The dispute is **upheld**: the transaction is
+///   considered invalid and the outcome is **reverted to `Failed`**.
+///   Downstream systems (support tooling, audit logs) should treat this as
+///   a terminal failure equivalent to [`EventTransactionFailed`].
+///
+/// * `upheld = false` — The dispute is **rejected**: the original outcome
+///   stands and the transaction is **returned to `Completed`**.
+///   Downstream systems should resume treating the transaction as settled.
+#[contracttype]
+pub struct EventDisputeResolved {
+    /// The transaction ID — shared correlation key with [`EventDisputeRaised`].
+    pub tx_id: String,
+    /// Whether the dispute was upheld (`true` → reverted to `Failed`) or
+    /// rejected (`false` → returned to `Completed`). See doc-comment above
+    /// for the full semantics.
+    pub upheld: bool,
+    /// Address that resolved the dispute (admin only).
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -291,6 +340,51 @@ impl EventEmitter {
             EventAdminTransferred {
                 old_admin: old_admin.clone(),
                 new_admin: new_admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventDisputeRaised`].
+    ///
+    /// Topics: `synapse` / `dispute`.
+    #[allow(dead_code)]
+    pub fn dispute_raised(
+        env: &Env,
+        tx_id: &String,
+        reason: &String,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("dispute")),
+            EventDisputeRaised {
+                tx_id: tx_id.clone(),
+                reason: reason.clone(),
+                caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventDisputeResolved`].
+    ///
+    /// Topics: `synapse` / `dsprslvd`.
+    ///
+    /// `upheld = true`  → dispute upheld, transaction reverted to `Failed`.
+    /// `upheld = false` → dispute rejected, transaction returned to `Completed`.
+    #[allow(dead_code)]
+    pub fn dispute_resolved(
+        env: &Env,
+        tx_id: &String,
+        upheld: bool,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("dsprslvd")),
+            EventDisputeResolved {
+                tx_id: tx_id.clone(),
+                upheld,
+                caller: caller.clone(),
                 ledger: env.ledger().sequence(),
             },
         );

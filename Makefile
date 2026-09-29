@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build setup mutants
+.PHONY: check fmt clippy test wasm build bench setup mutants
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
@@ -25,6 +25,13 @@ wasm:
 ## Plain debug build (quick sanity check).
 build:
 	cargo build --verbose
+
+## Run event-emission benchmarks and print the [bench] summary lines.
+## The regression ceilings in src/bench_events.rs are asserted as part of
+## `make test`; this target surfaces the raw numbers for local inspection.
+## Grep-friendly: all cost lines are prefixed with "[bench]".
+bench:
+	cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
 
 ## One-time contributor setup: install the pre-commit hook.
 setup:

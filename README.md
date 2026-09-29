@@ -33,6 +33,7 @@ three-phase lifecycle that ultimately bridges fiat deposits to cross-chain asset
 ```
 Pending ──► Processing ──► Completed
         └──────────────► Failed
+        └──────────────► Cancelled   (cancel_transaction; from Pending/Processing)
 ```
 
 | Transition              | Caller            | Entry-point              |
@@ -41,6 +42,7 @@ Pending ──► Processing ──► Completed
 | `Pending → Processing`  | relay or admin    | `start_processing()`     |
 | `Processing → Completed`| relay or admin    | `complete_transaction()` |
 | `* → Failed`            | relay or admin    | `fail_transaction()`     |
+| `Pending/Processing → Cancelled` | relay or admin | `cancel_transaction()` |
 
 ---
 
@@ -55,7 +57,10 @@ src/
 ├── validation.rs   ← stateless input guards
 ├── admin.rs        ← role-based access control (admin + relay_signer)
 ├── tests.rs        ← integration tests (one or more per entry-point)
-└── test_pause.rs   ← pause/circuit-breaker + upgrade tests
+├── test_pause.rs   ← pause/circuit-breaker + upgrade tests
+└── test_events_conformance.rs  ← CI-enforced event-schema conformance gate (issue #113)
+
+event_conformance_manifest.toml  ← canonical event-schema ground truth (checked by test_events_conformance)
 
 EVENTS.md           ← locked event schema (topics, payloads, ordering, semver)
 CHANGELOG.md        ← release notes; Event schema section for subscribers
@@ -75,6 +80,7 @@ DECISIONS.md        ← architectural decision records
 | `validation.rs`   | ✅ Complete | Full SEP-23 strkey CRC16 check + length caps on all string fields |
 | `admin.rs`        | ✅ Complete | Role-based access control (admin / relay signer)             |
 | `tests.rs` / `test_pause.rs` | ✅ Complete | 68 tests covering happy paths, auth failures, invalid input, idempotency, state-machine guards, pause/upgrade |
+| `test_events_conformance.rs` | ✅ Complete | 10 CI-gate tests: 2 primary conformance checks (events.rs + EVENTS.md vs manifest), manifest well-formedness, all-topics check, and 5 drift-detection fixtures (issue #113) |
 
 See [`THREAT_MODEL.md`](./THREAT_MODEL.md) for the pre-audit self-review and
 remaining open (accepted-risk or design-level) findings.
@@ -251,3 +257,12 @@ PR review or release cadence.
 Live emitters today: `init`, `reg`, `status`, `done`, `fail`, `propose`,
 `admin`, `relay`, `pause`, `upgrade` — the full catalogue in `EVENTS.md` is
 wired.
+
+## Handsoff notes
+
+<!-- handsoff-issue-92 -->
+- #92: [High] Add upgrade-simulation testnet tooling replaying mainnet storage snapshots
+<!-- handsoff-issue-102 -->
+- #102: [High] Add a cold-storage export entry point for pre-eviction off-chain archival
+<!-- handsoff-issue-109 -->
+- #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
