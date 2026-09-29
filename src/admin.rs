@@ -45,6 +45,27 @@ impl AdminClient {
         Self::require_relay_quorum(env, Some(caller))
     }
 
+    /// Like [`Self::assert_is_relay_or_admin`], but honours a per-transaction
+    /// signer binding: when `assigned` is `Some`, the caller must be that
+    /// signer (or the admin) rather than the global relay signer.
+    pub fn assert_can_drive_tx(
+        env: &Env,
+        caller: &Address,
+        assigned: &Option<Address>,
+    ) -> Result<(), ContractError> {
+        match assigned {
+            None => Self::assert_is_relay_or_admin(env, caller),
+            Some(signer) => {
+                let admin = StorageClient::get_admin(env)?;
+                if caller != &admin && caller != signer {
+                    return Err(ContractError::Unauthorised);
+                }
+                caller.require_auth();
+                Ok(())
+            }
+        }
+    }
+
     /// Assert that `caller` is specifically the relay signer (not the admin).
     ///
     /// Used by `register_callback` — only the relay may ingest callbacks.
