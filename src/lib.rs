@@ -45,6 +45,8 @@ mod validation;
 #[cfg(test)]
 mod bench_events;
 #[cfg(test)]
+mod bench_resources;
+#[cfg(test)]
 mod schema_ci;
 #[cfg(test)]
 mod test_events_conformance;

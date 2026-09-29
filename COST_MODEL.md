@@ -393,3 +393,72 @@ including an O(n^2) in-batch duplicate check (at most 190 comparisons). The
 cap is deliberately conservative to stay well under the per-transaction
 resource limits; raise it only after benchmarking.
 
+
+## 12. Resource-usage regression gate (#119)
+
+`.github/workflows/resource-gate.yml` builds the release WASM and runs
+`scripts/check_resource_budget.sh`, which meters every hot entry point
+(`src/bench_resources.rs`) and compares against the committed
+[`resource_baseline.toml`](./resource_baseline.toml). The build fails if any
+scenario's `cpu_insns` or `mem_bytes` exceeds its baseline by more than
+`threshold_pct` (initially **15%**).
+
+### 12.1 What is measured
+
+* **Release WASM, not native Rust.** Native tests run contract code as plain
+  Rust, so the budget sees only host calls; strkey decoding, CRC16 and any
+  other guest-side loop cost nothing there. Registering the built `.wasm`
+  meters every executed instruction, as validators do.
+* **Net of invocation overhead.** Every call pays a fixed ~3.0M-instruction /
+  ~1.77 MB cost to instantiate the VM for the ~53 KB module. That is recorded
+  once as `invocation_overhead` (a trivial `health()` call — catches WASM-size
+  bloat), and every other scenario is stored net of it, so a 15% threshold
+  applies to the entry point's own work.
+* **One fresh env per scenario** — preconditions (register, start processing,
+  propose admin, …) are set up unmetered; only the call under test is metered.
+* **Rejection paths.** `register_callback_reject_*` meter each validation
+  failure so the cost of turning away malformed input is tracked (#120).
+
+### 12.2 Variance and the threshold
+
+Soroban metering is a deterministic cost model, not wall-clock timing:
+repeated local runs and CI runs of the same WASM produce identical numbers
+(0.0% delta), so runner noise does not apply. What *does* move the numbers is
+a different WASM — including one built by a different `rustc`. The workflow
+therefore pins `RUST_TOOLCHAIN` to the version the baseline was generated
+with, and the script prints the WASM's size and SHA-256 prefix so a mismatch
+is easy to spot. The 15% threshold is deliberately loose for a first rollout;
+given zero measured variance it can be tightened (e.g. to 5%) once the team
+is comfortable with the update workflow below.
+
+### 12.3 Gate self-test
+
+The workflow proves the gate is not vacuous: `--inject register_callback:25`
+inflates one measurement by 25% and **must** fail (`--expect-fail`), while
+`--inject register_callback:10` stays under the threshold and must pass. The
+comparison logic itself (at/above threshold, missing/stale entries, baseline
+round-trip) is unit-tested in every `cargo test`.
+
+### 12.4 Updating the baseline
+
+When a change legitimately needs more (or now needs less) budget:
+
+1. Build with the pinned toolchain:
+   `rustup run <RUST_TOOLCHAIN> cargo build --target wasm32-unknown-unknown --release`
+2. Regenerate: `scripts/check_resource_budget.sh --update`
+3. Commit `resource_baseline.toml` in the same PR, and state in the PR
+   description which scenarios moved, by how much, and why.
+4. Adding a new scenario to `src/bench_resources.rs` requires the same step —
+   the gate reports `MISSING` for scenarios without a baseline entry and
+   `STALE` for baseline entries without a scenario.
+
+When bumping `RUST_TOOLCHAIN` in the workflow, regenerate the baseline with
+the new toolchain in the same PR.
+
+A failure looks like:
+
+```text
+Resource-usage gate failed (#119): 1 finding(s) against resource_baseline.toml
+
+  REGRESSION  register_callback: cpu_insns 442300 vs baseline 353840 (+25.0%; threshold +15%)
+```
