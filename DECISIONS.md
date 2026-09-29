@@ -122,10 +122,14 @@ In these cases, the immutable-with-migration path is still available as a fallba
 /// across the upgrade; temporary storage (idempotency keys) is evicted.
 ///
 /// `expected_schema_version` must match the on-chain schema version or the
-/// call is rejected before contract WASM is touched.
+/// call is rejected before contract WASM is touched. After the (deferred)
+/// WASM swap request, `post_upgrade_self_check` verifies critical storage
+/// invariants; failure reverts the whole invocation — including the swap,
+/// which the host only commits when the call finishes successfully.
 ///
 /// # Events
-/// Emits [`EventContractUpgraded`] on success.
+/// Emits [`EventUpgradeSelfCheckPassed`] then [`EventContractUpgraded`]
+/// on success; [`EventUpgradeSelfCheckFailed`] on self-check failure.
 pub fn upgrade(
     env: Env,
     new_wasm_hash: BytesN<32>,
@@ -136,12 +140,33 @@ pub fn upgrade(
     if schema_version != expected_schema_version {
         return Err(ContractError::SchemaVersionMismatch);
     }
+    let previous_wasm_hash = StorageClient::get_current_wasm_hash(&env);
     env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+    StorageClient::post_upgrade_self_check(&env).map_err(|e| {
+        EventEmitter::upgrade_self_check_failed(&env, schema_version);
+        e
+    })?;
+    EventEmitter::upgrade_self_check_passed(&env, schema_version);
+    StorageClient::append_upgrade_record(/* ... */);
+    StorageClient::set_current_wasm_hash(&env, &new_wasm_hash);
     EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
     Ok(())
 }
 ```
 
+### Post-upgrade self-check
+
+`StorageClient::post_upgrade_self_check()` (versioned alongside `SCHEMA_VERSION`)
+runs at the end of every `upgrade()`. It confirms:
+
+1. The instance `Initialised` flag is set
+2. Admin and relay-signer persistent entries are present and readable
+3. On-chain `SchemaVersion` equals the new WASM's `SCHEMA_VERSION` constant
+
+Atomicity relies on the Soroban host guarantee that
+`update_current_contract_wasm` only commits when the invocation finishes
+successfully — returning `SelfCheckFailed` therefore leaves both code and
+storage exactly as they were before the call.
 ### New event (`events.rs`)
 
 ```rust
@@ -170,13 +195,43 @@ The admin key is the **single most important secret** in the Synapse Bridge ecos
 - Admin operations SHOULD be logged and monitored off-chain
 - The admin key SHOULD NOT be the same key used for deployment or relay signing
 
+### Optional on-chain upgrade quorum (#87)
+
+Off-chain multisig custody of the admin key is necessary but opaque to the
+contract. Deployments that want an *on-chain* guarantee that `upgrade()` cannot
+proceed on a single admin signature alone may configure an optional
+`UpgradeQuorum { threshold, members }` via `set_upgrade_quorum`.
+
+- Default: `None` — today's single-admin behaviour (full backward compatibility)
+- When set: `upgrade(…, cosigners)` and `propose_upgrade` / `approve_upgrade`
+  require at least `threshold` distinct member `require_auth()` co-signatures.
+  Admin alone is rejected with `InsufficientUpgradeQuorum`.
+
+### Storage key namespacing (#89)
+
+All ledger keys are `StorageKey::Ns(STORAGE_KEY_NAMESPACE, DataKey)`. Additive
+schema changes stay inside the current namespace; a relocating bump uses a new
+namespace plus `migrate_storage_keys` / `upgrade_and_migrate`. See
+`migrations.toml` for the human-readable note CI cross-checks against
+`schema_version()` (#88).
+
+### Previous WASM hash (#90)
+
+`initialize` records the genesis WASM hash; every successful `upgrade` copies
+it into `previous_wasm_hash` before installing the new blob.
+`get_previous_wasm_hash()` lets explorers verify upgrade provenance without
+replaying the full event log.
+
 ---
 
-## 7. Future Enhancements (Out of Scope for Phase 1)
+## 7. Future Enhancements
 
-- **Timelocked upgrade**: Require a two-step process where `schedule_upgrade()` sets a pending hash and `execute_upgrade()` can only be called after N ledgers
-- **Emergency pause before upgrade**: Require the contract to be paused before an upgrade can execute, preventing race conditions with in-flight callbacks
+- ~~**Timelocked upgrade**~~ — **Done** (issue #81 / ADR-0004):
+  `propose_upgrade` / `finalize_upgrade` / `cancel_upgrade`
+- **Emergency pause before upgrade**: Require the contract to be paused before an upgrade can execute, preventing race conditions with in-flight callbacks (still F-05)
 - **DAO-controlled admin**: Replace the single-address admin with a Soroban DAO contract
+- **Resumable multi-call migrations**: For transforms exceeding
+  `MAX_MIGRATION_STORAGE_TOUCHES` (ADR-0005 v1 documents the limitation)
 
 ---
 
@@ -267,3 +322,14 @@ Unit tests in `validation.rs` cover:
 - [SEP-23: Strkeys](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md)
 - [Stellar Go `strkey` + CRC16-XModem](https://github.com/stellar/go/tree/master/strkey)
 
+
+## Timelocked relay-signer rotation
+
+`propose_relay_signer` / `finalize_relay_signer` / `cancel_relay_signer_change`
+mirror the two-step admin transfer (ADR-0002): pending state in persistent storage,
+one event per step, admin-gated. Delay is in ledgers (default 17_280, about 24h;
+configurable via `set_relay_signer_delay`). A second proposal replaces the pending
+one and restarts the delay. Assumptions: with the N-of-M set (ADR-0004) only the
+primary signer slot is rotated; the legacy immediate `set_relay_signer` stays for
+backward compatibility until a non-zero delay is configured, after which it returns
+`TimelockRequired`.
