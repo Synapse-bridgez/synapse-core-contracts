@@ -43,12 +43,10 @@
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
-    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
+    Address, Env, IntoVal, String, Symbol, TryFromVal,
 };
 
-use crate::types::{
-    CallbackPayload, CallbackType, ContractError, DataKey, StorageKey, TransactionStatus,
-};
+use crate::types::{CallbackPayload, CallbackType, ContractError, StorageKey, TransactionStatus};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -61,8 +59,7 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
     (env, client, admin, relay)
 }
 
@@ -98,13 +95,13 @@ fn default_payload(env: &Env) -> CallbackPayload {
 fn assert_topics(
     env: &Env,
     topics: &soroban_sdk::Vec<soroban_sdk::Val>,
-    name: soroban_sdk::Symbol,
+    name: &soroban_sdk::Symbol,
 ) {
     assert_eq!(topics.len(), 2);
     let t0 = Symbol::try_from_val(env, &topics.get_unchecked(0)).unwrap();
     let t1 = Symbol::try_from_val(env, &topics.get_unchecked(1)).unwrap();
     assert_eq!(t0, symbol_short!("synapse"));
-    assert_eq!(t1, name);
+    assert_eq!(&t1, name);
 }
 
 // ─── initialize() ─────────────────────────────────────────────────────────────
@@ -118,15 +115,14 @@ fn test_initialize_happy_path() {
     let relay = Address::generate(&env);
 
     assert!(!client.health());
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
     assert!(client.health());
 }
 
 #[test]
 fn test_initialize_rejects_double_init() {
-    let (env, client, admin, relay) = setup();
-    let result = client.try_initialize(&admin, &relay, &BytesN::from_array(&env, &[0x01u8; 32]));
+    let (_env, client, admin, relay) = setup();
+    let result = client.try_initialize(&admin, &relay);
     assert_eq!(result, Err(Ok(ContractError::AlreadyInitialised)));
 }
 
@@ -215,8 +211,7 @@ fn test_register_callback_rejects_non_relay_caller() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let attacker = Address::generate(&env);
     let payload = default_payload(&env);
@@ -407,8 +402,7 @@ fn test_start_processing_accepts_scoped_relay_auth() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let payload = default_payload(&env);
     let tx_id = client
@@ -445,8 +439,7 @@ fn test_start_processing_rejects_when_wrong_address_authorised() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let payload = default_payload(&env);
     let tx_id = client
@@ -619,9 +612,9 @@ fn test_admin_query_rejects_before_initialise() {
 
 #[test]
 fn test_admin_and_relay_signer_queries_reflect_rotation() {
-    let (_env, client, _admin, _relay) = setup();
-    let new_admin = Address::generate(&_env);
-    let new_relay = Address::generate(&_env);
+    let (env, client, _admin, _relay) = setup();
+    let new_admin = Address::generate(&env);
+    let new_relay = Address::generate(&env);
 
     client.propose_admin(&new_admin);
     client.accept_admin(&new_admin);
@@ -640,8 +633,7 @@ fn test_admin_transfer_two_step_happy_path() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let new_admin = Address::generate(&env);
 
@@ -712,8 +704,7 @@ fn test_propose_admin_rejects_non_admin() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let attacker = Address::generate(&env);
     let new_admin = Address::generate(&env);
@@ -744,8 +735,8 @@ fn test_propose_admin_rejects_self_nomination() {
 
 #[test]
 fn test_accept_admin_rejects_when_none_pending() {
-    let (_env, client, _admin, _relay) = setup();
-    let someone = Address::generate(&_env);
+    let (env, client, _admin, _relay) = setup();
+    let someone = Address::generate(&env);
     let result = client.try_accept_admin(&someone);
     assert_eq!(result, Err(Ok(ContractError::NoPendingAdminTransfer)));
 }
@@ -761,8 +752,7 @@ fn test_accept_admin_rejects_wrong_caller() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let new_admin = Address::generate(&env);
     let bystander = Address::generate(&env);
@@ -804,7 +794,7 @@ fn test_propose_admin_overwrites_prior_pending_nominee() {
     assert_eq!(client.pending_admin(), Some(first_nominee.clone()));
 
     client.propose_admin(&second_nominee);
-    assert_eq!(client.pending_admin(), Some(second_nominee.clone()));
+    assert_eq!(client.pending_admin(), Some(second_nominee));
 
     // The superseded first nominee can no longer accept.
     let result = client.try_accept_admin(&first_nominee);
@@ -839,7 +829,7 @@ fn test_set_relay_signer_emits_relay_signer_rotated_event() {
 
     let events = env.events().all();
     let last = events.get_unchecked(events.len() - 1);
-    assert_topics(&env, &last.1, symbol_short!("relay"));
+    assert_topics(&env, &last.1, &symbol_short!("relay"));
 }
 
 #[test]
@@ -849,8 +839,7 @@ fn test_relay_rotation_mid_lifecycle_enforces_new_signer() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let payload = default_payload(&env);
     let tx_id = client
@@ -935,7 +924,7 @@ fn test_register_emits_transaction_registered_event() {
 
     let events = env.events().all();
     let last = events.get_unchecked(events.len() - 1);
-    assert_topics(&env, &last.1, symbol_short!("reg"));
+    assert_topics(&env, &last.1, &symbol_short!("reg"));
 }
 
 #[test]
@@ -955,8 +944,8 @@ fn test_complete_emits_status_changed_and_completed_events() {
     assert_eq!(events.len(), 2);
     let status_evt = events.get_unchecked(0);
     let done_evt = events.get_unchecked(1);
-    assert_topics(&env, &status_evt.1, symbol_short!("status"));
-    assert_topics(&env, &done_evt.1, symbol_short!("done"));
+    assert_topics(&env, &status_evt.1, &symbol_short!("status"));
+    assert_topics(&env, &done_evt.1, &symbol_short!("done"));
 }
 
 // ─── Idempotency & TTL ─────────────────────────────────────────────────────────
@@ -998,12 +987,10 @@ fn test_idempotency_key_expires_after_ttl() {
         env.storage().instance().extend_ttl(100_000, 100_000);
         env.storage()
             .persistent()
-            .extend_ttl(&StorageKey::ns(DataKey::Admin), 100_000, 100_000);
-        env.storage().persistent().extend_ttl(
-            &StorageKey::ns(DataKey::RelaySigner),
-            100_000,
-            100_000,
-        );
+            .extend_ttl(&StorageKey::Admin, 100_000, 100_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&StorageKey::RelaySigner, 100_000, 100_000);
     });
 
     // Jump past the ~24h / 18_000-ledger idempotency TTL.
@@ -1041,18 +1028,16 @@ fn test_register_callback_rejects_duplicate_transaction_id_after_idempotency_exp
         env.storage().instance().extend_ttl(100_000, 100_000);
         env.storage()
             .persistent()
-            .extend_ttl(&StorageKey::ns(DataKey::Admin), 100_000, 100_000);
-        env.storage().persistent().extend_ttl(
-            &StorageKey::ns(DataKey::RelaySigner),
-            100_000,
-            100_000,
-        );
+            .extend_ttl(&StorageKey::Admin, 100_000, 100_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&StorageKey::RelaySigner, 100_000, 100_000);
     });
     env.ledger().with_mut(|li| li.sequence_number += 18_001);
 
-    let mut replay = payload_with(&env, "tx-1", "idem-1-replay");
-    replay.transaction_id = String::from_str(&env, "tx-1");
-    let result = client.try_register_callback(&replay);
+    let mut replayed = payload_with(&env, "tx-1", "idem-1-replay");
+    replayed.transaction_id = String::from_str(&env, "tx-1");
+    let result = client.try_register_callback(&replayed);
     assert_eq!(result, Err(Ok(ContractError::DuplicateRequest)));
 
     // The original Completed record — including its audit-trail fields —
@@ -1067,7 +1052,7 @@ fn test_register_callback_rejects_duplicate_transaction_id_after_idempotency_exp
 /// Payload-snapshot test for `EventDisputeRaised`.
 ///
 /// Verifies that the emitter publishes topics `synapse` / `dispute` and that
-/// all payload fields (tx_id, reason, caller, ledger) are recorded correctly.
+/// all payload fields (`tx_id`, reason, caller, ledger) are recorded correctly.
 /// Uses `env.as_contract` to call the emitter directly — the dispute
 /// entry-points that will wire these live in a sibling issue.
 #[test]
@@ -1215,6 +1200,7 @@ fn test_full_lifecycle_pending_to_processing_to_completed() {
 
 // ─── cancel_transaction ───────────────────────────────────────────────────────
 
+#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_cancel_transaction_by_relay_and_admin() {
     let (env, client, admin, relay) = setup();
@@ -1228,13 +1214,16 @@ fn test_cancel_transaction_by_relay_and_admin() {
     assert_eq!(client.get_status(&b), TransactionStatus::Cancelled);
 }
 
+#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_cancel_transaction_rejects_stranger_and_illegal_states() {
     let (env, client, _admin, relay) = setup();
     let reason = String::from_str(&env, "r");
     let tx_id = client.register_callback(&payload_with(&env, "tx-c3", "k-c3"));
     let stranger = Address::generate(&env);
-    assert!(client.try_cancel_transaction(&tx_id, &reason, &stranger).is_err());
+    assert!(client
+        .try_cancel_transaction(&tx_id, &reason, &stranger)
+        .is_err());
 
     client.cancel_transaction(&tx_id, &reason, &relay);
     assert_eq!(
@@ -1266,6 +1255,7 @@ fn test_cancel_transaction_rejects_stranger_and_illegal_states() {
 
 // ─── retry_transaction ────────────────────────────────────────────────────────
 
+#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_retry_transaction_cycle_and_limit() {
     let (env, client, _admin, relay) = setup();
@@ -1286,6 +1276,7 @@ fn test_retry_transaction_cycle_and_limit() {
     );
 }
 
+#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_retry_transaction_rejects_non_failed() {
     let (env, client, _admin, relay) = setup();
@@ -1298,6 +1289,7 @@ fn test_retry_transaction_rejects_non_failed() {
 
 // ─── get_transactions_by_status ───────────────────────────────────────────────
 
+#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_get_transactions_by_status_pagination_and_transitions() {
     let (env, client, _admin, relay) = setup();
@@ -1319,6 +1311,7 @@ fn test_get_transactions_by_status_pagination_and_transitions() {
     assert_eq!(proc.len(), 1);
 }
 
+#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_get_transactions_by_status_rejects_bad_limit() {
     let (_env, client, _admin, _relay) = setup();
@@ -1357,7 +1350,9 @@ fn test_batch_register_callback_is_atomic_and_bounded() {
     v.push_back(payload_with(&env, "tx-b3", "k-b3"));
     v.push_back(bad);
     assert!(client.try_batch_register_callback(&v, &relay).is_err());
-    assert!(client.try_get_status(&String::from_str(&env, "tx-b3")).is_err());
+    assert!(client
+        .try_get_status(&String::from_str(&env, "tx-b3"))
+        .is_err());
 
     // Duplicate of an on-chain id aborts the whole batch.
     client.register_callback(&payload_with(&env, "tx-b5", "k-b5"));
@@ -1368,7 +1363,9 @@ fn test_batch_register_callback_is_atomic_and_bounded() {
         client.try_batch_register_callback(&d, &relay),
         Err(Ok(ContractError::DuplicateRequest))
     );
-    assert!(client.try_get_status(&String::from_str(&env, "tx-b6")).is_err());
+    assert!(client
+        .try_get_status(&String::from_str(&env, "tx-b6"))
+        .is_err());
 
     // Empty batch rejected.
     let empty = soroban_sdk::Vec::new(&env);

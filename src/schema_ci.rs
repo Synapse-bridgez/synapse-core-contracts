@@ -47,13 +47,10 @@ fn schema_version_constant_has_exact_manifest_entry() {
 
 #[test]
 fn schema_version_from_release_wasm_matches_manifest() {
-    let wasm_path = match std::env::var("SYNAPSE_SCHEMA_CHECK_WASM") {
-        Ok(p) => p,
-        Err(_) => {
-            // Not in the CI schema-check mode; the constant↔manifest test above
-            // still guards drift for everyday `cargo test`.
-            return;
-        }
+    let Ok(wasm_path) = std::env::var("SYNAPSE_SCHEMA_CHECK_WASM") else {
+        // Not in the CI schema-check mode; the constant↔manifest test above
+        // still guards drift for everyday `cargo test`.
+        return;
     };
     let manifest_path =
         std::env::var("SYNAPSE_SCHEMA_CHECK_MANIFEST").unwrap_or_else(|_| "migrations.toml".into());
@@ -68,14 +65,14 @@ fn schema_version_from_release_wasm_matches_manifest() {
 
     let env = Env::default();
     let wasm = Bytes::from_slice(&env, &wasm_bytes);
-    let wasm_hash: BytesN<32> = env.deployer().upload_contract_wasm(wasm);
+    let _wasm_hash: BytesN<32> = env.deployer().upload_contract_wasm(wasm);
     // Deploy the *release* WASM into an ephemeral Soroban Env and invoke it.
     let contract_id = env.register(wasm_bytes.as_slice(), ());
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &relay, &wasm_hash);
+    client.initialize(&admin, &relay);
 
     let reported = client.schema_version();
     assert!(

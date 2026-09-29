@@ -12,15 +12,19 @@
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::types::{
-    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction, UnbondRequest,
+    AnchorTierConfig, BondRecord, ContractError, DisputeQueueEntry, DisputeRecord, ParamEntry,
+    StorageKey, Transaction, UnbondRequest, DEFAULT_GLOBAL_MAX_AMOUNT,
 };
+
+/// Param-registry name of the contract-wide amount ceiling (#169).
+pub const PARAM_GLOBAL_MAX_AMOUNT: &str = "global_max_amount";
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
 ///
-/// 24 * 3600 / 5 = 17_280 ledgers.  We round up to 18_000 for safety.
+/// 24 * 3600 / 5 = `17_280` ledgers.  We round up to `18_000` for safety.
 const IDEMPOTENCY_TTL_LEDGERS: u32 = 18_000;
 
 /// Minimum TTL we require on transaction records before extending.
@@ -136,7 +140,7 @@ impl StorageClient {
     /// Existence-only check — unlike [`Self::get_transaction`] it does not
     /// extend TTL, since it is used purely as a pre-write guard against
     /// `transaction_id` reuse (see `register_callback`'s duplicate-tx-id
-    /// check, THREAT_MODEL.md finding F-07).
+    /// check, `THREAT_MODEL.md` finding F-07).
     pub fn transaction_exists(env: &Env, tx_id: &String) -> bool {
         env.storage()
             .persistent()
@@ -285,5 +289,98 @@ impl StorageClient {
         env.storage()
             .persistent()
             .set(&StorageKey::AnchorTier(config.anchor.clone()), config);
+    }
+}
+
+// ─── Amount ceilings (#169) ───────────────────────────────────────────────────
+
+impl StorageClient {
+    /// Contract-wide ceiling: the `global_max_amount` param if set, else
+    /// [`DEFAULT_GLOBAL_MAX_AMOUNT`].
+    pub fn get_global_max_amount(env: &Env) -> i128 {
+        Self::get_param(env, &String::from_str(env, PARAM_GLOBAL_MAX_AMOUNT))
+            .map_or(DEFAULT_GLOBAL_MAX_AMOUNT, |e| e.value)
+    }
+
+    /// Explicit per-anchor ceiling for `anchor`, if one was set.
+    pub fn get_anchor_ceiling(env: &Env, anchor: &String) -> Option<i128> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::AnchorCeiling(anchor.clone()))
+    }
+
+    /// Set an explicit ceiling for `anchor`.
+    pub fn set_anchor_ceiling(env: &Env, anchor: &String, ceiling: i128) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AnchorCeiling(anchor.clone()), &ceiling);
+    }
+
+    /// Effective ceiling for `anchor`: the stricter (lower) of its explicit
+    /// ceiling, if any, and the global ceiling.
+    pub fn get_amount_ceiling(env: &Env, anchor: &String) -> i128 {
+        let global = Self::get_global_max_amount(env);
+        Self::get_anchor_ceiling(env, anchor).map_or(global, |c| c.min(global))
+    }
+}
+
+// ─── Disputes (#166) ──────────────────────────────────────────────────────────
+
+impl StorageClient {
+    /// Open-dispute record for `tx_id`, or `None` if not under dispute.
+    pub fn get_dispute(env: &Env, tx_id: &String) -> Option<DisputeRecord> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Dispute(tx_id.clone()))
+    }
+
+    /// Open-dispute queue, oldest first.
+    pub fn get_dispute_queue(env: &Env) -> Vec<DisputeQueueEntry> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::DisputeQueue)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Allocate the next dispute sequence number.
+    pub fn next_dispute_seq(env: &Env) -> u64 {
+        let seq: u64 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::DisputeSeq)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::DisputeSeq, &(seq + 1));
+        seq
+    }
+
+    /// Persist `record` and append `tx_id` to the tail of the queue.
+    pub fn open_dispute(env: &Env, tx_id: &String, record: &DisputeRecord) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Dispute(tx_id.clone()), record);
+        let mut queue = Self::get_dispute_queue(env);
+        queue.push_back(DisputeQueueEntry {
+            seq: record.seq,
+            tx_id: tx_id.clone(),
+        });
+        env.storage()
+            .persistent()
+            .set(&StorageKey::DisputeQueue, &queue);
+    }
+
+    /// Remove the dispute record for `tx_id` and its queue entry.
+    pub fn close_dispute(env: &Env, tx_id: &String, seq: u64) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::Dispute(tx_id.clone()));
+        let mut queue = Self::get_dispute_queue(env);
+        if let Some(i) = (0..queue.len()).find(|&i| queue.get_unchecked(i).seq == seq) {
+            queue.remove(i);
+        }
+        env.storage()
+            .persistent()
+            .set(&StorageKey::DisputeQueue, &queue);
     }
 }
