@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, String};
 
 /// Current on-chain storage schema version.
 ///
@@ -187,6 +187,17 @@ pub enum StorageKey {
     // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
     /// Per-anchor tier config keyed by the anchor address.
     AnchorTier(soroban_sdk::Address),
+
+    // ── Fee / Treasury (#141, #142) ──────────────────────────────────────────
+    // Fee rate and withdrawal limits are registry params, not keys here.
+    /// Singleton: accumulated fee balance in stroops, accrued at completion.
+    TreasuryBalance,
+    /// Singleton: pending treasury withdrawal awaiting relay co-authorization.
+    PendingWithdrawal,
+    /// Singleton: amount withdrawn in the current epoch, for cap enforcement.
+    EpochWithdrawn,
+    /// Singleton: ledger sequence number when the current epoch started.
+    EpochStart,
 }
 
 // ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
@@ -296,6 +307,40 @@ pub struct AnchorTierConfig {
     pub updated_at_ledger: u32,
 }
 
+// ─── Treasury / fee types ─────────────────────────────────────────────────────
+
+/// Effective treasury withdrawal limits.
+///
+/// Not stored directly: returned by `treasury_config()` from the
+/// `treasury_epoch_cap` and `treasury_epoch_length` registry params.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreasuryConfig {
+    /// Maximum amount (in stroops) that may be withdrawn per epoch.
+    pub epoch_cap: i128,
+    /// Length of one epoch in ledgers (≈ number of ledgers in the cap window).
+    pub epoch_length: u32,
+}
+
+/// A pending treasury withdrawal that requires co-authorization.
+///
+/// Proposed by the admin; must be co-authorized by the relay signer (or a
+/// second admin action in a future multi-admin design) before funds move.
+/// Stored in persistent ledger storage keyed by
+/// [`StorageKey::PendingWithdrawal`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingWithdrawal {
+    /// Amount to withdraw in stroops.
+    pub amount: i128,
+    /// Destination address for the withdrawn funds.
+    pub destination: Address,
+    /// Ledger sequence at which this proposal was made.
+    pub proposed_at_ledger: u32,
+    /// Address that proposed the withdrawal (must be admin).
+    pub proposed_by: Address,
+}
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 /// All error codes returned by the contract.
@@ -398,4 +443,24 @@ pub enum ContractError {
     InvalidTierLabel = 101,
     /// `get_anchor_tier` / `compute_effective_fee` anchor has no tier set.
     AnchorTierNotFound = 102,
+
+    // ── Fee / Treasury (#141, #142) ─────────────────────────────────────────
+    /// Withdrawal amount is zero or negative.
+    InvalidWithdrawalAmount = 110,
+    /// Withdrawal would exceed the per-epoch cap.
+    WithdrawalCapExceeded = 111,
+    /// No pending withdrawal proposal exists to authorize.
+    NoPendingWithdrawal = 112,
+    /// Caller of `authorize_withdrawal` is not the relay signer.
+    WithdrawalNotRelaySigner = 113,
+    /// Treasury balance is insufficient for the requested withdrawal.
+    InsufficientTreasuryBalance = 114,
+    /// `treasury_epoch_cap` / `treasury_epoch_length` params are not both set.
+    TreasuryNotConfigured = 115,
+    /// A fee, treasury, or epoch-counter computation would overflow or
+    /// underflow. Rejected rather than wrapped so accounting is never corrupted.
+    ArithmeticOverflow = 116,
+    /// `amount`/`destination` passed to `authorize_withdrawal` do not match
+    /// the pending proposal (e.g. the admin replaced it after relay review).
+    WithdrawalProposalMismatch = 117,
 }

@@ -540,7 +540,7 @@ fn test_events_md_conforms_to_manifest() {
 fn test_manifest_is_well_formed() {
     let (schema_version, events) = parse_manifest(MANIFEST_SRC);
     assert!(schema_version > 0, "schema_version must be ≥ 1");
-    assert_eq!(events.len(), 10, "Expected exactly 10 events in the manifest");
+    assert_eq!(events.len(), 13, "Expected exactly 13 events in the manifest");
 
     for ev in &events {
         assert!(
@@ -583,6 +583,7 @@ fn test_manifest_is_well_formed() {
 fn test_manifest_contains_all_expected_topics() {
     let expected_topics = [
         "init", "reg", "status", "done", "fail", "propose", "admin", "relay", "upgrade", "pause",
+        "fee", "wprop", "wexec",
     ];
     let (_schema_version, events) = parse_manifest(MANIFEST_SRC);
     let manifest_topics: Vec<&str> = events.iter().map(|e| e.topic.as_str()).collect();

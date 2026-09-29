@@ -290,6 +290,49 @@ pub struct EventRebateApplied {
     pub ledger: u32,
 }
 
+// ─── Fee / treasury event data structs (#141, #142) ─────────────────────────
+
+/// Emitted by [`SynapseCoreContract::complete_transaction`] when a fee is
+/// accrued to the treasury.
+#[contracttype]
+pub struct EventFeeAccrued {
+    /// The transaction ID that triggered the fee.
+    pub tx_id: String,
+    /// The fee amount in stroops.
+    pub fee_amount: i128,
+    /// The new treasury balance in stroops after accrual.
+    pub treasury_balance: i128,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::propose_withdrawal`] when a treasury
+/// withdrawal is proposed by the admin.
+#[contracttype]
+pub struct EventWithdrawalProposed {
+    /// Admin that proposed the withdrawal.
+    pub proposed_by: soroban_sdk::Address,
+    /// Amount proposed for withdrawal in stroops.
+    pub amount: i128,
+    /// Destination address.
+    pub destination: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::authorize_withdrawal`] when the relay
+/// signer co-authorizes and executes a treasury withdrawal.
+#[contracttype]
+pub struct EventWithdrawalExecuted {
+    /// Relay signer that co-authorized the withdrawal.
+    pub authorized_by: soroban_sdk::Address,
+    /// Amount withdrawn in stroops.
+    pub amount: i128,
+    /// Destination address.
+    pub destination: soroban_sdk::Address,
+    /// New treasury balance after withdrawal.
+    pub treasury_balance: i128,
+    pub ledger: u32,
+}
+
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
 pub struct EventEmitter;
@@ -617,6 +660,60 @@ impl EventEmitter {
         );
     }
 
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    // ── Fee / treasury emitters (#141, #142) ────────────────────────────────
+
+    /// Emit [`EventFeeAccrued`] when a fee is accrued to the treasury.
+    pub fn fee_accrued(env: &Env, tx_id: &String, fee_amount: i128, treasury_balance: i128) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("fee")),
+            EventFeeAccrued {
+                tx_id: tx_id.clone(),
+                fee_amount,
+                treasury_balance,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventWithdrawalProposed`] when the admin proposes a treasury withdrawal.
+    pub fn withdrawal_proposed(
+        env: &Env,
+        proposed_by: &soroban_sdk::Address,
+        amount: i128,
+        destination: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("wprop")),
+            EventWithdrawalProposed {
+                proposed_by: proposed_by.clone(),
+                amount,
+                destination: destination.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventWithdrawalExecuted`] when a treasury withdrawal is co-authorized
+    /// and executed.
+    pub fn withdrawal_executed(
+        env: &Env,
+        authorized_by: &soroban_sdk::Address,
+        amount: i128,
+        destination: &soroban_sdk::Address,
+        treasury_balance: i128,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("wexec")),
+            EventWithdrawalExecuted {
+                authorized_by: authorized_by.clone(),
+                amount,
+                destination: destination.clone(),
+                treasury_balance,
                 ledger: env.ledger().sequence(),
             },
         );

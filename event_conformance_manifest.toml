@@ -262,3 +262,76 @@ type = "soroban_sdk::Address"
 [[event.fields]]
 name = "ledger"
 type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventFeeAccrued"
+topic       = "fee"
+emitter_fn  = "fee_accrued"
+
+[[event.fields]]
+name = "tx_id"
+type = "String"
+
+[[event.fields]]
+name = "fee_amount"
+type = "i128"
+
+[[event.fields]]
+name = "treasury_balance"
+type = "i128"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventWithdrawalProposed"
+topic       = "wprop"
+emitter_fn  = "withdrawal_proposed"
+
+[[event.fields]]
+name = "proposed_by"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "amount"
+type = "i128"
+
+[[event.fields]]
+name = "destination"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventWithdrawalExecuted"
+topic       = "wexec"
+emitter_fn  = "withdrawal_executed"
+
+[[event.fields]]
+name = "authorized_by"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "amount"
+type = "i128"
+
+[[event.fields]]
+name = "destination"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "treasury_balance"
+type = "i128"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"

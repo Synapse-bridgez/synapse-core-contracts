@@ -81,6 +81,9 @@ supported.
 | [`EventAutoUnpaused`](#eventautounpaused) | `aunpause` | `EventEmitter::auto_unpaused` | `unpause_auto` (quorum met) | **Live** |
 | [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` (sibling issue) | **Schema locked** |
 | [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` (sibling issue) | **Schema locked** |
+| [`EventFeeAccrued`](#eventfeeaccrued) | `fee` | `EventEmitter::fee_accrued` | `complete_transaction` (non-zero fee only) | **Live** |
+| [`EventWithdrawalProposed`](#eventwithdrawalproposed) | `wprop` | `EventEmitter::withdrawal_proposed` | `propose_withdrawal` | **Live** |
+| [`EventWithdrawalExecuted`](#eventwithdrawalexecuted) | `wexec` | `EventEmitter::withdrawal_executed` | `authorize_withdrawal` | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -599,6 +602,61 @@ Verified by snapshot-style tests
 `tests::test_dispute_resolved_upheld_false_event_payload_snapshot`
 (topics `synapse` / `dsprslvd`).
 
+
+### EventFeeAccrued
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `fee` |
+| **Struct** | `EventFeeAccrued` |
+| **Emitted by** | `complete_transaction` |
+| **When** | After `done`, only when `floor(amount * base_fee_bps / 10_000) > 0` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction whose completion accrued the fee |
+| `fee_amount` | `i128` | Fee added to the treasury, in stroops |
+| `treasury_balance` | `i128` | Treasury balance after accrual |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+Fee-rate changes are observable as `param` events for `base_fee_bps`.
+
+### EventWithdrawalProposed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `wprop` |
+| **Struct** | `EventWithdrawalProposed` |
+| **Emitted by** | `propose_withdrawal` |
+| **When** | Admin records a pending treasury withdrawal (step 1 of 2; replaces any earlier pending proposal) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `proposed_by` | `Address` | Admin that proposed |
+| `amount` | `i128` | Proposed amount, in stroops |
+| `destination` | `Address` | Proposed recipient |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventWithdrawalExecuted
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `wexec` |
+| **Struct** | `EventWithdrawalExecuted` |
+| **Emitted by** | `authorize_withdrawal` |
+| **When** | Relay signer co-authorizes the matching pending proposal and the treasury is debited (step 2 of 2) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `authorized_by` | `Address` | Relay signer that co-authorized |
+| `amount` | `i128` | Amount debited, in stroops |
+| `destination` | `Address` | Recipient |
+| `treasury_balance` | `i128` | Treasury balance after the debit |
+| `ledger` | `u32` | Ledger sequence at emit |
+
 ---
 
 ## 4. Additive trailing-field pattern (required convention)
@@ -631,7 +689,7 @@ names, types, and order are frozen.
 | `register_callback` (first write) | 1. `reg` |
 | `register_callback` (idempotent hit) | *(no events)* |
 | `start_processing` | 1. `status` (`Pending` → `Processing`) |
-| `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
+| `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done`<br>3. `fee` *(only when a non-zero fee accrues)* |
 | `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
 | `propose_admin` | 1. `propose` |
 | `accept_admin` | 1. `admin` |
@@ -644,6 +702,8 @@ names, types, and order are frozen.
 | `rollback_upgrade` | 1. `upgrade`<br>2. `rollback` |
 | `upgrade_and_migrate` | 1. `upgrade`<br>2. `migrate` |
 | `pause` / `unpause` | 1. `pause` |
+| `propose_withdrawal` | 1. `wprop` |
+| `authorize_withdrawal` | 1. `wexec` |
 | `set_signer_attestation` | 1. `attest` |
 | `renounce_admin` | 1. `renounce` |
 | `set_guardian` | 1. `guardian` |
@@ -682,6 +742,8 @@ Future entry-points wiring the dispute events (sibling issue):
 `done` still see completion; those that key off `status` with
 `new_status == Completed` see the transition first, then the hash-bearing
 `done` payload. Reordering would break dual-subscriber setups.
+`fee` is appended **after** `done` so subscribers relying on the
+`status` → `done` pair see no change in relative order.
 
 ---
 

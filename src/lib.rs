@@ -33,7 +33,11 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod test_accepted_risks;
+#[cfg(test)]
 mod test_events_conformance;
+#[cfg(test)]
+mod test_fee_treasury;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
@@ -53,8 +57,8 @@ use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::StorageClient;
 use crate::types::{
-    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, ParamEntry, SlashEvidence,
-    Transaction, TransactionStatus, UnbondRequest, SCHEMA_VERSION,
+    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, ParamEntry, PendingWithdrawal,
+    SlashEvidence, Transaction, TransactionStatus, TreasuryConfig, UnbondRequest, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -70,8 +74,9 @@ const DEFAULT_SLASH_BPS: i128 = 10_000;
 /// Operators may also store arbitrary application-level params under other names.
 const PARAM_UNBOND_DELAY: &str = "unbond_delay_ledgers";
 const PARAM_SLASH_BPS: &str = "slash_bps";
-#[allow(dead_code)]
 const PARAM_BASE_FEE_BPS: &str = "base_fee_bps";
+const PARAM_TREASURY_EPOCH_CAP: &str = "treasury_epoch_cap";
+const PARAM_TREASURY_EPOCH_LENGTH: &str = "treasury_epoch_length";
 
 /// Maximum length (bytes) for a param name string.
 const MAX_PARAM_NAME_LEN: u32 = 32;
@@ -214,6 +219,11 @@ impl SynapseCoreContract {
     ///
     /// `stellar_tx_hash` — the Stellar transaction hash confirming the deposit
     ///                     was settled on Horizon. Stored for auditability.
+    ///
+    /// # Fee accrual
+    /// If the `base_fee_bps` registry param is set and non-zero, a fee of
+    /// `floor(amount * base_fee_bps / 10_000)` is added to the on-chain
+    /// treasury balance and a `fee` event is emitted after `done`.
     pub fn complete_transaction(
         env: Env,
         tx_id: String,
@@ -235,6 +245,18 @@ impl SynapseCoreContract {
         StorageClient::save_transaction(&env, &tx);
         EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
         EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
+
+        // Fee accrual: calculate and accumulate fee to treasury. The rate is
+        // read at completion time, so later `set_param` calls never touch
+        // fees already accrued.
+        let fee_amount = Self::compute_fee(tx.amount, Self::fee_bps_param(&env)?)?;
+        if fee_amount > 0 {
+            let new_balance = StorageClient::get_treasury_balance(&env)
+                .checked_add(fee_amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            StorageClient::set_treasury_balance(&env, new_balance);
+            EventEmitter::fee_accrued(&env, &tx_id, fee_amount, new_balance);
+        }
 
         Ok(())
     }
@@ -381,6 +403,242 @@ impl SynapseCoreContract {
         Ok(())
     }
 
+    // ── Fee accrual & treasury (#141, #142) ────────────────────────────────────
+
+    /// Read a registry param's raw value, or `None` if it has never been set.
+    fn param_value(env: &Env, name: &str) -> Option<i128> {
+        StorageClient::get_param(env, &String::from_str(env, name)).map(|entry| entry.value)
+    }
+
+    /// Current fee rate from the `base_fee_bps` param; `0` (no fee) when unset.
+    ///
+    /// `set_param` range-checks this param, so the error branch only fires
+    /// for a value stored before that check existed.
+    fn fee_bps_param(env: &Env) -> Result<u32, ContractError> {
+        match Self::param_value(env, PARAM_BASE_FEE_BPS) {
+            None => Ok(0),
+            Some(v) if (0..=10_000).contains(&v) => Ok(v as u32),
+            Some(_) => Err(ContractError::InvalidParamValue),
+        }
+    }
+
+    /// Treasury withdrawal limits from the `treasury_epoch_cap` and
+    /// `treasury_epoch_length` params; `None` until both are set.
+    fn treasury_config_params(env: &Env) -> Result<Option<TreasuryConfig>, ContractError> {
+        let cap = Self::param_value(env, PARAM_TREASURY_EPOCH_CAP);
+        let length = Self::param_value(env, PARAM_TREASURY_EPOCH_LENGTH);
+        match (cap, length) {
+            (Some(epoch_cap), Some(length)) => {
+                let epoch_length = u32::try_from(length)
+                    .ok()
+                    .filter(|l| *l > 0 && epoch_cap > 0)
+                    .ok_or(ContractError::InvalidParamValue)?;
+                Ok(Some(TreasuryConfig {
+                    epoch_cap,
+                    epoch_length,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Reject out-of-range values for the well-known params this contract
+    /// reads, so a typo cannot silently set a 200 % fee or a zero-length epoch.
+    fn validate_param_value(name: &String, value: i128) -> Result<(), ContractError> {
+        let env = name.env();
+        let in_range = if *name == String::from_str(env, PARAM_BASE_FEE_BPS) {
+            (0..=10_000).contains(&value)
+        } else if *name == String::from_str(env, PARAM_TREASURY_EPOCH_CAP) {
+            value > 0
+        } else if *name == String::from_str(env, PARAM_TREASURY_EPOCH_LENGTH) {
+            value > 0 && value <= i128::from(u32::MAX)
+        } else {
+            true
+        };
+        if in_range {
+            Ok(())
+        } else {
+            Err(ContractError::InvalidParamValue)
+        }
+    }
+
+    /// Compute `floor(amount * fee_bps / 10_000)` with checked arithmetic.
+    ///
+    /// Returns `0` for non-positive amounts or a zero rate. The product is
+    /// split as `q * bps + r * bps / 10_000` (where `amount = q * 10_000 + r`)
+    /// so the result is exact for every positive `i128` amount: `q * bps` is
+    /// at most `amount` because `bps <= 10_000`, and `r * bps < 10^8`. The
+    /// checked ops are defence in depth and surface as
+    /// [`ContractError::ArithmeticOverflow`] rather than wrapping.
+    fn compute_fee(amount: i128, fee_bps: u32) -> Result<i128, ContractError> {
+        if fee_bps == 0 || amount <= 0 {
+            return Ok(0);
+        }
+        let bps = i128::from(fee_bps);
+        let whole = (amount / 10_000).checked_mul(bps);
+        let part = (amount % 10_000).checked_mul(bps).map(|p| p / 10_000);
+        whole
+            .zip(part)
+            .and_then(|(w, p)| w.checked_add(p))
+            .ok_or(ContractError::ArithmeticOverflow)
+    }
+
+    /// Return the current accumulated treasury balance in stroops.
+    pub fn treasury_balance(env: Env) -> i128 {
+        StorageClient::get_treasury_balance(&env)
+    }
+
+    /// Step 1 of 2: Admin proposes a treasury withdrawal.
+    ///
+    /// The withdrawal does not execute immediately. It enters a `PendingWithdrawal`
+    /// state that must be co-authorized by the relay signer via
+    /// [`Self::authorize_withdrawal`] before any funds move.
+    ///
+    /// This two-party model ensures that a single compromised key (whether admin
+    /// or relay) cannot unilaterally drain the treasury.
+    ///
+    /// # Errors
+    /// - [`ContractError::TreasuryNotConfigured`] — the `treasury_epoch_cap` /
+    ///   `treasury_epoch_length` params are not both set.
+    /// - [`ContractError::InvalidWithdrawalAmount`] — `amount` is zero or negative.
+    /// - [`ContractError::InsufficientTreasuryBalance`] — treasury has less than `amount`.
+    ///
+    /// # Events
+    /// Emits [`events::EventWithdrawalProposed`].
+    pub fn propose_withdrawal(
+        env: Env,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+
+        // Treasury must be configured before any withdrawal can be proposed.
+        Self::treasury_config_params(&env)?.ok_or(ContractError::TreasuryNotConfigured)?;
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidWithdrawalAmount);
+        }
+        let balance = StorageClient::get_treasury_balance(&env);
+        if amount > balance {
+            return Err(ContractError::InsufficientTreasuryBalance);
+        }
+
+        let proposal = PendingWithdrawal {
+            amount,
+            destination: destination.clone(),
+            proposed_at_ledger: env.ledger().sequence(),
+            proposed_by: admin.clone(),
+        };
+        StorageClient::set_pending_withdrawal(&env, &proposal);
+        EventEmitter::withdrawal_proposed(&env, &admin, amount, &destination);
+        Ok(())
+    }
+
+    /// Step 2 of 2: Relay signer co-authorizes and executes a pending withdrawal.
+    ///
+    /// `caller` must be the relay signer (not the admin). This forces a different
+    /// key to co-sign, making unilateral admin-only treasury drainage impossible.
+    ///
+    /// `amount` and `destination` must restate the pending proposal exactly.
+    /// They are covered by the relay's signature, so the relay approves one
+    /// specific withdrawal: if the admin replaces the proposal after the relay
+    /// has reviewed it, the relay's co-signature no longer matches and the call
+    /// fails instead of executing the substituted proposal.
+    ///
+    /// The per-epoch cap is checked: the sum of withdrawals in the current epoch
+    /// must not exceed the `treasury_epoch_cap` param. If the epoch window has
+    /// expired (current ledger ≥ epoch_start + epoch_length), the counter resets
+    /// automatically.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoPendingWithdrawal`] — no proposal from the admin.
+    /// - [`ContractError::WithdrawalNotRelaySigner`] — `caller` is not the relay signer.
+    /// - [`ContractError::WithdrawalProposalMismatch`] — `amount`/`destination`
+    ///   differ from the pending proposal.
+    /// - [`ContractError::WithdrawalCapExceeded`] — would exceed the epoch cap.
+    /// - [`ContractError::InsufficientTreasuryBalance`] — balance changed since proposal.
+    ///
+    /// # Events
+    /// Emits [`events::EventWithdrawalExecuted`].
+    pub fn authorize_withdrawal(
+        env: Env,
+        caller: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), ContractError> {
+        let relay = StorageClient::get_relay_signer(&env)?;
+        if caller != relay {
+            return Err(ContractError::WithdrawalNotRelaySigner);
+        }
+        caller.require_auth();
+
+        let proposal = StorageClient::get_pending_withdrawal(&env)
+            .ok_or(ContractError::NoPendingWithdrawal)?;
+        if proposal.amount != amount || proposal.destination != destination {
+            return Err(ContractError::WithdrawalProposalMismatch);
+        }
+
+        let config =
+            Self::treasury_config_params(&env)?.ok_or(ContractError::TreasuryNotConfigured)?;
+
+        // Check / reset epoch.
+        let now = env.ledger().sequence();
+        let epoch_start = StorageClient::get_epoch_start(&env);
+        let in_new_epoch = match epoch_start {
+            None => true,
+            // Saturating: an epoch that would end past u32::MAX never expires.
+            Some(start) => now >= start.saturating_add(config.epoch_length),
+        };
+        if in_new_epoch {
+            StorageClient::reset_epoch(&env, now);
+        }
+
+        // Per-epoch cap enforcement.
+        let epoch_total = StorageClient::get_epoch_withdrawn(&env)
+            .checked_add(proposal.amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if epoch_total > config.epoch_cap {
+            return Err(ContractError::WithdrawalCapExceeded);
+        }
+
+        // Final balance check (balance may have changed since the proposal).
+        let balance = StorageClient::get_treasury_balance(&env);
+        if proposal.amount > balance {
+            return Err(ContractError::InsufficientTreasuryBalance);
+        }
+
+        // Execute: deduct from treasury and update epoch counter.
+        let new_balance = balance
+            .checked_sub(proposal.amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        StorageClient::set_treasury_balance(&env, new_balance);
+        StorageClient::add_epoch_withdrawn(&env, proposal.amount)?;
+        StorageClient::clear_pending_withdrawal(&env);
+
+        EventEmitter::withdrawal_executed(
+            &env,
+            &caller,
+            proposal.amount,
+            &proposal.destination,
+            new_balance,
+        );
+        Ok(())
+    }
+
+    /// Return the pending withdrawal proposal, if one exists.
+    pub fn pending_withdrawal(env: Env) -> Option<PendingWithdrawal> {
+        StorageClient::get_pending_withdrawal(&env)
+    }
+
+    /// Return the effective treasury withdrawal limits, or `None` until both
+    /// `treasury_epoch_cap` and `treasury_epoch_length` params are set.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidParamValue`] — a stored param is out of range.
+    pub fn treasury_config(env: Env) -> Result<Option<TreasuryConfig>, ContractError> {
+        Self::treasury_config_params(&env)
+    }
+
     // ── Contract upgrade ───────────────────────────────────────────────────────
 
     /// Replace the contract WASM in-place.
@@ -476,7 +734,14 @@ impl SynapseCoreContract {
     /// |-------------------------|-----------------------------------------------|
     /// | `unbond_delay_ledgers`  | Ledgers before an unbond request is claimable |
     /// | `slash_bps`             | Slash percentage in basis points (0–10_000)   |
-    /// | `base_fee_bps`          | Base fee rate in basis points                 |
+    /// | `base_fee_bps`          | Fee accrued at completion, 0–10_000 bps       |
+    /// | `treasury_epoch_cap`    | Max stroops withdrawable per epoch, > 0       |
+    /// | `treasury_epoch_length` | Withdrawal-cap epoch in ledgers, 1–`u32::MAX` |
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidParamName`] — empty or over-long name.
+    /// - [`ContractError::InvalidParamValue`] — a fee/treasury param above is
+    ///   outside its stated range.
     ///
     /// # Events
     /// Emits [`events::EventParamSet`].
@@ -486,6 +751,7 @@ impl SynapseCoreContract {
         if name.is_empty() || name.len() > MAX_PARAM_NAME_LEN {
             return Err(ContractError::InvalidParamName);
         }
+        Self::validate_param_value(&name, value)?;
 
         let entry = ParamEntry {
             value,

@@ -15,7 +15,8 @@
 use soroban_sdk::{Address, Env, String};
 
 use crate::types::{
-    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction, UnbondRequest,
+    AnchorTierConfig, BondRecord, ContractError, ParamEntry, PendingWithdrawal, StorageKey,
+    Transaction, UnbondRequest,
 };
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
@@ -193,6 +194,91 @@ impl StorageClient {
             IDEMPOTENCY_TTL_LEDGERS,
             IDEMPOTENCY_TTL_LEDGERS,
         );
+    }
+
+    // ── Treasury balance ──────────────────────────────────────────────────────
+    //
+    // The fee rate and withdrawal limits live in the param registry
+    // (`base_fee_bps`, `treasury_epoch_cap`, `treasury_epoch_length`).
+
+    /// Read the accumulated treasury balance in stroops.
+    /// Returns `0` if no fees have been accrued yet.
+    pub fn get_treasury_balance(env: &Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::TreasuryBalance)
+            .unwrap_or(0i128)
+    }
+
+    /// Persist the treasury balance in stroops.
+    pub fn set_treasury_balance(env: &Env, balance: i128) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::TreasuryBalance, &balance);
+    }
+
+    // ── Pending withdrawal ────────────────────────────────────────────────────
+
+    /// Read the pending treasury withdrawal proposal, if one exists.
+    pub fn get_pending_withdrawal(env: &Env) -> Option<PendingWithdrawal> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::PendingWithdrawal)
+    }
+
+    /// Persist a pending treasury withdrawal proposal.
+    pub fn set_pending_withdrawal(env: &Env, proposal: &PendingWithdrawal) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PendingWithdrawal, proposal);
+    }
+
+    /// Clear the pending withdrawal after it is executed or cancelled.
+    pub fn clear_pending_withdrawal(env: &Env) {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::PendingWithdrawal);
+    }
+
+    // ── Epoch tracking for per-epoch withdrawal cap ───────────────────────────
+
+    /// Read the amount withdrawn in the current epoch.
+    /// Returns `0` if no withdrawals have occurred this epoch.
+    pub fn get_epoch_withdrawn(env: &Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::EpochWithdrawn)
+            .unwrap_or(0i128)
+    }
+
+    /// Read the ledger sequence when the current epoch started.
+    /// Returns `None` if no epoch has started (i.e., no withdrawal has ever occurred).
+    pub fn get_epoch_start(env: &Env) -> Option<u32> {
+        env.storage().persistent().get(&StorageKey::EpochStart)
+    }
+
+    /// Reset epoch tracking: set the epoch start to `now` and zero the withdrawn amount.
+    pub fn reset_epoch(env: &Env, now: u32) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::EpochStart, &now);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::EpochWithdrawn, &0i128);
+    }
+
+    /// Add `amount` to the epoch-withdrawn counter.
+    ///
+    /// # Errors
+    /// [`ContractError::ArithmeticOverflow`] if the counter would overflow.
+    pub fn add_epoch_withdrawn(env: &Env, amount: i128) -> Result<(), ContractError> {
+        let updated = Self::get_epoch_withdrawn(env)
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&StorageKey::EpochWithdrawn, &updated);
+        Ok(())
     }
 }
 

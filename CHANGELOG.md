@@ -34,8 +34,32 @@ separately from general code changes. Full topic/field contracts live in
   `EventUpgradeSelfCheckFailed` (topic `chk_fail`), emitted by `upgrade`
   around the post-upgrade storage-integrity self-check. Additive new
   events — Minor bump.
+- Added `EventFeeAccrued` (`fee`), `EventWithdrawalProposed` (`wprop`), and
+  `EventWithdrawalExecuted` (`wexec`). Additive new events — Minor bump.
+  `fee` is emitted by `complete_transaction` **after** `done`, only when a
+  non-zero fee accrues; the existing `status` → `done` order is unchanged.
 
 ### Added
+
+- On-chain fee accrual (#141): `complete_transaction` accrues
+  `floor(amount * base_fee_bps / 10_000)` to `treasury_balance()`, reading
+  the existing `base_fee_bps` registry param (unset = no fee). The math is
+  overflow-free and checked (`ArithmeticOverflow`). See
+  [ADR-0008](./docs/adr/0008-fee-accrual-and-treasury-withdrawal.md).
+- Two-party treasury withdrawal (#142): admin `propose_withdrawal(amount,
+  destination)`, then relay-signer `authorize_withdrawal(caller, amount,
+  destination)`, which must restate the proposal
+  (`WithdrawalProposalMismatch` otherwise). Withdrawals are capped per epoch
+  by the `treasury_epoch_cap` / `treasury_epoch_length` params. Queries:
+  `treasury_config()`, `pending_withdrawal()`. New error codes 110–117.
+- `set_param` range-checks `base_fee_bps` (0–10 000), `treasury_epoch_cap`
+  (> 0), and `treasury_epoch_length` (1–`u32::MAX`), rejecting other values
+  with `InvalidParamValue`. Other param names are unchanged.
+- `src/test_accepted_risks.rs` (#139): executable tests for the THREAT_MODEL.md
+  §8 compensating controls, R-01 … R-06 (R-06 is new: treasury two-party auth).
+- `tools/export-test-vectors` and `test-vectors.json` (#140): portable test
+  vectors for independent auditor replay, documented in
+  [`docs/test-vectors.md`](./docs/test-vectors.md).
 
 - Timelocked upgrade flow (#81 / ADR-0004): `propose_upgrade`,
   `finalize_upgrade`, `cancel_upgrade`, `get_pending_upgrade`,
