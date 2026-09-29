@@ -213,18 +213,23 @@ pub struct EventSlashed {
     pub ledger: u32,
 }
 
-// ── Anchor Rebate (#145) ────────────────────────────────────────────────────────
-
-/// Emitted by [`SynapseCoreContract::set_anchor_tier`] when the admin sets or
-/// updates an anchor's rebate tier.
+/// Emitted when a dispute is raised against a transaction.
+///
+/// A dispute may be raised more than once over a transaction's lifetime if
+/// the dispute state machine permits re-disputing after a prior resolution.
+/// Subscribers correlate raised/resolved pairs via the shared `tx_id` field.
+///
+/// Downstream support tooling and admin dashboards subscribe to this event
+/// to surface disputes in real time without polling ledger state.
 #[contracttype]
-pub struct EventAnchorTierSet {
-    pub anchor: soroban_sdk::Address,
-    /// Rebate in basis points (0–10_000).
-    pub rebate_bps: u32,
-    /// Human-readable tier label.
-    pub label: String,
-    pub adm
+pub struct EventDisputeRaised {
+    /// The transaction ID under dispute — shared with [`EventDisputeResolved`]
+    /// as the correlation key.
+    pub tx_id: String,
+    /// Short human-readable reason code supplied by the caller
+    /// (e.g. `"amount_mismatch"`, `"missing_settlement"`).
+    pub reason: String,
+    /// Address that raised the dispute (relay signer or admin).
     pub caller: soroban_sdk::Address,
     pub ledger: u32,
 }
@@ -283,10 +288,6 @@ pub struct EventRebateApplied {
     pub effective_fee: i128,
     /// Rebate in basis points that was applied.
     pub rebate_bps: u32,
-    pub ledger: u32,
-}
-
-
     pub ledger: u32,
 }
 
@@ -547,12 +548,6 @@ impl EventEmitter {
         );
     }
 
-                caller: caller.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
     /// Emit [`EventAnchorTierSet`] — anchor tier updated (#145).
     pub fn anchor_tier_set(
         env: &Env,
@@ -612,11 +607,6 @@ impl EventEmitter {
                 tx_id: tx_id.clone(),
                 upheld,
                 caller: caller.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
                 ledger: env.ledger().sequence(),
             },
         );

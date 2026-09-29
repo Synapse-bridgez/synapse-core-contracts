@@ -48,6 +48,10 @@
 
 #![cfg(test)]
 
+extern crate std;
+
+use std::eprintln;
+
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::events::EventEmitter;
@@ -70,8 +74,7 @@ const G_ADDRESS_STR: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7U
 const TX_ID_STR: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 /// Realistic Stellar transaction hash (64 hex chars).
-const STELLAR_HASH_STR: &str =
-    "d3b07384d113edec49eaa6238ad5ff00a975b0a5b2c6b2b13d7b6e6e10f7b3c1";
+const STELLAR_HASH_STR: &str = "d3b07384d113edec49eaa6238ad5ff00a975b0a5b2c6b2b13d7b6e6e10f7b3c1";
 
 // ─── Result type ─────────────────────────────────────────────────────────────
 
@@ -136,7 +139,10 @@ fn bench_event_init() {
         "[bench] init       cpu={:<8}  mem={:<8}",
         result.cpu, result.mem
     );
-    assert!(result.cpu > 0, "init event consumed zero CPU — check harness");
+    assert!(
+        result.cpu > 0,
+        "init event consumed zero CPU — check harness"
+    );
     assert!(
         result.cpu <= SANITY_CPU_CEILING,
         "init CPU {cpu} exceeds ceiling {SANITY_CPU_CEILING}",
