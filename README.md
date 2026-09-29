@@ -272,3 +272,6 @@ wired.
 
 <!-- handsoff-issue-165 -->
 - #165: [High] Add cross-contract read-only interface stubs for a future Swap Engine
+
+<!-- handsoff-issue-166 -->
+- #166: [High] Add a `get_dispute_queue()` query listing transactions pending review
