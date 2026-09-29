@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build bench setup mutants
+.PHONY: check fmt clippy test wasm build bench setup mutants profile-diff
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
@@ -32,6 +32,13 @@ build:
 ## Grep-friendly: all cost lines are prefixed with "[bench]".
 bench:
 	cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
+
+## Differential test: run the behaviour trace under `release` and
+## `release-with-logs` and fail on any divergence (issue #131). Slow: builds
+## the test binary twice with LTO. `--self-test` proves detection works.
+profile-diff:
+	scripts/diff_profiles.sh --self-test
+	scripts/diff_profiles.sh
 
 ## One-time contributor setup: install the pre-commit hook.
 setup:

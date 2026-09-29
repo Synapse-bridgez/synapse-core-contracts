@@ -50,6 +50,24 @@ separately from general code changes. Full topic/field contracts live in
 - Schema compatibility ranges (#84 / ADR-0006):
   `set_schema_compatibility_range` / `schema_compatibility_range`; default
   unset behaviour remains exact-match (ADR-0003).
+- Test infrastructure (#131–#134):
+  - Differential testing between the `release` and `release-with-logs`
+    profiles (#131): `scripts/diff_profiles.sh` / `make profile-diff` diffs a
+    return-value + event + ledger-state trace of every entry point across
+    both profiles. It runs in the new `profile-diff` CI job alongside a
+    self-test that proves it catches an injected `debug_assertions`
+    divergence.
+  - Relay-signer rotation × in-flight transaction harness (#132): exhaustive
+    rotation-timing/kind/driver enumeration plus seeded chaos runs against a
+    reference model, asserting stale signers are always rejected and no
+    transaction is ever left stuck (`src/test_rotation_chaos.rs`).
+  - Event-payload snapshot gate (#133): committed fixtures in
+    `fixtures/event_snapshots/` pin exact topics and payload XDR for every
+    emitting entry point and ordering variant. Drift fails `cargo test` with a
+    diff, and updates need `SYNAPSE_UPDATE_EVENT_SNAPSHOTS=1`. Catalogue gaps
+    against EVENTS.md §2 are tracked explicitly.
+  - Boundary-value coverage for every numeric/length cap (#134), with the cap
+    inventory and findings in `src/test_boundaries.rs`.
 
 ### Changed
 
@@ -57,6 +75,14 @@ separately from general code changes. Full topic/field contracts live in
   **mitigated** via the propose/finalize flow.
 - `upgrade()` schema guard now checks the configured `[min, max]` range
   instead of exact equality only (range defaults to exact match).
+
+### Fixed
+
+- `unbond_collateral` converted the `unbond_delay_ledgers` param with a
+  wrapping `as u32` cast, so a delay of 2^32 (or any multiple) became a zero
+  delay and the unbond was claimable immediately, bypassing the slash window.
+  Negative values wrapped to huge delays. The value is now clamped to
+  `[0, u32::MAX]` before conversion (found by the #134 boundary audit).
 
 ### Event schema (prior unreleased)
 - Added `EventRelaySignerRotated` (topic `relay`), emitted by

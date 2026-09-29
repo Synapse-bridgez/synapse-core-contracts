@@ -47,9 +47,19 @@ mod bench_events;
 #[cfg(test)]
 mod schema_ci;
 #[cfg(test)]
+mod test_boundaries;
+#[cfg(test)]
+mod test_event_snapshots;
+#[cfg(test)]
 mod test_events_conformance;
 #[cfg(test)]
 mod test_pause;
+#[cfg(test)]
+mod test_profile_diff;
+#[cfg(test)]
+mod test_rotation_chaos;
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod test_wave2;
 #[cfg(test)]
@@ -608,8 +618,11 @@ impl SynapseCoreContract {
             .unwrap_or(DEFAULT_UNBOND_DELAY_LEDGERS);
 
         let now = env.ledger().sequence();
-        // Saturating cast: delay is always positive and fits a u32 in practice.
-        let claimable_at = now.saturating_add(delay as u32);
+        // The param is an unvalidated i128: clamp into u32 range before
+        // converting. A plain `as u32` wraps, so a delay of 2^32 would
+        // truncate to 0 and make the unbond claimable immediately.
+        let delay = delay.clamp(0, u32::MAX as i128) as u32;
+        let claimable_at = now.saturating_add(delay);
 
         let request = UnbondRequest {
             amount,

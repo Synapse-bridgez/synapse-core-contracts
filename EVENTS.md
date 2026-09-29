@@ -785,6 +785,11 @@ dependencies) and is documented in the manifest file itself.
 2. Update `event_conformance_manifest.toml` to match.
 3. Update the catalogue table(s) in §3 of this file.
 4. Run `make check` — all three artefacts must agree or CI blocks.
+5. Regenerate the payload snapshots
+   (`SYNAPSE_UPDATE_EVENT_SNAPSHOTS=1 cargo test event_snapshot`) and commit
+   the reviewed diff under `fixtures/event_snapshots/`. Those fixtures pin the
+   exact emitted topics and payload XDR per entry point
+   (`src/test_event_snapshots.rs`, #133). Any unregenerated change fails CI.
 
 ### Manual review steps
 
