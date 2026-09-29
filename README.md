@@ -269,3 +269,6 @@ wired.
 
 <!-- handsoff-issue-164 -->
 - #164: [High] Add `get_fee_schedule()`/`get_parameter_registry()` read-only queries
+
+<!-- handsoff-issue-165 -->
+- #165: [High] Add cross-contract read-only interface stubs for a future Swap Engine
