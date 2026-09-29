@@ -256,6 +256,22 @@ account for off-chain monitoring reads.
 entry via megabyte-sized strings.  The caps close this vector with negligible
 impact on typical usage.
 
+---
+
+## 9. Admin / upgrade resource add-on
+
+Infrequent admin operations are outside the per-tx lifecycle budget above, but
+two upgrade-path costs are worth calling out:
+
+| Step | Reads | Writes | Notes |
+|------|-------|--------|-------|
+| `post_upgrade_self_check` | ~4 (init flag, admin, relay, schema) | 0 | Runs on every `upgrade()`; intentionally a handful of targeted reads |
+| `append_upgrade_record` | 1 (history vec) | 1 (history vec) | Bounded at `MAX_UPGRADE_HISTORY` (32); FIFO eviction keeps rent flat |
+| `set_current_wasm_hash` | 0 | 1 | 32-byte hash |
+| `simulate_upgrade` | ≤3 | **0** | Pure query — must never write |
+
+At Protocol 22 rates the self-check adds on the order of **~0.002 XLM** of
+read fees per upgrade — negligible next to the WASM-swap host cost itself.
 
 ## Batch registration (`batch_register_callback`)
 
@@ -267,3 +283,4 @@ idempotency key, one status-index update, and one event, plus a single
 including an O(n^2) in-batch duplicate check (at most 190 comparisons). The
 cap is deliberately conservative to stay well under the per-transaction
 resource limits; raise it only after benchmarking.
+

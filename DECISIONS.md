@@ -122,10 +122,14 @@ In these cases, the immutable-with-migration path is still available as a fallba
 /// across the upgrade; temporary storage (idempotency keys) is evicted.
 ///
 /// `expected_schema_version` must match the on-chain schema version or the
-/// call is rejected before contract WASM is touched.
+/// call is rejected before contract WASM is touched. After the (deferred)
+/// WASM swap request, `post_upgrade_self_check` verifies critical storage
+/// invariants; failure reverts the whole invocation — including the swap,
+/// which the host only commits when the call finishes successfully.
 ///
 /// # Events
-/// Emits [`EventContractUpgraded`] on success.
+/// Emits [`EventUpgradeSelfCheckPassed`] then [`EventContractUpgraded`]
+/// on success; [`EventUpgradeSelfCheckFailed`] on self-check failure.
 pub fn upgrade(
     env: Env,
     new_wasm_hash: BytesN<32>,
@@ -136,12 +140,33 @@ pub fn upgrade(
     if schema_version != expected_schema_version {
         return Err(ContractError::SchemaVersionMismatch);
     }
+    let previous_wasm_hash = StorageClient::get_current_wasm_hash(&env);
     env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+    StorageClient::post_upgrade_self_check(&env).map_err(|e| {
+        EventEmitter::upgrade_self_check_failed(&env, schema_version);
+        e
+    })?;
+    EventEmitter::upgrade_self_check_passed(&env, schema_version);
+    StorageClient::append_upgrade_record(/* ... */);
+    StorageClient::set_current_wasm_hash(&env, &new_wasm_hash);
     EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
     Ok(())
 }
 ```
 
+### Post-upgrade self-check
+
+`StorageClient::post_upgrade_self_check()` (versioned alongside `SCHEMA_VERSION`)
+runs at the end of every `upgrade()`. It confirms:
+
+1. The instance `Initialised` flag is set
+2. Admin and relay-signer persistent entries are present and readable
+3. On-chain `SchemaVersion` equals the new WASM's `SCHEMA_VERSION` constant
+
+Atomicity relies on the Soroban host guarantee that
+`update_current_contract_wasm` only commits when the invocation finishes
+successfully — returning `SelfCheckFailed` therefore leaves both code and
+storage exactly as they were before the call.
 ### New event (`events.rs`)
 
 ```rust

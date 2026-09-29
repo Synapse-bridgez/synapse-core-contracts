@@ -21,6 +21,10 @@ separately from general code changes. Full topic/field contracts live in
   (`up_fin`), `EventUpgradeCancelled` (`up_can`), `EventUpgradeRolledBack`
   (`rollback`), `EventUpgradeMigrated` (`migrate`) — additive new events
   (Minor) for issues #81–#83.
+- Added `EventUpgradeSelfCheckPassed` (topic `chk_pass`) and
+  `EventUpgradeSelfCheckFailed` (topic `chk_fail`), emitted by `upgrade`
+  around the post-upgrade storage-integrity self-check. Additive new
+  events — Minor bump.
 
 ### Added
 
@@ -46,7 +50,6 @@ separately from general code changes. Full topic/field contracts live in
   instead of exact equality only (range defaults to exact match).
 
 ### Event schema (prior unreleased)
-
 - Added `EventRelaySignerRotated` (topic `relay`), emitted by
   `set_relay_signer`. Additive new event per
   [`EVENTS.md` § Semver policy](./EVENTS.md#5-semver-policy) — Minor bump.
@@ -63,11 +66,29 @@ separately from general code changes. Full topic/field contracts live in
   or not at all if never accepted.
 - `EventContractUpgraded` gains an additive trailing `schema_version` field
   — Minor bump per the same policy.
+- **Emission-order change for `upgrade`:** success now emits `chk_pass`
+  then `upgrade` (was `upgrade` alone). Self-check failure emits `chk_fail`
+  and reverts. Minor bump for the additive events; integrators that assumed
+  a single `upgrade` event per successful call should tolerate the leading
+  `chk_pass`.
 - Added `EventUpgradeQuorumSet` (topic `uqset`) and `EventUpgradeProposed`
   (topic `uprop`) for the optional upgrade quorum (#87) — Minor bump.
 
 ### Added
 
+- `simulate_upgrade(caller, new_wasm_hash, expected_schema_version) ->
+  UpgradeCompatibility` — read-only dry-run of every guard `upgrade()`
+  enforces, with distinguishable verdicts (`Compatible`, `NotInitialised`,
+  `CallerNotAdmin`, `SchemaVersionMismatch`). Side-effect free.
+- `get_upgrade_history() -> Vec<UpgradeRecord>` — bounded on-chain upgrade
+  audit log (previous/new WASM hash, schema version, ledger, admin). Cap
+  `MAX_UPGRADE_HISTORY` (32) with FIFO eviction. Pre-feature upgrades are
+  not backfilled.
+- Mandatory `post_upgrade_self_check` at the end of `upgrade()`; failure
+  returns `SelfCheckFailed` and reverts the whole upgrade transaction.
+- Explicit, tested single-call guarantee for `initialize()` (issue #79) —
+  documentation of why caller auth is intentionally absent given Soroban's
+  deployment model; residual pre-init front-running accepted operationally.
 - `EventRelaySignerRotated` — relay-signer rotation is now observable
   on-chain the same way admin transfer already is (see
   [`EVENTS.md`](./EVENTS.md#eventrelaysignerrotated)).

@@ -51,6 +51,8 @@ supported.
 | [`EventUpgradeCancelled`](#eventupgradecancelled) | `up_can` | `EventEmitter::upgrade_cancelled` | `cancel_upgrade` | **Live** |
 | [`EventUpgradeRolledBack`](#eventupgraderolledback) | `rollback` | `EventEmitter::upgrade_rolled_back` | `rollback_upgrade` | **Live** |
 | [`EventUpgradeMigrated`](#eventupgrademigrated) | `migrate` | `EventEmitter::upgrade_migrated` | `upgrade_and_migrate` | **Live** |
+| [`EventUpgradeSelfCheckPassed`](#eventupgradeselfcheckpassed) | `chk_pass` | `EventEmitter::upgrade_self_check_passed` | `upgrade` | **Live** |
+| [`EventUpgradeSelfCheckFailed`](#eventupgradeselfcheckfailed) | `chk_fail` | `EventEmitter::upgrade_self_check_failed` | `upgrade` | **Live** |
 | [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` | **Live** |
 | [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
 | [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
@@ -383,6 +385,38 @@ Distinct from a forward `upgrade` event so monitors can alert differently.
 | `new_wasm_hash` | `BytesN<32>` | Installed WASM |
 | `ledger` | `u32` | Ledger sequence at emit |
 
+### EventUpgradeSelfCheckPassed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `chk_pass` |
+| **Struct** | `EventUpgradeSelfCheckPassed` |
+| **Emitted by** | `upgrade` |
+| **When** | Post-upgrade storage-integrity self-check succeeded |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `schema_version` | `u32` | On-chain schema version verified by the self-check |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventUpgradeSelfCheckFailed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `chk_fail` |
+| **Struct** | `EventUpgradeSelfCheckFailed` |
+| **Emitted by** | `upgrade` |
+| **When** | Post-upgrade self-check failed; the upgrade transaction reverts |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `schema_version` | `u32` | On-chain schema version at the time of the failed check |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+Verified by `test_pause::test_self_check_events_topics`.
+
 ### EventPauseToggled
 
 | | |
@@ -527,7 +561,8 @@ names, types, and order are frozen.
 | `propose_admin` | 1. `propose` |
 | `accept_admin` | 1. `admin` |
 | `set_relay_signer` | 1. `relay` |
-| `upgrade` | 1. `upgrade` |
+| `upgrade` (success) | 1. `chk_pass`<br>2. `upgrade` |
+| `upgrade` (self-check failure) | 1. `chk_fail` *(invocation then reverts)* |
 | `propose_upgrade` | 1. `up_prop` |
 | `finalize_upgrade` | 1. `upgrade`<br>2. `up_fin` |
 | `cancel_upgrade` | 1. `up_can` |

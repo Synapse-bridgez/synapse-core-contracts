@@ -150,8 +150,8 @@ per-invocation fee metering mitigates this.
 
 | Threat | Mitigation | Status |
 |--------|-----------|--------|
-| Double-initialisation to hijack admin/relay roles | `StorageClient::is_initialised()` guard; returns `AlreadyInitialised` on second call | ✅ Implemented |
-| Front-running: attacker calls `initialize()` before legitimate deployer | Deployer must call `initialize()` atomically in the deployment transaction, or use a deployer script that deploys + initialises in one transaction | ⚠️ Operational control — not enforced on-chain |
+| Double-initialisation to hijack admin/relay roles | `StorageClient::is_initialised()` guard; returns distinguishable `AlreadyInitialised` on any subsequent call (including from the original admin). Locked in by `test_initialize_rejects_double_init` and `test_initialize_rejects_second_call_from_any_caller`. | ✅ Implemented — hard on-chain guarantee |
+| Front-running: attacker calls `initialize()` before legitimate deployer | **No caller auth on `initialize`.** Soroban exposes the WASM to any caller as soon as `deploy` succeeds, and the contract cannot read a deployer-only privilege — requiring auth would not stop an attacker from submitting their own signed init first. Mitigation is operational: deploy + `initialize` MUST be one atomic transaction (see `DEPLOYMENT.md`). Once the instance flag is set, the on-chain single-call guard above is the hard guarantee. | ⚠️ Residual: pre-init front-running is an accepted operational risk; post-init re-init is on-chain impossible |
 | Admin set to zero address or uncontrolled account | No on-chain check that `admin` is a multisig; documented requirement only | ⚠️ Operational control — not enforced on-chain |
 | Relay signer set to same address as admin | No on-chain separation check | ⚠️ Low risk — separation is a best-practice recommendation |
 
@@ -198,9 +198,12 @@ per-invocation fee metering mitigates this.
 |--------|-----------|--------|
 | Non-admin deploying arbitrary WASM | `AdminClient::require_admin()` + `require_auth()` enforced before `update_current_contract_wasm()` | ✅ Implemented |
 | Storage-schema-breaking upgrade corrupting persistent records | `upgrade()` requires `expected_schema_version` to match the on-chain `SchemaVersion`, rejecting the call with `SchemaVersionMismatch` before touching WASM if it doesn't. **Residual:** this cannot validate the *new* WASM's schema — Soroban gives running code no way to introspect an uploaded-but-not-installed WASM blob — it only catches invoking `upgrade()` against unexpected on-chain state. | ✅ Implemented — **F-04 fixed** |
+| New WASM cannot correctly read existing core storage | After the (deferred) WASM swap request, `StorageClient::post_upgrade_self_check()` verifies admin/relay/schema presence and `SCHEMA_VERSION` consistency. Failure returns `SelfCheckFailed` and reverts the whole invocation — the host only commits the code swap when the call finishes successfully. | ✅ Implemented |
 | Upgrade without pausing, racing with in-flight callbacks | No forced-pause pre-condition on upgrade; documented as future enhancement in `DECISIONS.md` | ⚠️ Accepted risk — see **F-05** |
-| Upgrade event not emitted, hiding the action | `EventEmitter::contract_upgraded()` always called on success | ✅ Implemented |
+| Upgrade event not emitted, hiding the action | `EventEmitter::contract_upgraded()` always called on success; self-check pass/fail also emit | ✅ Implemented |
 | Admin upgrades to WASM that removes the `upgrade()` entry point (bricking upgradability) | No on-chain prevention; admin is the sole trust anchor | ⚠️ Operational control |
+| No on-chain record of past upgrades | Append-only `UpgradeHistory` (bounded, FIFO eviction at `MAX_UPGRADE_HISTORY`) written on every successful upgrade; queryable via `get_upgrade_history()` | ✅ Implemented |
+| Operators discover misconfigured upgrades only by attempting them | Read-only `simulate_upgrade(caller, new_wasm_hash, expected_schema_version)` returns structured `UpgradeCompatibility` without storage writes | ✅ Implemented |
 
 ### 4.6 `pause()` / `unpause()`
 
@@ -261,6 +264,8 @@ Pending ──► Processing ──► Completed
 | `StorageKey::IdempotencyKey(key)` | Temporary | TTL of 18 000 ledgers (~24 h). After expiry, the key is invisible — a relay replaying a message after 24 h will not be deduplicated by the idempotency key alone. **Risk: late replay** — mitigated by `StorageClient::transaction_exists()` (F-07, fixed). |
 | `StorageKey::PendingAdmin` | Persistent | Set by `propose_admin`, cleared by `accept_admin`. **Risk: none** — an attacker who cannot forge the nominee's auth cannot accept, and re-proposing overwrites any stale pending value. |
 | `StorageKey::SchemaVersion` | Persistent | Set once at `initialize()`, read (not written) by `upgrade()`. **Risk: none** — read-only after init; see F-04. |
+| `StorageKey::UpgradeHistory` | Persistent | Bounded append-only log (`MAX_UPGRADE_HISTORY`); FIFO eviction. Survives upgrades. **Risk: none** beyond bounded rent. |
+| `StorageKey::CurrentWasmHash` | Persistent | Updated on each successful upgrade so history can record `previous_wasm_hash`. **Risk: none**. |
 
 ### Storage manipulation threats
 
@@ -287,6 +292,8 @@ is consistent across all emitters.
 | `EventInitialised` | `(synapse, init)` | `initialize()` | ✅ Implemented |
 | `EventTransactionRegistered` | `(synapse, reg)` | `register_callback()` | ✅ Implemented |
 | `EventContractUpgraded` | `(synapse, upgrade)` | `upgrade()` | ✅ Implemented |
+| `EventUpgradeSelfCheckPassed` | `(synapse, chk_pass)` | `upgrade()` on self-check success | ✅ Implemented |
+| `EventUpgradeSelfCheckFailed` | `(synapse, chk_fail)` | `upgrade()` on self-check failure | ✅ Implemented |
 | `EventPauseToggled` | `(synapse, pause)` | `pause()` / `unpause()` | ✅ Implemented |
 | `EventStatusChanged` | `(synapse, status)` | status transitions | ✅ Implemented |
 | `EventTransactionCompleted` | `(synapse, done)` | `complete_transaction()` | ✅ Implemented |
