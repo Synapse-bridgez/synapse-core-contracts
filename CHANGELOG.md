@@ -50,9 +50,19 @@ separately from general code changes. Full topic/field contracts live in
 - Schema compatibility ranges (#84 / ADR-0006):
   `set_schema_compatibility_range` / `schema_compatibility_range`; default
   unset behaviour remains exact-match (ADR-0003).
+- Resource-usage regression gate (#119): CI meters every hot entry point of
+  the release WASM against `resource_baseline.toml` and fails on a >15%
+  regression. See COST_MODEL.md §12 for the baseline-update process.
 
 ### Changed
 
+- `register_callback` validation runs cheapest-first (#120); with several
+  invalid fields the *first* error reported can differ (e.g. `InvalidAmount`
+  before `InvalidStellarAccount`). Accept/reject outcomes are unchanged.
+  Worst-case rejection −28% CPU; cheap rejections −45…−66%.
+- Hot entry points allocate fewer host objects (#121): `start_processing`,
+  `complete_transaction`, `fail_transaction` ≈ −18% CPU / −7% memory;
+  `register_callback` −9% / −3%. No storage-layout or ABI change.
 - THREAT_MODEL.md §8 **R-05** status updated from accepted (no timelock) to
   **mitigated** via the propose/finalize flow.
 - `upgrade()` schema guard now checks the configured `[min, max]` range
@@ -141,6 +151,13 @@ separately from general code changes. Full topic/field contracts live in
   keys, `#89`).
 
 ### Fixed
+
+- `main` builds and tests again: bad-merge fragments in `events.rs`, orphan
+  validators referencing never-merged error variants, and test modules that
+  did not compile. Tests for entry points lost in the #176–#197 merges are
+  gated behind `cfg(synapse_quarantine)` (see `src/lib.rs`) until restored.
+  `schema_ci` and `bench_events` are now compiled, so the #88 schema gate and
+  event benches actually run; CI installs the `wasm32` target again.
 
 - **Security:** `propose_admin` rejects nominating the contract's own
   address, which could not practically call `accept_admin` back and would
