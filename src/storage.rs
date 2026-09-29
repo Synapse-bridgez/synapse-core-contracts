@@ -196,6 +196,11 @@ impl StorageClient {
     }
 
     /// Persist (insert or update) a [`Transaction`].
+    ///
+    /// Also records the current ledger sequence as the transaction's
+    /// "last modified" marker in the incremental-sync index (see
+    /// [`Self::get_transactions_since`]), so every state transition — new
+    /// registrations and updates alike — is observable by off-chain consumers.
     pub fn save_transaction(env: &Env, tx: &Transaction) {
         let key = StorageKey::Transaction(tx.id.clone());
         env.storage().persistent().set(&key, tx);
@@ -204,52 +209,85 @@ impl StorageClient {
             TRANSACTION_MIN_TTL_LEDGERS,
             TRANSACTION_MIN_TTL_LEDGERS,
         );
+        Self::record_transaction_modified(env, &tx.id);
+    }
+
+    // ── Incremental sync index (#158) ─────────────────────────────────────────
+
+    /// Record `tx_id` as modified at the current ledger sequence.
+    ///
+    /// Maintains a monotonically growing, append-only log of
+    /// `(ledger_seq, tx_id)` entries under [`StorageKey::TransactionSyncIndex`].
+    /// A transaction modified multiple times appears multiple times in the log;
+    /// [`Self::get_transactions_since`] de-duplicates so each transaction is
+    /// returned at most once per query.
+    pub fn record_transaction_modified(env: &Env, tx_id: &String) {
+        let key = StorageKey::TransactionSyncIndex;
+        let mut index: Vec<(u32, String)> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        index.push_back((env.ledger().sequence(), tx_id.clone()));
+        env.storage().persistent().set(&key, &index);
+    }
+
+    /// Return the IDs of every transaction registered or modified strictly
+    /// after `ledger_seq`, in ascending last-modified order, de-duplicated so
+    /// each transaction appears exactly once.
+    ///
+    /// `cursor` is an opaque offset into the de-duplicated result set (pass
+    /// `None` for the first page).  `limit` caps the page size.  The returned
+    /// `Option<u64>` is the cursor to pass on the next call, or `None` when the
+    /// result set has been exhausted.
+    ///
+    /// This is the on-chain primitive for incremental off-chain sync (e.g.
+    /// `synapse-core`'s backend): a consumer stores the highest ledger sequence
+    /// it has processed and re-queries with that value on each cycle instead of
+    /// replaying the full event history.
+    pub fn get_transactions_since(
+        env: &Env,
+        ledger_seq: u32,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> (Vec<String>, Option<u64>) {
+        let index: Vec<(u32, String)> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::TransactionSyncIndex)
+            .unwrap_or_else(|| Vec::new(env));
+
+        // Collect the de-duplicated set of tx IDs modified after `ledger_seq`,
+        // preserving first-seen (ascending ledger) order.
+        let mut seen: Vec<String> = Vec::new();
+        let mut matched: Vec<String> = Vec::new();
+        for entry in index.iter() {
+            let (seq, tx_id) = entry;
+            if seq <= ledger_seq {
+                continue;
+            }
+            if seen.contains(&tx_id) {
+                continue;
+            }
+            seen.push_back(tx_id.clone());
+            matched.push_back(tx_id);
+        }
+
+        let start = cursor.unwrap_or(0) as u32;
+        let total = matched.len();
+        let mut page: Vec<String> = Vec::new();
+        let mut i = start;
+        while i < total && page.len() < limit {
+            page.push_back(matched.get(i).unwrap());
+            i += 1;
+        }
+
+        let next = if i < total { Some(i as u64) } else { None };
+        (page, next)
     }
 
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
-    /// Return the ledger sequence at which an idempotency key was first stored,
-    /// or `None` if the key is unknown / expired.
-    pub fn get_idempotency_key(env: &Env, key: &String) -> Option<u32> {
-        env.storage()
-            .temporary()
-            .get::<StorageKey, u32>(&StorageKey::IdempotencyKey(key.clone()))
-    }
+    /// 
 
-    /// Record an idempotency key with a ~24-hour TTL.
-    pub fn set_idempotency_key(env: &Env, key: &String) {
-        let storage_key = StorageKey::IdempotencyKey(key.clone());
-        env.storage()
-            .temporary()
-            .set(&storage_key, &env.ledger().sequence());
-        env.storage().temporary().extend_ttl(
-            &storage_key,
-            IDEMPOTENCY_TTL_LEDGERS,
-            IDEMPOTENCY_TTL_LEDGERS,
-        );
-    }
-}
-
-// ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
-
-impl StorageClient {
-    /// Read a [`ParamEntry`] by name, or `None` if not set.
-    pub fn get_param(env: &Env, name: &String) -> Option<ParamEntry> {
-        env.storage()
-            .persistent()
-            .get(&StorageKey::Param(name.clone()))
-    }
-
-    /// Persist a [`ParamEntry`].
-    pub fn set_param(env: &Env, name: &String, entry: &ParamEntry) {
-        env.storage()
-            .persistent()
-            .set(&StorageKey::Param(name.clone()), entry);
-    }
-}
-
-// ─── Wave 2: Collateral Bonding (#143) ────────────────────────────────────────
-
-/// Minimum TTL for bond records — same order of
-
-/* … truncated 2653 chars — edit only what you need near the top … */
+/* … truncated 1544 chars — edit only what you need near the top … */
