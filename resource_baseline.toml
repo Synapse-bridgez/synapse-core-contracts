@@ -10,24 +10,24 @@ cpu_insns = 90187
 mem_bytes = 8264
 
 [bond_collateral]
-cpu_insns = 79120
+cpu_insns = 78784
 mem_bytes = 8130
 
 [complete_transaction]
-cpu_insns = 273247
-mem_bytes = 20057
+cpu_insns = 225806
+mem_bytes = 18714
 
 [fail_transaction]
-cpu_insns = 268135
-mem_bytes = 19410
+cpu_insns = 220694
+mem_bytes = 18067
 
 [get_transaction]
-cpu_insns = 100746
-mem_bytes = 5682
+cpu_insns = 88161
+mem_bytes = 5447
 
 [invocation_overhead]
-cpu_insns = 3023843
-mem_bytes = 1770917
+cpu_insns = 2997803
+mem_bytes = 1768066
 
 [pause]
 cpu_insns = 56127
@@ -38,35 +38,35 @@ cpu_insns = 55979
 mem_bytes = 6253
 
 [register_callback]
-cpu_insns = 304728
-mem_bytes = 18463
+cpu_insns = 277268
+mem_bytes = 17886
 
 [register_callback_idempotent_replay]
-cpu_insns = 141695
+cpu_insns = 141711
 mem_bytes = 5034
 
 [register_callback_reject_account_checksum]
-cpu_insns = 90397
+cpu_insns = 90413
 mem_bytes = 3778
 
 [register_callback_reject_amount]
-cpu_insns = 56662
+cpu_insns = 56678
 mem_bytes = 3778
 
 [register_callback_reject_asset_code]
-cpu_insns = 61100
+cpu_insns = 61116
 mem_bytes = 3778
 
 [register_callback_reject_callback_status_len]
-cpu_insns = 59326
+cpu_insns = 59342
 mem_bytes = 3778
 
 [register_callback_reject_idempotency_key]
-cpu_insns = 57094
+cpu_insns = 57110
 mem_bytes = 3778
 
 [register_callback_reject_issuer_checksum]
-cpu_insns = 119294
+cpu_insns = 119310
 mem_bytes = 3778
 
 [set_param]
@@ -78,8 +78,8 @@ cpu_insns = 72602
 mem_bytes = 6192
 
 [start_processing]
-cpu_insns = 255476
-mem_bytes = 19032
+cpu_insns = 208035
+mem_bytes = 17689
 
 [unpause]
 cpu_insns = 55193

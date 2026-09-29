@@ -488,3 +488,40 @@ Net `cpu_insns` per call, release WASM (`resource_baseline.toml`):
 | reject: `asset_issuer` CRC mismatch (worst case) | 165 742 | 119 294 | −28.0% |
 | `register_callback` (accepted) | 353 840 | 304 728 | −13.8% |
 | `register_callback` (idempotent replay) | 190 807 | 141 695 | −25.7% |
+
+### 12.6 Hot-path allocation audit (#121)
+
+**Guest heap.** The release WASM is byte-identical with and without
+`soroban-sdk`'s `alloc` feature: no contract code path allocates on the guest
+heap, so the allocator is never linked. The existing fixed-capacity buffers
+(`[u8; 56]` strkey, `[u8; 12]` asset code, `[u8; 35]` decode output) already
+live on the stack and match their validation caps exactly; boundary tests at
+cap−1 / cap / cap+1 are in `src/tests_hot_path.rs`. `alloc` stays enabled
+(out of scope to remove).
+
+**Host objects.** On Soroban the real allocation cost of these entry points
+is host-side: every `String`, `Vec` and `Map` the contract creates, including
+each `StorageKey` passed to a storage call (encoded to a new host
+`Vec [Symbol, payload]` every time).
+
+| Site | Verdict | Change |
+|------|---------|--------|
+| `StorageKey` re-encoded for `get`/`set` then `extend_ttl` (transaction, idempotency key) | Avoidable | Encode once (`storage::encode_key`), reuse the `Val` — identical ledger key |
+| Two `String::from_str(&env, "")` in `register_callback` | Avoidable | One object, second use clones the handle |
+| `assert_is_relay_or_admin` always reads admin **and** relay | Avoidable for relay callers | Check relay first; admin is read only if needed |
+| `Transaction` → host `Map` on save, event structs → host `Map` on publish | Necessary | — (ledger / event encoding) |
+| Handle `clone()`s of `String`/`Address` | Free | — (copies a 64-bit handle, no allocation) |
+| Wave 2 bond/unbond/param storage | Not hot | Left as is |
+
+Net cost per call, release WASM:
+
+| Scenario | cpu_insns before → after | mem_bytes before → after |
+|----------|-------------------------:|-------------------------:|
+| `start_processing` | 255 476 → 208 035 (−18.5%) | 19 032 → 17 689 (−7.0%) |
+| `complete_transaction` | 273 247 → 225 806 (−17.3%) | 20 057 → 18 714 (−6.6%) |
+| `fail_transaction` | 268 135 → 220 694 (−17.6%) | 19 410 → 18 067 (−6.9%) |
+| `get_transaction` | 100 746 → 88 161 (−12.4%) | 5 682 → 5 447 (−4.1%) |
+| `register_callback` | 304 728 → 277 268 (−9.0%) | 18 463 → 17 886 (−3.1%) |
+| `invocation_overhead` | 3 023 843 → 2 997 803 (−0.9%) | 1 770 917 → 1 768 066 (−0.2%) |
+
+The release WASM also shrank from 53 475 to 53 432 bytes.

@@ -12,7 +12,7 @@
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, IntoVal, String, Val};
 
 use crate::types::{
     AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction, UnbondRequest,
@@ -25,6 +25,16 @@ const IDEMPOTENCY_TTL_LEDGERS: u32 = 18_000;
 
 /// Minimum TTL we require on transaction records before extending.
 const TRANSACTION_MIN_TTL_LEDGERS: u32 = 100_000; // ~1 week
+
+/// Encode a [`StorageKey`] to its host [`Val`] once.
+///
+/// Every storage call converts a `&StorageKey` into a freshly allocated host
+/// `Vec` object (`[Symbol, payload]`). Hot paths that touch the same key
+/// twice — `get`/`set` followed by `extend_ttl` — reuse one encoded `Val`
+/// instead (#121). The ledger key is byte-identical either way.
+fn encode_key(env: &Env, key: StorageKey) -> Val {
+    key.into_val(env)
+}
 
 pub struct StorageClient;
 
@@ -147,11 +157,11 @@ impl StorageClient {
     ///
     /// Extends the ledger TTL on each access so active records are never evicted.
     pub fn get_transaction(env: &Env, tx_id: &String) -> Result<Transaction, ContractError> {
-        let key = StorageKey::Transaction(tx_id.clone());
+        let key = encode_key(env, StorageKey::Transaction(tx_id.clone()));
         let tx = env
             .storage()
             .persistent()
-            .get::<StorageKey, Transaction>(&key)
+            .get::<Val, Transaction>(&key)
             .ok_or(ContractError::TransactionNotFound)?;
         env.storage().persistent().extend_ttl(
             &key,
@@ -163,7 +173,7 @@ impl StorageClient {
 
     /// Persist (insert or update) a [`Transaction`].
     pub fn save_transaction(env: &Env, tx: &Transaction) {
-        let key = StorageKey::Transaction(tx.id.clone());
+        let key = encode_key(env, StorageKey::Transaction(tx.id.clone()));
         env.storage().persistent().set(&key, tx);
         env.storage().persistent().extend_ttl(
             &key,
@@ -184,7 +194,7 @@ impl StorageClient {
 
     /// Record an idempotency key with a ~24-hour TTL.
     pub fn set_idempotency_key(env: &Env, key: &String) {
-        let storage_key = StorageKey::IdempotencyKey(key.clone());
+        let storage_key = encode_key(env, StorageKey::IdempotencyKey(key.clone()));
         env.storage()
             .temporary()
             .set(&storage_key, &env.ledger().sequence());

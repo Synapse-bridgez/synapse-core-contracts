@@ -29,10 +29,13 @@ impl AdminClient {
     /// Assert that `caller` is either the admin or the trusted relay signer.
     ///
     /// Used by status-transition methods which are callable by both roles.
+    /// The relay is checked first because it drives nearly every transition;
+    /// a relay caller then skips the admin read and its key encoding (#121).
+    /// Both keys are written together by `initialize`, so the result —
+    /// including `NotInitialised` before init — is the same in either order.
     pub fn assert_is_relay_or_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
-        let admin = StorageClient::get_admin(env)?;
         let relay = StorageClient::get_relay_signer(env)?;
-        if caller != &admin && caller != &relay {
+        if caller != &relay && caller != &StorageClient::get_admin(env)? {
             return Err(ContractError::Unauthorised);
         }
         caller.require_auth();

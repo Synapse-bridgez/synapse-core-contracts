@@ -59,6 +59,8 @@ mod tests;
 #[cfg(test)]
 mod tests_auth_adversarial;
 #[cfg(test)]
+mod tests_hot_path;
+#[cfg(test)]
 mod tests_invariants;
 #[cfg(test)]
 mod tests_state_machine;
@@ -180,6 +182,9 @@ impl SynapseCoreContract {
         }
 
         let ledger = env.ledger().sequence();
+        // One host string object for both not-yet-set fields; `clone()` only
+        // copies the handle (#121).
+        let empty = String::from_str(&env, "");
         let tx = Transaction {
             id: payload.transaction_id.clone(),
             stellar_account: payload.stellar_account.clone(),
@@ -192,8 +197,8 @@ impl SynapseCoreContract {
             anchor_transaction_id: payload.anchor_transaction_id.clone(),
             callback_type: payload.callback_type.clone(),
             callback_status: payload.callback_status.clone(),
-            stellar_tx_hash: String::from_str(&env, ""),
-            failure_reason: String::from_str(&env, ""),
+            stellar_tx_hash: empty.clone(),
+            failure_reason: empty,
         };
 
         StorageClient::save_transaction(&env, &tx);
