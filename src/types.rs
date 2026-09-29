@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, Address, String};
+use soroban_sdk::{contracterror, contracttype, Address, String, Vec};
 
 /// Current on-chain storage schema version.
 ///
@@ -22,6 +22,15 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// decimals). Admin may override via `set_default_amount_ceiling`.
 pub const DEFAULT_AMOUNT_CEILING: i128 = 1_000_000_000_000_000;
 
+/// Maximum number of times a `Failed` transaction may be retried.
+pub const MAX_RETRIES: u32 = 3;
+
+/// Hard cap on the `limit` accepted by `get_transactions_by_status`.
+pub const MAX_PAGE_LIMIT: u32 = 50;
+
+/// Hard cap on the number of payloads accepted by `batch_register_callback`.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -29,7 +38,10 @@ pub const DEFAULT_AMOUNT_CEILING: i128 = 1_000_000_000_000_000;
 /// State machine:
 /// ```text
 /// Pending ──► Processing ──► Completed
-///         └──────────────► Failed
+///   │             │
+///   ├─────────────┴────────► Failed
+///   ├─────────────┴────────► Cancelled
+///   └─────────────┴────────► Expired (permissionless, after expiry window)
 /// ```
 #[contracttype]
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -42,6 +54,11 @@ pub enum TransactionStatus {
     Completed,
     /// Terminal failure — reason stored in [`Transaction::failure_reason`].
     Failed,
+    /// Terminal withdrawal — voided by the relay or admin before settlement.
+    Cancelled,
+    /// Terminal: stayed `Pending` past the configured expiry window and was
+    /// expired via the permissionless `expire_transaction`.
+    Expired,
 }
 
 // ─── Callback type ────────────────────────────────────────────────────────────
@@ -105,6 +122,27 @@ pub struct Transaction {
 
     /// Short failure reason code — populated only on `Failed`.
     pub failure_reason: String,
+
+    /// Number of times this transaction has been moved `Failed -> Pending`
+    /// via `retry_transaction`. Capped at [`MAX_RETRIES`].
+    pub retry_count: u32,
+
+    /// Ledger timestamp (seconds) when the transaction was registered.
+    /// Used to age out stale `Pending` entries.
+    pub registered_at: u64,
+
+    /// Amount actually settled when completed via `partial_complete_transaction`.
+    /// `None` for full completions and non-completed transactions.
+    pub settled_amount: Option<i128>,
+
+    /// Per-transaction relay signer binding set by
+    /// `reassign_relay_signer_for_transaction`. `None` means the global
+    /// relay signer applies.
+    pub assigned_signer: Option<Address>,
+
+    /// Append-only operational tags (bounded count and length; see
+    /// `validation.rs`).
+    pub tags: Vec<String>,
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -194,6 +232,15 @@ pub enum StorageKey {
     /// Singleton: on-chain storage schema version, set at `initialize()`.
     /// See [`SCHEMA_VERSION`].
     SchemaVersion,
+    /// Singleton: max age in seconds of a `Pending` transaction before it
+    /// may be expired. Absent means expiry is disabled.
+    ExpiryWindow,
+    /// Singleton: admin-approved standby relay signer, a valid reassignment
+    /// target alongside the current `relay_signer`.
+    StandbySigner,
+    /// Per-status index: ordered `Vec<String>` of transaction IDs currently in
+    /// that status. Maintained by `StorageClient::save_transaction`.
+    StatusIndex(TransactionStatus),
     History(String),
     MaxPendingPerSigner,
     PendingCount(Address),
@@ -253,6 +300,17 @@ pub enum ContractError {
     TransactionNotFound = 30,
     /// The requested status transition violates the state machine.
     InvalidStatusTransition = 31,
+    /// The transaction is already `Cancelled`; cancelling twice is rejected.
+    AlreadyCancelled = 32,
+    /// Cancellation was requested from a state that cannot be cancelled
+    /// (`Completed` or `Failed`).
+    CannotCancel = 33,
+    /// The transaction has already used all [`MAX_RETRIES`] retries.
+    RetryLimitExceeded = 34,
+    /// A pagination `limit` was zero or exceeded `MAX_PAGE_LIMIT`.
+    InvalidPageLimit = 35,
+    /// A batch was empty or exceeded `MAX_BATCH_SIZE`.
+    InvalidBatchSize = 36,
 
     // ── Idempotency ─────────────────────────────────────────────────────────
     /// Request is a duplicate within the retention window (matches Redis 429).
@@ -272,13 +330,33 @@ pub enum ContractError {
     /// Relay signer already has the maximum allowed outstanding `Pending` transactions.
     OutstandingCapExceeded = 70,
 
+    // ── Expiry ──────────────────────────────────────────────────────────────
+    /// `expire_transaction` was called but no expiry window is configured.
+    ExpiryNotConfigured = 71,
+    /// `expire_transaction` was called before the expiry window elapsed.
+    ExpiryNotElapsed = 72,
+
     // ── Disputes ────────────────────────────────────────────────────────────
     /// Transaction is already under dispute.
     AlreadyDisputed = 80,
     /// Transaction is not under dispute.
     NotDisputed = 81,
 
+    // ── Partial settlement ──────────────────────────────────────────────────
+    /// `settled_amount` is not strictly between zero and the original amount.
+    InvalidSettledAmount = 82,
+
+    // ── Signer reassignment ─────────────────────────────────────────────────
+    /// `new_signer` is neither the relay signer nor the approved standby.
+    SignerNotTrusted = 83,
+
+    // ── Tagging ─────────────────────────────────────────────────────────────
+    /// The transaction already carries the maximum number of tags.
+    TooManyTags = 90,
+    /// The tag is empty.
+    EmptyTag = 91,
+
     // ── Amount ceilings ─────────────────────────────────────────────────────
     /// Amount exceeds the anchor's (or the default) ceiling.
-    AmountCeilingExceeded = 90,
+    AmountCeilingExceeded = 92,
 }
