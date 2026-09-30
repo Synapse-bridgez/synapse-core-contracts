@@ -55,7 +55,7 @@ impl AdminClient {
             None => Err(ContractError::Unauthorised),
             Some(set) if set.signers.contains(caller) => {
                 caller.require_auth();
-                Self::check_quorum(env, &set, Some(caller))
+                Self::check_quorum(env, &set, Some(caller)).map(|_| ())
             }
             Some(_) => Err(ContractError::Unauthorised),
         }
@@ -77,12 +77,14 @@ impl AdminClient {
     /// Assert that `caller` is a relay signer (not the admin), with quorum.
     ///
     /// Used by `batch_register_callback` — only the relay may ingest callbacks.
-    pub fn require_relay_signer(env: &Env, caller: &Address) -> Result<(), ContractError> {
+    /// Returns how many co-signer approvals the call consumed (each one is a
+    /// ledger write the batch budget must account for).
+    pub fn require_relay_signer(env: &Env, caller: &Address) -> Result<u32, ContractError> {
         let primary = StorageClient::get_relay_signer(env)?;
         match StorageClient::get_relay_signer_set_opt(env) {
             None if caller == &primary => {
                 caller.require_auth();
-                Ok(())
+                Ok(0)
             }
             Some(set) if set.signers.contains(caller) => {
                 caller.require_auth();
@@ -95,14 +97,15 @@ impl AdminClient {
     /// Count `caller` plus every signer holding a fresh approval (within
     /// [`RELAY_APPROVAL_WINDOW_LEDGERS`]); fail with
     /// [`ContractError::QuorumNotMet`] below `threshold`. Approvals are
-    /// consumed on success so each one authorises exactly one call.
+    /// consumed on success so each one authorises exactly one call; returns
+    /// how many were consumed.
     fn check_quorum(
         env: &Env,
         set: &RelaySignerSet,
         caller: Option<&Address>,
-    ) -> Result<(), ContractError> {
+    ) -> Result<u32, ContractError> {
         if set.threshold <= 1 {
-            return Ok(());
+            return Ok(0);
         }
         let now = env.ledger().sequence();
         let mut approvers = Vec::new(env);
@@ -124,6 +127,6 @@ impl AdminClient {
         for s in approvers.iter() {
             StorageClient::clear_relay_approval(env, &s);
         }
-        Ok(())
+        Ok(approvers.len())
     }
 }

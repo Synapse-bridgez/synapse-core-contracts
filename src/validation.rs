@@ -141,6 +141,95 @@ fn verify_ed25519_public_key_strkey(encoded: &[u8; STRKEY_ENCODED_LEN as usize])
     Ok(())
 }
 
+// ─── Batch resource budget (#173) ─────────────────────────────────────────────
+
+/// Per-transaction network limits a batch must fit in (Soroban protocol 22
+/// mainnet `ConfigSettingContractLedgerCostV0` / `…EventsV0` values; the
+/// most restrictive network this SDK targets). If the network raises them,
+/// read the new values with `stellar network settings` before changing these.
+pub const TX_MAX_WRITE_ENTRIES: u32 = 25;
+/// Protocol 22 `tx_max_write_bytes`.
+pub const TX_MAX_WRITE_BYTES: u32 = 132_096;
+/// Protocol 22 `tx_max_contract_events_size_bytes`.
+pub const TX_MAX_EVENTS_BYTES: u32 = 8_198;
+
+/// Ledger writes every batch makes regardless of size: the `Pending`
+/// status count and the caller's auth nonce.
+const BATCH_FIXED_WRITES: u32 = 2;
+/// Ledger writes per payload: record, idempotency key, status-index slot.
+const BATCH_WRITES_PER_ITEM: u32 = 3;
+/// Upper bound on one payload's write bytes with every string empty.
+/// Measured at 1 116 B with 1-byte strings (which also covers the batch's
+/// fixed writes); rounded up.
+const ITEM_WRITE_BYTES_BASE: u32 = 1_120;
+/// Upper bound on one `reg` event with every string empty (measured 332 B).
+const ITEM_EVENT_BYTES_BASE: u32 = 344;
+/// Upper bound on the `batch` summary event, excluding its two ids.
+const BATCH_EVENT_BYTES_BASE: u32 = 280;
+
+/// XDR strings are 4-byte padded; bounding each by `len + 3` keeps the
+/// estimate an over-estimate.
+#[inline]
+fn padded(s: &String) -> u32 {
+    s.len() + 3
+}
+
+/// Conservative running estimate of a batch's ledger and event footprint.
+///
+/// Built one payload at a time during validation, before any storage write,
+/// so an over-budget batch is rejected as soon as it is known to be too big.
+/// Every term over-estimates: a batch this rejects might have fit, but a
+/// batch it accepts will not hit a network limit mid-execution. The
+/// `bench_resources` tests check the estimate against measured footprints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BatchCost {
+    /// Ledger entries written.
+    pub write_entries: u32,
+    /// Bytes written to the ledger.
+    pub write_bytes: u32,
+    /// Bytes of contract events emitted.
+    pub event_bytes: u32,
+}
+
+impl BatchCost {
+    /// Cost of an empty batch whose caller consumes `extra_writes` quorum
+    /// approvals (each approval removal is one more ledger write).
+    pub fn new(extra_writes: u32) -> Self {
+        Self {
+            write_entries: BATCH_FIXED_WRITES + extra_writes,
+            write_bytes: 0,
+            // The summary's first/last tx ids are charged per item in `add`.
+            event_bytes: BATCH_EVENT_BYTES_BASE,
+        }
+    }
+
+    /// Add one payload.
+    pub fn add(&mut self, p: &CallbackPayload) {
+        let tx_id = padded(&p.transaction_id);
+        self.write_entries += BATCH_WRITES_PER_ITEM;
+        // The tx id is stored three times: record key, record body, index slot.
+        self.write_bytes += ITEM_WRITE_BYTES_BASE
+            + 3 * tx_id
+            + padded(&p.idempotency_key)
+            + padded(&p.anchor_transaction_id)
+            + padded(&p.callback_status)
+            + padded(&p.asset_code);
+        // `reg` carries tx id, anchor id and asset code. The tx id is charged
+        // twice more, since any item may be the summary's first or last id.
+        self.event_bytes += ITEM_EVENT_BYTES_BASE
+            + 3 * tx_id
+            + padded(&p.anchor_transaction_id)
+            + padded(&p.asset_code);
+    }
+
+    /// Whether the batch still fits every per-transaction limit.
+    pub fn fits(&self) -> bool {
+        self.write_entries <= TX_MAX_WRITE_ENTRIES
+            && self.write_bytes <= TX_MAX_WRITE_BYTES
+            && self.event_bytes <= TX_MAX_EVENTS_BYTES
+    }
+}
+
 pub struct Validator;
 
 impl Validator {

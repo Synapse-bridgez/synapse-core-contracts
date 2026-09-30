@@ -15,6 +15,17 @@
 //! This two-topic convention is consistent with the Stellar Asset Contract
 //! standard and makes event filtering straightforward in Horizon / RPC queries.
 //!
+//! ## Construction cost (#118)
+//!
+//! Each emitter builds its payload inside itself, immediately before
+//! `publish`, and every call site calls the emitter only on the path that
+//! emits. Payload `String`/`Address` clones copy a host-object handle, not
+//! bytes. The #118 audit found one eager construction:
+//! `batch_register_callback` decoded two whole `CallbackPayload`s from host
+//! memory just to read the summary's first and last ids. It now reuses the
+//! ids already collected while validating. Emission order and payloads are
+//! unchanged; the snapshot and conformance tests are the regression guard.
+//!
 //! **Public API:** topic names, payload fields/types/order, and multi-event
 //! emission order are versioned for Phase 2 / Phase 3 subscribers. See
 //! [`EVENTS.md`](../EVENTS.md) (catalogue + semver) and

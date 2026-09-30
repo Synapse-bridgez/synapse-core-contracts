@@ -16,8 +16,9 @@ use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
 use crate::types::{
     AnchorTierConfig, BondRecord, ContractError, ParamEntry, PendingRelaySigner, PendingUpgrade,
-    RelaySignerSet, SchemaCompatRange, StorageKey, Transaction, TransactionStatus, UnbondRequest,
-    UpgradeRecord, UpgradeSnapshot, DEFAULT_UPGRADE_DELAY_LEDGERS, MAX_UPGRADE_HISTORY,
+    RelaySignerSet, SchemaCompatRange, StorageKey, StoredTransaction, Transaction,
+    TransactionStatus, UnbondRequest, UpgradeRecord, UpgradeSnapshot,
+    DEFAULT_UPGRADE_DELAY_LEDGERS, MAX_UPGRADE_HISTORY,
 };
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
@@ -29,6 +30,30 @@ const IDEMPOTENCY_TTL_LEDGERS: u32 = 18_000;
 const TRANSACTION_MIN_TTL_LEDGERS: u32 = 100_000; // ~1 week
 
 pub struct StorageClient;
+
+/// A transaction loaded for modification by [`StorageClient::load_for_update`].
+///
+/// Derefs to the public [`Transaction`]; also remembers the status and index
+/// slot it was loaded with, so [`StorageClient::commit_transaction`] can move
+/// it between status-index buckets without another read.
+pub struct TxRecord {
+    tx: Transaction,
+    status_at_load: TransactionStatus,
+    slot: u32,
+}
+
+impl core::ops::Deref for TxRecord {
+    type Target = Transaction;
+    fn deref(&self) -> &Transaction {
+        &self.tx
+    }
+}
+
+impl core::ops::DerefMut for TxRecord {
+    fn deref_mut(&mut self) -> &mut Transaction {
+        &mut self.tx
+    }
+}
 
 impl StorageClient {
     // ── Initialisation flag ───────────────────────────────────────────────────
@@ -155,11 +180,7 @@ impl StorageClient {
     /// Extends the ledger TTL on each access so active records are never evicted.
     pub fn get_transaction(env: &Env, tx_id: &String) -> Result<Transaction, ContractError> {
         let key = StorageKey::Transaction(tx_id.clone());
-        let tx = env
-            .storage()
-            .persistent()
-            .get::<StorageKey, Transaction>(&key)
-            .ok_or(ContractError::TransactionNotFound)?;
+        let tx = Self::read_transaction(env, &key)?;
         env.storage().persistent().extend_ttl(
             &key,
             TRANSACTION_MIN_TTL_LEDGERS,
@@ -168,15 +189,58 @@ impl StorageClient {
         Ok(tx)
     }
 
-    /// Persist (insert or update) a [`Transaction`].
-    pub fn save_transaction(env: &Env, tx: &Transaction) {
-        let key = StorageKey::Transaction(tx.id.clone());
-        env.storage().persistent().set(&key, tx);
-        env.storage().persistent().extend_ttl(
-            &key,
-            TRANSACTION_MIN_TTL_LEDGERS,
-            TRANSACTION_MIN_TTL_LEDGERS,
+    /// Load a transaction the caller is about to modify, together with its
+    /// status-index slot. Write it back with [`Self::commit_transaction`].
+    ///
+    /// Skips the TTL extension `get_transaction` does, because the commit
+    /// extends the same key in the same call (#123).
+    pub fn load_for_update(env: &Env, tx_id: &String) -> Result<TxRecord, ContractError> {
+        let stored = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, StoredTransaction>(&StorageKey::Transaction(tx_id.clone()))
+            .ok_or(ContractError::TransactionNotFound)?;
+        let slot = stored.index_slot;
+        let tx = stored.into_transaction()?;
+        Ok(TxRecord {
+            status_at_load: tx.status,
+            tx,
+            slot,
+        })
+    }
+
+    fn read_transaction(env: &Env, key: &StorageKey) -> Result<Transaction, ContractError> {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, StoredTransaction>(key)
+            .ok_or(ContractError::TransactionNotFound)?
+            .into_transaction()
+    }
+
+    fn write_transaction(env: &Env, tx: &Transaction, index_slot: u32) {
+        Self::put_persistent(
+            env,
+            &StorageKey::Transaction(tx.id.clone()),
+            &StoredTransaction::from_transaction(tx, index_slot),
         );
+    }
+
+    /// Persist a brand-new transaction and append it to its status-index
+    /// bucket (`Pending` for every ingestion path).
+    pub fn insert_transaction(env: &Env, tx: &Transaction) {
+        let slot = Self::index_push(env, tx.status, &tx.id);
+        Self::write_transaction(env, tx, slot);
+    }
+
+    /// Write back a record from [`Self::load_for_update`]. If its status
+    /// changed since loading, it moves between index buckets first.
+    pub fn commit_transaction(env: &Env, record: &mut TxRecord) {
+        if record.tx.status != record.status_at_load {
+            Self::index_remove(env, record.status_at_load, record.slot, &record.tx.id);
+            record.slot = Self::index_push(env, record.tx.status, &record.tx.id);
+            record.status_at_load = record.tx.status;
+        }
+        Self::write_transaction(env, &record.tx, record.slot);
     }
 
     // ── Idempotency keys ──────────────────────────────────────────────────────
@@ -318,46 +382,41 @@ impl StorageClient {
         );
     }
 
-    /// Move `tx_id` from `old` (if any) to `new` in the per-status index.
-    ///
-    /// Every status transition must call this exactly once, alongside
-    /// [`Self::save_transaction`]. Removal swaps the last slot of the old
-    /// bucket into the vacated one, so each call is O(1) regardless of how
-    /// many transactions share a status. Within a status, page order is
-    /// therefore insertion order until the first removal from that bucket.
-    pub fn index_status_change(
-        env: &Env,
-        tx_id: &String,
-        old: Option<TransactionStatus>,
-        new: TransactionStatus,
-    ) {
-        if let Some(old) = old {
-            if old == new {
-                return;
-            }
-            let slot_of = StorageKey::StatusSlotOf(tx_id.clone());
-            if let Some(slot) = env.storage().persistent().get::<_, u32>(&slot_of) {
-                let count = Self::status_count(env, old);
-                let last = count.saturating_sub(1);
-                if slot != last {
-                    let moved: String = env
+    /// Append `tx_id` to the `status` bucket; returns its slot.
+    fn index_push(env: &Env, status: TransactionStatus, tx_id: &String) -> u32 {
+        let slot = Self::status_count(env, status);
+        Self::put_persistent(env, &StorageKey::StatusSlot(status, slot), tx_id);
+        Self::put_persistent(env, &StorageKey::StatusCount(status), &(slot + 1));
+        slot
+    }
+
+    /// Remove `tx_id` (at `slot`) from the `status` bucket in O(1): the last
+    /// entry of the bucket moves into the gap, and its record's
+    /// `index_slot` is rewritten to match. Page order within a status is
+    /// therefore insertion order only until the first removal.
+    fn index_remove(env: &Env, status: TransactionStatus, slot: u32, tx_id: &String) {
+        let last = Self::status_count(env, status).saturating_sub(1);
+        if slot != last {
+            let moved_key = StorageKey::StatusSlot(status, last);
+            if let Some(moved_id) = env.storage().persistent().get::<_, String>(&moved_key) {
+                if moved_id != *tx_id {
+                    let record_key = StorageKey::Transaction(moved_id.clone());
+                    if let Some(mut moved) = env
                         .storage()
                         .persistent()
-                        .get(&StorageKey::StatusSlot(old, last))
-                        .unwrap_or_else(|| tx_id.clone());
-                    Self::put_persistent(env, &StorageKey::StatusSlot(old, slot), &moved);
-                    Self::put_persistent(env, &StorageKey::StatusSlotOf(moved), &slot);
+                        .get::<_, StoredTransaction>(&record_key)
+                    {
+                        moved.index_slot = slot;
+                        Self::put_persistent(env, &record_key, &moved);
+                    }
+                    Self::put_persistent(env, &StorageKey::StatusSlot(status, slot), &moved_id);
                 }
-                env.storage()
-                    .persistent()
-                    .remove(&StorageKey::StatusSlot(old, last));
-                Self::put_persistent(env, &StorageKey::StatusCount(old), &last);
             }
         }
-        let count = Self::status_count(env, new);
-        Self::put_persistent(env, &StorageKey::StatusSlot(new, count), tx_id);
-        Self::put_persistent(env, &StorageKey::StatusSlotOf(tx_id.clone()), &count);
-        Self::put_persistent(env, &StorageKey::StatusCount(new), &(count + 1));
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::StatusSlot(status, last));
+        Self::put_persistent(env, &StorageKey::StatusCount(status), &last);
     }
 
     /// Return up to `limit` transaction IDs in `status`, starting at slot
@@ -409,20 +468,54 @@ impl StorageClient {
 impl StorageClient {
     /// Effective ceiling for `anchor` (the payload's `asset_issuer`): its own
     /// entry, else the contract-wide default, else unlimited.
+    ///
+    /// Runs on every ingestion. The per-anchor entry is only read when at
+    /// least one per-anchor ceiling exists (an instance-tier counter), so a
+    /// deployment without per-anchor ceilings pays no extra ledger read.
     pub fn get_amount_ceiling(env: &Env, anchor: &String) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&StorageKey::AmountCeiling(anchor.clone()))
+        let per_anchor = if Self::anchor_ceiling_count(env) > 0 {
+            env.storage()
+                .persistent()
+                .get(&StorageKey::AmountCeiling(anchor.clone()))
+        } else {
+            None
+        };
+        per_anchor
             .or_else(|| Self::get_default_amount_ceiling(env))
             .unwrap_or(i128::MAX)
+    }
+
+    fn anchor_ceiling_count(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&StorageKey::AnchorCeilingCount)
+            .unwrap_or(0)
     }
 
     /// Set (`Some`) or clear (`None`) the per-anchor ceiling.
     pub fn set_amount_ceiling(env: &Env, anchor: &String, ceiling: Option<i128>) {
         let key = StorageKey::AmountCeiling(anchor.clone());
-        match ceiling {
-            Some(c) => env.storage().persistent().set(&key, &c),
-            None => env.storage().persistent().remove(&key),
+        let existed = env.storage().persistent().has(&key);
+        let count = Self::anchor_ceiling_count(env);
+        let new_count = match (existed, ceiling) {
+            (false, Some(c)) => {
+                env.storage().persistent().set(&key, &c);
+                count + 1
+            }
+            (true, Some(c)) => {
+                env.storage().persistent().set(&key, &c);
+                count
+            }
+            (true, None) => {
+                env.storage().persistent().remove(&key);
+                count.saturating_sub(1)
+            }
+            (false, None) => count,
+        };
+        if new_count != count {
+            env.storage()
+                .instance()
+                .set(&StorageKey::AnchorCeilingCount, &new_count);
         }
     }
 
@@ -485,8 +578,12 @@ impl StorageClient {
 
 impl StorageClient {
     /// The explicitly stored signer set, if the admin ever changed it.
+    ///
+    /// Instance tier: every relay-gated call checks for it, and the instance
+    /// entry is loaded on every invocation anyway, so the common "no set"
+    /// case costs no extra ledger read (#116).
     pub fn get_relay_signer_set_opt(env: &Env) -> Option<RelaySignerSet> {
-        env.storage().persistent().get(&StorageKey::RelaySignerSet)
+        env.storage().instance().get(&StorageKey::RelaySignerSet)
     }
 
     /// Read the relay signer set. Until the admin first changes membership or
@@ -505,7 +602,7 @@ impl StorageClient {
     /// Persist the relay signer set.
     pub fn set_relay_signer_set(env: &Env, set: &RelaySignerSet) {
         env.storage()
-            .persistent()
+            .instance()
             .set(&StorageKey::RelaySignerSet, set);
     }
 

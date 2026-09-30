@@ -101,6 +101,17 @@ separately from general code changes. Full topic/field contracts live in
   `StorageError` (50) and `InvalidParamValue` (71) are removed.
 - `set_relay_signer` returns `TimelockRequired` once a non-zero relay-signer
   delay is configured.
+- **Breaking:** `MAX_BATCH_SIZE` is 7, not 20. Protocol 22 allows 25 ledger
+  writes per transaction and each payload needs 3, so larger batches could
+  never succeed on a real network. Batches are also checked against a
+  conservative write/event budget before any write and rejected with the new
+  `BatchResourceBudgetExceeded` (38) (#173).
+- Cheaper hot path (#116, #117, #123): `register_callback` fee −14.7 %,
+  batches −18 %, transitions −2 to −5 % (COST_MODEL.md §12). Transactions are
+  stored as a packed `StoredTransaction`; `get_transaction` still returns
+  `Transaction`. The relay signer set moved to instance storage.
+- Ledger read/write budgets per entry point are pinned by
+  `bench_resource_budgets` (#116, #123, #125).
 
 ### Event schema (prior unreleased)
 - Added `EventRelaySignerRotated` (topic `relay`), emitted by

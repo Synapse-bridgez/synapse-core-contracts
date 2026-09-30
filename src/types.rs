@@ -18,13 +18,21 @@ use soroban_sdk::{contracterror, contracttype, Address, BytesN, String, Vec};
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Maximum number of times a `Failed` transaction may be retried.
+/// Stored in a 4-bit field of [`StoredTransaction::state`], so it must stay
+/// below 16.
 pub const MAX_RETRIES: u32 = 3;
 
 /// Hard cap on the `limit` accepted by `get_transactions_by_status`.
 pub const MAX_PAGE_LIMIT: u32 = 50;
 
 /// Hard cap on the number of payloads accepted by `batch_register_callback`.
-pub const MAX_BATCH_SIZE: u32 = 20;
+///
+/// Derived from the network's per-transaction write-entry limit: each
+/// payload writes 3 entries (record, idempotency key, status-index slot) and
+/// every batch writes 2 more (the `Pending` count and the caller's auth
+/// nonce), so `(25 - 2) / 3 = 7`. See `validation::BatchCost` for the
+/// byte-level budget check that runs on top of this cap (#173).
+pub const MAX_BATCH_SIZE: u32 = 7;
 
 /// Maximum number of [`UpgradeRecord`]s retained by `get_upgrade_history`.
 /// The oldest record is evicted (FIFO) once the cap is reached.
@@ -78,7 +86,9 @@ pub enum CallbackType {
 
 /// On-chain mirror of the `transactions` table row.
 ///
-/// Stored in persistent ledger storage keyed by [`StorageKey::Transaction`].
+/// This is the public shape returned by `get_transaction`. On the ledger it
+/// is stored as a [`StoredTransaction`] (packed status/flags, #117) keyed by
+/// [`StorageKey::Transaction`].
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Transaction {
@@ -133,6 +143,139 @@ pub struct Transaction {
     /// Amount actually settled when completed via
     /// `partial_complete_transaction`; `None` for a full settlement.
     pub settled_amount: Option<i128>,
+}
+
+// ─── Packed storage representation (#117) ────────────────────────────────────
+
+/// Bit layout of [`StoredTransaction::state`].
+///
+/// ```text
+/// bit  0..=2  TransactionStatus   (Pending=0 … Cancelled=4; 5..=7 unused)
+/// bit  3      CallbackType        (0 = Deposit, 1 = Withdrawal)
+/// bit  4..=7  retry_count         (0..=MAX_RETRIES; MAX_RETRIES must stay < 16)
+/// bit  8..=31 reserved, always 0
+/// ```
+pub mod packed_state {
+    /// Mask for the status bits.
+    pub const STATUS_MASK: u32 = 0b111;
+    /// Set when `callback_type` is `Withdrawal`.
+    pub const WITHDRAWAL_BIT: u32 = 1 << 3;
+    /// Shift of the retry-count nibble.
+    pub const RETRY_SHIFT: u32 = 4;
+    /// Mask (after shifting) for the retry-count nibble.
+    pub const RETRY_MASK: u32 = 0xF;
+    /// Bits that are never set by [`super::StoredTransaction::from_transaction`].
+    pub const RESERVED_MASK: u32 = !0xFF;
+}
+
+// `retry_count` is stored in a 4-bit field of `StoredTransaction::state`.
+const _: () = assert!(MAX_RETRIES <= packed_state::RETRY_MASK);
+
+/// Ledger representation of a [`Transaction`].
+///
+/// Identical to [`Transaction`] except that the three small fields `status`,
+/// `callback_type` and `retry_count` are packed into the single `state` word
+/// (layout in [`packed_state`]). A `#[contracttype]` struct is an XDR map
+/// keyed by field name, so each separate field costs its key symbol plus a
+/// tagged value; packing saves those bytes on every write and on rent.
+/// The public API ([`Transaction`], `get_transaction`) is unchanged.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StoredTransaction {
+    pub id: String,
+    pub stellar_account: String,
+    pub amount: i128,
+    pub asset_code: String,
+    pub asset_issuer: String,
+    pub created_at_ledger: u32,
+    pub updated_at_ledger: u32,
+    pub anchor_transaction_id: String,
+    pub callback_status: String,
+    pub stellar_tx_hash: String,
+    pub failure_reason: String,
+    pub settled_amount: Option<i128>,
+    /// Packed `status` / `callback_type` / `retry_count`; see [`packed_state`].
+    pub state: u32,
+    /// This record's slot in the per-status index
+    /// (`StorageKey::StatusSlot(status, index_slot)`). Kept here rather than
+    /// in a separate reverse-pointer entry, which saves one ledger write per
+    /// registration and transition and one rent-paying entry per transaction.
+    pub index_slot: u32,
+}
+
+impl StoredTransaction {
+    /// Pack a [`Transaction`] for storage at `index_slot`.
+    pub fn from_transaction(tx: &Transaction, index_slot: u32) -> Self {
+        let status = match tx.status {
+            TransactionStatus::Pending => 0,
+            TransactionStatus::Processing => 1,
+            TransactionStatus::Completed => 2,
+            TransactionStatus::Failed => 3,
+            TransactionStatus::Cancelled => 4,
+        };
+        let withdrawal = match tx.callback_type {
+            CallbackType::Deposit => 0,
+            CallbackType::Withdrawal => packed_state::WITHDRAWAL_BIT,
+        };
+        let retries = (tx.retry_count & packed_state::RETRY_MASK) << packed_state::RETRY_SHIFT;
+        Self {
+            id: tx.id.clone(),
+            stellar_account: tx.stellar_account.clone(),
+            amount: tx.amount,
+            asset_code: tx.asset_code.clone(),
+            asset_issuer: tx.asset_issuer.clone(),
+            created_at_ledger: tx.created_at_ledger,
+            updated_at_ledger: tx.updated_at_ledger,
+            anchor_transaction_id: tx.anchor_transaction_id.clone(),
+            callback_status: tx.callback_status.clone(),
+            stellar_tx_hash: tx.stellar_tx_hash.clone(),
+            failure_reason: tx.failure_reason.clone(),
+            settled_amount: tx.settled_amount,
+            state: status | withdrawal | retries,
+            index_slot,
+        }
+    }
+
+    /// Unpack into the public [`Transaction`] shape.
+    ///
+    /// Fails with [`ContractError::SelfCheckFailed`] if `state` holds a
+    /// status code or reserved bit that `from_transaction` never writes,
+    /// i.e. the stored record is corrupt.
+    pub fn into_transaction(self) -> Result<Transaction, ContractError> {
+        if self.state & packed_state::RESERVED_MASK != 0 {
+            return Err(ContractError::SelfCheckFailed);
+        }
+        let status = match self.state & packed_state::STATUS_MASK {
+            0 => TransactionStatus::Pending,
+            1 => TransactionStatus::Processing,
+            2 => TransactionStatus::Completed,
+            3 => TransactionStatus::Failed,
+            4 => TransactionStatus::Cancelled,
+            _ => return Err(ContractError::SelfCheckFailed),
+        };
+        let callback_type = if self.state & packed_state::WITHDRAWAL_BIT == 0 {
+            CallbackType::Deposit
+        } else {
+            CallbackType::Withdrawal
+        };
+        Ok(Transaction {
+            id: self.id,
+            stellar_account: self.stellar_account,
+            amount: self.amount,
+            asset_code: self.asset_code,
+            asset_issuer: self.asset_issuer,
+            status,
+            created_at_ledger: self.created_at_ledger,
+            updated_at_ledger: self.updated_at_ledger,
+            anchor_transaction_id: self.anchor_transaction_id,
+            callback_type,
+            callback_status: self.callback_status,
+            stellar_tx_hash: self.stellar_tx_hash,
+            failure_reason: self.failure_reason,
+            retry_count: (self.state >> packed_state::RETRY_SHIFT) & packed_state::RETRY_MASK,
+            settled_amount: self.settled_amount,
+        })
+    }
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -227,9 +370,8 @@ pub enum StorageKey {
     /// Per-status index slot `(status, i)` -> transaction ID, `i < count`.
     /// Slots are dense; removal swaps the last slot into the gap so every
     /// index update is O(1) and no single ledger entry grows unboundedly.
+    /// Each record stores its own slot in [`StoredTransaction::index_slot`].
     StatusSlot(TransactionStatus, u32),
-    /// Reverse pointer: transaction ID -> its slot in its current status.
-    StatusSlotOf(String),
     /// Per-transaction tag list (`Vec<String>`), kept out of the
     /// [`Transaction`] record so untagged transactions pay no extra rent.
     TxTags(String),
@@ -239,6 +381,9 @@ pub enum StorageKey {
     AmountCeiling(String),
     /// Singleton: contract-wide default ceiling for anchors without an entry.
     DefaultAmountCeiling,
+    /// Singleton (instance): number of `AmountCeiling` entries, so ingestion
+    /// can skip the per-anchor lookup when there are none.
+    AnchorCeilingCount,
 
     // ── Recovery / phase routing (#179) ──────────────────────────────────────
     /// Merge marker: duplicate tx id -> canonical tx id it was merged into.
@@ -247,9 +392,9 @@ pub enum StorageKey {
     ForwardRoute(String),
 
     // ── Relay signer set / timelocked rotation (#179) ────────────────────────
-    /// Singleton: N-of-M relay signer set ([`RelaySignerSet`]). Absent until
-    /// the set is first changed; the single `RelaySigner` is then treated as
-    /// `threshold = 1, signers = [relay_signer]`.
+    /// Singleton (instance): N-of-M relay signer set ([`RelaySignerSet`]).
+    /// Absent until the set is first changed; the single `RelaySigner` is
+    /// then treated as `threshold = 1, signers = [relay_signer]`.
     RelaySignerSet,
     /// Temporary: a signer's standing approval for the next gated relay call.
     RelayApproval(Address),
@@ -536,6 +681,10 @@ pub enum ContractError {
     InvalidPageLimit = 35,
     /// A batch was empty or exceeded [`MAX_BATCH_SIZE`].
     InvalidBatchSize = 36,
+    /// A batch's worst-case ledger-write or event footprint would exceed the
+    /// per-transaction network limits (see `validation::BatchCost`), even
+    /// though its item count is within [`MAX_BATCH_SIZE`].
+    BatchResourceBudgetExceeded = 38,
     /// A transaction tag was empty, or the transaction already carries the
     /// maximum number of tags. (Over-long tags are `StringTooLong`.)
     InvalidTag = 37,
@@ -549,7 +698,8 @@ pub enum ContractError {
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
-    /// The post-upgrade storage self-check failed; the upgrade reverts.
+    /// A storage integrity check failed: the post-upgrade self-check (the
+    /// upgrade reverts), or a stored record that does not decode.
     SelfCheckFailed = 61,
     /// A timelocked action (`finalize_upgrade`, `finalize_relay_signer`,
     /// `claim_unbond`) was attempted before its delay elapsed.
@@ -616,4 +766,110 @@ pub enum ContractError {
     QuorumNotMet = 121,
     /// A non-zero relay-signer delay is configured; use propose/finalize.
     TimelockRequired = 122,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::Env;
+
+    fn sample(env: &Env) -> Transaction {
+        let s = |v: &str| String::from_str(env, v);
+        Transaction {
+            id: s("tx-1"),
+            stellar_account: s("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ"),
+            amount: 1_000,
+            asset_code: s("USDC"),
+            asset_issuer: s("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ"),
+            status: TransactionStatus::Pending,
+            created_at_ledger: 7,
+            updated_at_ledger: 9,
+            anchor_transaction_id: s("anchor-1"),
+            callback_type: CallbackType::Deposit,
+            callback_status: s("pending_external"),
+            stellar_tx_hash: s("hash"),
+            failure_reason: s("reason"),
+            retry_count: 0,
+            settled_amount: None,
+        }
+    }
+
+    fn same(a: &Transaction, b: &Transaction) -> bool {
+        a.id == b.id
+            && a.stellar_account == b.stellar_account
+            && a.amount == b.amount
+            && a.asset_code == b.asset_code
+            && a.asset_issuer == b.asset_issuer
+            && a.status == b.status
+            && a.created_at_ledger == b.created_at_ledger
+            && a.updated_at_ledger == b.updated_at_ledger
+            && a.anchor_transaction_id == b.anchor_transaction_id
+            && a.callback_type == b.callback_type
+            && a.callback_status == b.callback_status
+            && a.stellar_tx_hash == b.stellar_tx_hash
+            && a.failure_reason == b.failure_reason
+            && a.retry_count == b.retry_count
+            && a.settled_amount == b.settled_amount
+    }
+
+    /// #117: every status × callback type × retry count (the full 4-bit
+    /// field, not just `0..=MAX_RETRIES`) × settled flag round-trips exactly,
+    /// and distinct inputs never share a packed `state`.
+    #[test]
+    fn packed_state_round_trips_full_state_space() {
+        let env = Env::default();
+        let statuses = [
+            TransactionStatus::Pending,
+            TransactionStatus::Processing,
+            TransactionStatus::Completed,
+            TransactionStatus::Failed,
+            TransactionStatus::Cancelled,
+        ];
+        let mut seen: [bool; 256] = [false; 256];
+        let mut cases = 0;
+        for status in statuses {
+            for callback_type in [CallbackType::Deposit, CallbackType::Withdrawal] {
+                for retry_count in 0..=packed_state::RETRY_MASK {
+                    for settled_amount in [None, Some(1i128), Some(i128::MAX)] {
+                        let mut tx = sample(&env);
+                        tx.status = status;
+                        tx.callback_type = callback_type.clone();
+                        tx.retry_count = retry_count;
+                        tx.settled_amount = settled_amount;
+                        let stored = StoredTransaction::from_transaction(&tx, 42);
+                        assert_eq!(stored.index_slot, 42);
+                        assert_eq!(stored.state & packed_state::RESERVED_MASK, 0);
+                        if settled_amount.is_none() {
+                            let state = stored.state as usize;
+                            assert!(!seen[state], "state {state:#x} packed twice");
+                            seen[state] = true;
+                        }
+                        let back = stored.into_transaction().expect("valid state");
+                        assert!(same(&tx, &back), "round-trip mismatch for {tx:?}");
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 5 * 2 * 16 * 3);
+    }
+
+    /// States `from_transaction` never writes are rejected, not guessed.
+    #[test]
+    fn packed_state_rejects_unused_status_codes_and_reserved_bits() {
+        let env = Env::default();
+        let mut stored = StoredTransaction::from_transaction(&sample(&env), 0);
+        for bad_status in 5..=packed_state::STATUS_MASK {
+            stored.state = bad_status;
+            assert_eq!(
+                stored.clone().into_transaction().unwrap_err(),
+                ContractError::SelfCheckFailed
+            );
+        }
+        stored.state = 1 << 8;
+        assert_eq!(
+            stored.into_transaction().unwrap_err(),
+            ContractError::SelfCheckFailed
+        );
+    }
 }

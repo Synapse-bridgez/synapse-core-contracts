@@ -37,6 +37,8 @@ mod validation;
 #[cfg(test)]
 mod bench_events;
 #[cfg(test)]
+mod bench_resources;
+#[cfg(test)]
 mod schema_ci;
 #[cfg(test)]
 mod test_events_conformance;
@@ -62,7 +64,7 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::migration::MigrationRegistry;
-use crate::storage::StorageClient;
+use crate::storage::{StorageClient, TxRecord};
 use crate::types::{
     AnchorTierConfig, BondRecord, CallbackPayload, ContractError, ParamEntry, PendingRelaySigner,
     PendingUpgrade, RelaySignerSet, SchemaCompatRange, SlashEvidence, Transaction,
@@ -70,7 +72,7 @@ use crate::types::{
     DEFAULT_RELAY_SIGNER_DELAY_LEDGERS, MAX_BATCH_SIZE, MAX_PAGE_LIMIT, MAX_RETRIES,
     SCHEMA_VERSION,
 };
-use crate::validation::Validator;
+use crate::validation::{BatchCost, Validator};
 
 /// Default unbonding delay in ledgers (~24 h at 5 s/ledger).
 /// Used when the `unbond_delay_ledgers` param has not been set by the admin.
@@ -187,7 +189,10 @@ impl SynapseCoreContract {
     /// ingest). Every payload is validated, and checked against on-chain and
     /// in-batch duplicate `transaction_id`s, *before* any storage write; any
     /// failure aborts the whole call with no partial writes. An empty or
-    /// oversized batch is rejected with [`ContractError::InvalidBatchSize`].
+    /// oversized batch is rejected with [`ContractError::InvalidBatchSize`];
+    /// one whose worst-case footprint would exceed the per-transaction
+    /// network limits with [`ContractError::BatchResourceBudgetExceeded`]
+    /// (#173, see [`validation::BatchCost`]).
     ///
     /// # Events
     /// Emits [`events::EventTransactionRegistered`] per payload, in batch
@@ -204,29 +209,37 @@ impl SynapseCoreContract {
         if n == 0 || n > MAX_BATCH_SIZE {
             return Err(ContractError::InvalidBatchSize);
         }
-        AdminClient::require_relay_signer(&env, &caller)?;
+        let extra_writes = AdminClient::require_relay_signer(&env, &caller)?;
 
-        // Pass 1: validate everything; no writes.
-        for i in 0..n {
-            let p = payloads.get_unchecked(i);
+        // Pass 1: budget, validate and de-duplicate; no writes. Each payload
+        // is decoded once; ids are kept in a host Vec for the in-batch check.
+        let mut ids: Vec<String> = Vec::new(&env);
+        let mut cost = BatchCost::new(extra_writes);
+        for p in payloads.iter() {
+            cost.add(&p);
+            if !cost.fits() {
+                return Err(ContractError::BatchResourceBudgetExceeded);
+            }
             Validator::validate_payload(&env, &p)?;
-            if StorageClient::transaction_exists(&env, &p.transaction_id) {
+            if ids.contains(&p.transaction_id)
+                || StorageClient::transaction_exists(&env, &p.transaction_id)
+            {
                 return Err(ContractError::DuplicateRequest);
             }
-            for j in 0..i {
-                if payloads.get_unchecked(j).transaction_id == p.transaction_id {
-                    return Err(ContractError::DuplicateRequest);
-                }
-            }
+            ids.push_back(p.transaction_id);
         }
 
         // Pass 2: write.
         for p in payloads.iter() {
             Self::persist_new_transaction(&env, &p);
         }
-        let first = payloads.get_unchecked(0).transaction_id;
-        let last = payloads.get_unchecked(n - 1).transaction_id;
-        EventEmitter::batch_processed(&env, &caller, n, &first, &last);
+        EventEmitter::batch_processed(
+            &env,
+            &caller,
+            n,
+            &ids.get_unchecked(0),
+            &ids.get_unchecked(n - 1),
+        );
 
         Ok(n)
     }
@@ -240,7 +253,7 @@ impl SynapseCoreContract {
     pub fn start_processing(env: Env, tx_id: String, caller: Address) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
 
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        let mut tx = StorageClient::load_for_update(&env, &tx_id)?;
         if tx.status != TransactionStatus::Pending {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -262,7 +275,7 @@ impl SynapseCoreContract {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
         Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
 
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        let mut tx = StorageClient::load_for_update(&env, &tx_id)?;
         if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -293,7 +306,7 @@ impl SynapseCoreContract {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
         Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
 
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        let mut tx = StorageClient::load_for_update(&env, &tx_id)?;
         if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -326,7 +339,7 @@ impl SynapseCoreContract {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
         Validator::validate_failure_reason(&reason)?;
 
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        let mut tx = StorageClient::load_for_update(&env, &tx_id)?;
         if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -355,7 +368,7 @@ impl SynapseCoreContract {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
         Validator::validate_failure_reason(&reason)?;
 
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        let mut tx = StorageClient::load_for_update(&env, &tx_id)?;
         match tx.status {
             TransactionStatus::Pending | TransactionStatus::Processing => {}
             TransactionStatus::Cancelled => return Err(ContractError::AlreadyCancelled),
@@ -385,7 +398,7 @@ impl SynapseCoreContract {
     ) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
 
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        let mut tx = StorageClient::load_for_update(&env, &tx_id)?;
         if tx.status != TransactionStatus::Failed {
             return Err(ContractError::InvalidStatusTransition);
         }
@@ -469,8 +482,10 @@ impl SynapseCoreContract {
             return Err(ContractError::MergeSelf);
         }
         Validator::validate_failure_reason(&reason)?;
-        StorageClient::get_transaction(&env, &canonical_tx_id)?;
-        let mut dup = StorageClient::get_transaction(&env, &duplicate_tx_id)?;
+        if !StorageClient::transaction_exists(&env, &canonical_tx_id) {
+            return Err(ContractError::TransactionNotFound);
+        }
+        let mut dup = StorageClient::load_for_update(&env, &duplicate_tx_id)?;
         if StorageClient::get_merged_into(&env, &duplicate_tx_id).is_some()
             || StorageClient::get_merged_into(&env, &canonical_tx_id).is_some()
         {
@@ -1541,21 +1556,19 @@ impl SynapseCoreContract {
             retry_count: 0,
             settled_amount: None,
         };
-        StorageClient::save_transaction(env, &tx);
-        StorageClient::index_status_change(env, &tx.id, None, TransactionStatus::Pending);
+        StorageClient::insert_transaction(env, &tx);
         StorageClient::set_idempotency_key(env, &payload.idempotency_key);
         EventEmitter::transaction_registered(env, &tx);
         tx
     }
 
-    /// Move `tx` to `new_status`: persist it, update the status index, and
-    /// emit `status`. Callers validate the transition first.
-    fn transition(env: &Env, tx: &mut Transaction, new_status: TransactionStatus) {
+    /// Move `tx` to `new_status`: persist it (moving it between status-index
+    /// buckets) and emit `status`. Callers validate the transition first.
+    fn transition(env: &Env, tx: &mut TxRecord, new_status: TransactionStatus) {
         let old_status = tx.status;
         tx.status = new_status;
         tx.updated_at_ledger = env.ledger().sequence();
-        StorageClient::save_transaction(env, tx);
-        StorageClient::index_status_change(env, &tx.id, Some(old_status), new_status);
+        StorageClient::commit_transaction(env, tx);
         EventEmitter::status_changed(env, &tx.id, old_status, new_status);
     }
 

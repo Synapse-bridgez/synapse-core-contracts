@@ -384,12 +384,108 @@ read fees per upgrade — negligible next to the WASM-swap host cost itself.
 
 ## 11. Batch registration (`batch_register_callback`)
 
-Batch size is capped at `MAX_BATCH_SIZE` (20). Worst case is 20 payloads with
-max-length string fields: each payload costs one persistent write for the
-transaction (~512 B fee-rounded, see section 2), one temporary write for the
-idempotency key, one status-index update, and one event, plus a single
-`EventBatchProcessed`. Validation runs over the whole batch before any write,
-including an O(n^2) in-batch duplicate check (at most 190 comparisons). The
-cap is deliberately conservative to stay well under the per-transaction
-resource limits; raise it only after benchmarking.
+Two limits apply, both checked before any storage write (#173):
 
+1. **Count cap: `MAX_BATCH_SIZE` = 7.** A batch writes 3 ledger entries per
+   payload (record, idempotency key, status-index slot) plus 2 per call (the
+   `Pending` count and the caller's auth nonce). Soroban protocol 22 allows 25
+   write entries per transaction, so `(25 − 2) / 3 = 7`. The previous cap of
+   20 needed 62 write entries, so a batch that large could never have
+   succeeded on a real network.
+2. **Resource budget: `validation::BatchCost`.** A conservative running
+   estimate of write entries, write bytes and event bytes, built one payload
+   at a time from its string lengths. Each consumed quorum approval adds a
+   write. The call fails with `BatchResourceBudgetExceeded` as soon as any
+   network limit would be crossed.
+
+| Limit (protocol 22) | Value | Binds at |
+|---------------------|------:|----------|
+| `tx_max_write_ledger_entries` | 25 | 7 items (6 with 2+ consumed approvals) |
+| `tx_max_contract_events_size_bytes` | 8 198 | 13 max-length items (unreachable under the count cap) |
+| `tx_max_write_bytes` | 132 096 | ~87 max-length items (unreachable) |
+
+`bench_resources::batch_cost_estimate_is_conservative` runs every batch size
+from 1 to 7 at four field-length mixes and checks that the estimate is never
+below the measured footprint. `batch_budget_boundary_with_quorum_approvals`
+shows a full batch landing on exactly 25 writes, and one more approval being
+rejected with no partial writes.
+
+The in-batch duplicate check keeps seen ids in a host `Vec` and decodes
+each payload once. Before this it re-decoded every earlier payload for each
+item (O(n²) decodes).
+
+---
+
+## 12. Ledger-I/O budgets and hot-path optimisation (#116, #117, #123, #125)
+
+### 12.1 Method
+
+`src/bench_resources.rs` reads `env.cost_estimate().resources()` after each
+invocation. Ledger read and write entry counts and byte sizes come from the
+storage footprint, so they are exact in the native build, and
+`bench_resource_budgets` pins them per entry point. CI prints the table
+(`cargo test bench_resource -- --nocapture`). For CPU and fees,
+`SYNAPSE_BENCH_WASM=<release .wasm> cargo test bench_resource_release_wasm
+-- --nocapture` meters the same scenarios against the compiled contract.
+
+Fee figures below are the SDK's protocol-22 pubnet fee estimate **minus
+temporary-entry rent**, which is dominated by the host's auth-nonce entry
+and is the same for every entry point.
+
+### 12.2 Changes
+
+| Change | Effect |
+|--------|--------|
+| Relay signer set moved to instance storage | The "no N-of-M set" check on every relay-gated call no longer costs a ledger read |
+| Per-anchor ceiling lookup skipped when none exist (instance counter) | −1 read on every ingestion for deployments without per-anchor ceilings |
+| `StoredTransaction`: `status`, `callback_type`, `retry_count` packed into one `u32` (#117) | −100 B per record write and in rent; `get_transaction` still returns `Transaction` |
+| Status-index slot stored in the record instead of a reverse-pointer entry | −1 write per registration and per transition; one fewer rent-paying entry per transaction |
+| Transitions load without the TTL bump the following write repeats | −1 host TTL call per transition |
+| Batch: ids tracked in a host `Vec` | O(n²) → O(n) payload decodes |
+
+### 12.3 Before / after (release WASM, same scenarios)
+
+| Scenario | Reads | Writes | Write bytes | Fee (stroops) | Δ fee |
+|----------|------:|-------:|------------:|--------------:|------:|
+| `register_callback` | 6 → 4 | 6 → 5 | 1 312 → 1 132 | 932 476 → 795 757 | −14.7 % |
+| `batch_register_callback` ×5 | 6 → 4 | 22 → 17 | 5 776 → 4 876 | 3 634 429 → 2 979 442 | −18.0 % |
+| `start_processing` | 5 → 4 | 9 → 8 | 1 580 → 1 976 | 572 089 → 547 221 | −4.3 % |
+| `complete_transaction` | 6 → 5 | 9 → 8 | 1 604 → 2 000 | 587 436 → 575 338 | −2.1 % |
+| `retry_transaction` | 5 → 4 | 7 → 6 | 1 324 → 1 144 | 440 637 → 420 541 | −4.6 % |
+| `get_transaction` | 3 → 3 | 0 | 0 | 205 329 → 210 455 | +2.5 % |
+| `propose_admin` | 4 → 4 | 2 → 2 | 200 | 261 085 → 266 370 | +2.0 % |
+| `accept_admin` | 3 → 3 | 3 → 3 | 196 | 257 853 → 263 134 | +2.0 % |
+
+Transitions write more *bytes* than before: moving a transaction out of the
+middle of a status bucket now rewrites the moved record's `index_slot`
+instead of a small reverse-pointer entry. That costs less than the entry it
+removes. Calls that touch no transaction got about 2 % dearer because the
+release WASM grew by 2.9 KB (98 254 → 101 110 B). In protocol 22 every
+invocation reads the whole code entry (≈ 1.8 stroops per byte), and VM
+instantiation (≈ 5.3 M instructions here) scales with code size. **WASM
+size is now the largest per-call cost after rent**; see §12.5.
+
+### 12.4 Two-step admin transfer (#125)
+
+The audit found no redundant storage operations to remove:
+
+| Step | Contract writes | Why each is needed |
+|------|-----------------|--------------------|
+| `propose_admin` | `PendingAdmin` | the nomination itself |
+| `accept_admin` | `Admin`, `PendingAdmin` (delete) | the handover, and clearing the nomination so it cannot be replayed |
+
+Both also write the caller's auth nonce (host-owned). `accept_admin` reads
+`Admin` only to report `old_admin` in its event; reading a key that is then
+written adds no footprint entry. `bench_resource_budgets` pins both steps
+(`R=3 W=2` and `R=2 W=3`), so a later change that adds I/O to this flow fails
+CI. The same method applies to any entry point: list every key the call
+touches, drop any that are read twice or written with an unchanged value,
+then pin the result in `BUDGETS`.
+
+### 12.5 Follow-ups not done here
+
+- **WASM size.** Every entry point pays for the whole code entry on every
+  call. Splitting rarely used admin/upgrade logic into a separate contract, or
+  a size gate (#122), would cut every call's fee.
+- **`register_callback` CPU.** The two strkey CRC16 checks dominate guest
+  instructions; cheapest-first validation ordering is #120's scope.
