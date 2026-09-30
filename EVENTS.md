@@ -54,8 +54,26 @@ supported.
 | Event | Topic[1] | Emitter | Entry-point(s) | Status |
 |-------|----------|---------|----------------|--------|
 | [`EventInitialised`](#eventinitialised) | `init` | `EventEmitter::initialised` | `initialize` | **Live** |
-| [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only) | **Live** |
+| [`EventTransactionRegistered`](#eventtransactionregistered) | `reg` | `EventEmitter::transaction_registered` | `register_callback` (first write only), `batch_register_callback` | **Live** |
 | [`EventBatchProcessed`](#eventbatchprocessed) | `batch` | `EventEmitter::batch_processed` | `batch_register_callback` | **Live** |
+| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | every status transition (see §4) | **Live** |
+| [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
+| [`EventTransactionPartiallyCompleted`](#eventtransactionpartiallycompleted) | `partial` | `EventEmitter::transaction_partially_completed` | `partial_complete_transaction` | **Live** |
+| [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
+| [`EventTransactionCancelled`](#eventtransactioncancelled) | `cancel` | `EventEmitter::transaction_cancelled` | `cancel_transaction` | **Live** |
+| [`EventTransactionRetried`](#eventtransactionretried) | `retry` | `EventEmitter::transaction_retried` | `retry_transaction` | **Live** |
+| [`EventTransactionTagged`](#eventtransactiontagged) | `tagged` | `EventEmitter::transaction_tagged` | `add_transaction_tag` | **Live** |
+| [`EventTransactionsMerged`](#eventtransactionsmerged) | `merged` | `EventEmitter::transactions_merged` | `merge_duplicate_transactions` | **Live** |
+| [`EventForwardingIntent`](#eventforwardingintent) | `fwd` | `EventEmitter::forwarding_intent` | `complete_transaction`, `partial_complete_transaction` (route configured) | **Live** |
+| [`EventAmountCeilingSet`](#eventamountceilingset) | `ceiling` | `EventEmitter::amount_ceiling_set` | `set_amount_ceiling`, `set_default_amount_ceiling` | **Live** |
+| [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
+| [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
+| [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer`, `finalize_relay_signer` | **Live** |
+| [`EventRelaySignerChange`](#eventrelaysignerchange) | `rs_prop` | `EventEmitter::relay_signer_proposed` | `propose_relay_signer` | **Live** |
+| [`EventRelaySignerChange`](#eventrelaysignerchange) | `rs_canc` | `EventEmitter::relay_signer_change_cancelled` | `cancel_relay_signer_change` | **Live** |
+| [`EventRelaySignerMembership`](#eventrelaysignermembership) | `rs_add` | `EventEmitter::relay_signer_added` | `add_relay_signer` | **Live** |
+| [`EventRelaySignerMembership`](#eventrelaysignermembership) | `rs_rm` | `EventEmitter::relay_signer_removed` | `remove_relay_signer` | **Live** |
+| [`EventRelayThresholdChanged`](#eventrelaythresholdchanged) | `rs_thr` | `EventEmitter::relay_threshold_changed` | `set_relay_threshold` | **Live** |
 | [`EventPauseToggled`](#eventpausetoggled) | `pause` | `EventEmitter::pause_toggled` | `pause`, `unpause` | **Live** |
 | [`EventContractUpgraded`](#eventcontractupgraded) | `upgrade` | `EventEmitter::contract_upgraded` | `upgrade` / `finalize_upgrade` / `upgrade_and_migrate` / `rollback_upgrade` | **Live** |
 | [`EventUpgradeProposed`](#eventupgradeproposed) | `up_prop` | `EventEmitter::upgrade_proposed` | `propose_upgrade` | **Live** |
@@ -63,24 +81,21 @@ supported.
 | [`EventUpgradeCancelled`](#eventupgradecancelled) | `up_can` | `EventEmitter::upgrade_cancelled` | `cancel_upgrade` | **Live** |
 | [`EventUpgradeRolledBack`](#eventupgraderolledback) | `rollback` | `EventEmitter::upgrade_rolled_back` | `rollback_upgrade` | **Live** |
 | [`EventUpgradeMigrated`](#eventupgrademigrated) | `migrate` | `EventEmitter::upgrade_migrated` | `upgrade_and_migrate` | **Live** |
-| [`EventUpgradeSelfCheckPassed`](#eventupgradeselfcheckpassed) | `chk_pass` | `EventEmitter::upgrade_self_check_passed` | `upgrade` | **Live** |
-| [`EventUpgradeSelfCheckFailed`](#eventupgradeselfcheckfailed) | `chk_fail` | `EventEmitter::upgrade_self_check_failed` | `upgrade` | **Live** |
-| [`EventStatusChanged`](#eventstatuschanged) | `status` | `EventEmitter::status_changed` | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` | **Live** |
-| [`EventTransactionCompleted`](#eventtransactioncompleted) | `done` | `EventEmitter::transaction_completed` | `complete_transaction` | **Live** |
-| [`EventTransactionFailed`](#eventtransactionfailed) | `fail` | `EventEmitter::transaction_failed` | `fail_transaction` | **Live** |
-| [`EventTransactionExpired`](#eventtransactionexpired) | `expire` | `EventEmitter::transaction_expired` | `expire_transaction` | **Live** |
-| [`EventAdminTransferProposed`](#eventadmintransferproposed) | `propose` | `EventEmitter::admin_transfer_proposed` | `propose_admin` | **Live** |
-| [`EventAdminTransferred`](#eventadmintransferred) | `admin` | `EventEmitter::admin_transferred` | `accept_admin` | **Live** |
-| [`EventRelaySignerRotated`](#eventrelaysignerrotated) | `relay` | `EventEmitter::relay_signer_rotated` | `set_relay_signer` | **Live** |
-| [`EventUpgradeQuorumSet`](#eventupgradequorumset) | `uqset` | `EventEmitter::upgrade_quorum_set` | `set_upgrade_quorum` | **Live** |
-| [`EventUpgradeProposed`](#eventupgradeproposed) | `uprop` | `EventEmitter::upgrade_proposed` | `propose_upgrade` | **Live** |
-| [`EventSignerAttestationSet`](#eventsignerattestationset) | `attest` | `EventEmitter::signer_attestation_set` | `set_signer_attestation` | **Live** |
-| [`EventAdminRenounced`](#eventadminrenounced) | `renounce` | `EventEmitter::admin_renounced` | `renounce_admin` | **Live** |
-| [`EventGuardianSet`](#eventguardianset) | `guardian` | `EventEmitter::guardian_set` | `set_guardian` | **Live** |
-| [`EventAutoPaused`](#eventautopaused) | `apause` | `EventEmitter::auto_paused` | `trip_auto_pause` | **Live** |
-| [`EventAutoUnpaused`](#eventautounpaused) | `aunpause` | `EventEmitter::auto_unpaused` | `unpause_auto` (quorum met) | **Live** |
+| [`EventUpgradeSelfCheckPassed`](#eventupgradeselfcheckpassed) | `chk_pass` | `EventEmitter::upgrade_self_check_passed` | every upgrade path | **Live** |
+| [`EventUpgradeSelfCheckFailed`](#eventupgradeselfcheckfailed) | `chk_fail` | `EventEmitter::upgrade_self_check_failed` | every upgrade path (then reverts) | **Live** |
+| [`EventParamSet`](#eventparamset) | `param` | `EventEmitter::param_set` | `set_param` | **Live** |
+| [`EventBonded`](#eventbonded) | `bonded` | `EventEmitter::bonded` | `bond_collateral` | **Live** |
+| [`EventUnbondRequested`](#eventunbondrequested) | `unbondrq` | `EventEmitter::unbond_requested` | `unbond_collateral` | **Live** |
+| [`EventUnbondClaimed`](#eventunbondclaimed) | `unbondcl` | `EventEmitter::unbond_claimed` | `claim_unbond` | **Live** |
+| [`EventSlashed`](#eventslashed) | `slashed` | `EventEmitter::slashed` | `slash_signer` | **Live** |
+| [`EventAnchorTierSet`](#eventanchortierset) | `tierset` | `EventEmitter::anchor_tier_set` | `set_anchor_tier` | **Live** |
+| [`EventRebateApplied`](#eventrebateapplied) | `rebate` | `EventEmitter::rebate_applied` | `compute_effective_fee` | **Live** |
 | [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` (sibling issue) | **Schema locked** |
 | [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` (sibling issue) | **Schema locked** |
+
+This table is machine-checked: `test_events_conformance::event_decoder_covers_catalogued_topics`
+fails if a topic emitted by `src/events.rs` is missing here, or if a topic listed
+here is never emitted.
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -164,7 +179,7 @@ batch-size-of-one edge case (`N == 1`), where `batch_size == 1` and
 |--|--|
 | **Topics** | `synapse`, `status` |
 | **Struct** | `EventStatusChanged` |
-| **Emitted by** | `start_processing`, `complete_transaction`, `fail_transaction`, `expire_transaction` |
+| **Emitted by** | `start_processing`, `complete_transaction`, `partial_complete_transaction`, `fail_transaction`, `cancel_transaction`, `retry_transaction`, `merge_duplicate_transactions` |
 | **When** | Every successful status-machine transition |
 | **Status** | Live |
 
@@ -174,10 +189,11 @@ batch-size-of-one edge case (`N == 1`), where `batch_size == 1` and
 | `old_status` | `TransactionStatus` | Status before transition |
 | `new_status` | `TransactionStatus` | Status after transition |
 | `ledger` | `u32` | Ledger sequence at emit |
-| `reason` | `Option<String>` | **Additive (v0.1.0).** Optional human-readable reason for the transition. `None` for all pre-existing emitters; populated only by future emitters that need it. |
 
 `TransactionStatus` variants (discriminant order as in `types.rs`):
-`Pending`, `Processing`, `Completed`, `Failed`.
+`Pending`, `Processing`, `Completed`, `Failed`, `Cancelled`. `Failed` is not
+terminal: `retry_transaction` moves it back to `Pending` (at most
+`MAX_RETRIES` = 3 times per transaction).
 
 Phase 2 / Phase 3 SHOULD treat `new_status == Completed` as the cross-phase
 signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
@@ -197,7 +213,24 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `tx_id` | `String` | Transaction id |
 | `stellar_tx_hash` | `String` | Confirmed Stellar tx hash |
 | `ledger` | `u32` | Ledger sequence at emit |
-| `settlement_asset` | `Option<String>` | **Additive (v0.1.0).** Optional SEP-11 asset code for the settled leg. `None` for all pre-existing emitters; populated only by future emitters that need it. |
+
+### EventTransactionPartiallyCompleted
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `partial` |
+| **Struct** | `EventTransactionPartiallyCompleted` |
+| **Emitted by** | `partial_complete_transaction` |
+| **When** | Terminal success where only part of the registered amount settled. Replaces `done` for that transition. |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction id |
+| `original_amount` | `i128` | Amount registered by the callback |
+| `settled_amount` | `i128` | Amount actually settled (`0 < settled_amount < original_amount`) |
+| `stellar_tx_hash` | `String` | Confirmed Stellar tx hash |
+| `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventTransactionFailed
 
@@ -215,26 +248,104 @@ signal (also see [`EventTransactionCompleted`](#eventtransactioncompleted)).
 | `reason` | `String` | Short failure code |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventTransactionExpired
+### EventTransactionCancelled
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `expire` |
-| **Struct** | `EventTransactionExpired` |
-| **Emitted by** | `expire_transaction` |
-| **When** | A stale `Pending` transaction is auto-expired. Emitted exactly once per successful `expire_transaction` call; never on a rejected/failed attempt. |
+| **Topics** | `synapse`, `cancel` |
+| **Struct** | `EventTransactionCancelled` |
+| **Emitted by** | `cancel_transaction` |
+| **When** | A `Pending` or `Processing` transaction is voided (terminal `Cancelled`) |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `tx_id` | `String` | Transaction id |
-| `expired_at` | `u32` | Ledger sequence at which the transaction was expired |
+| `reason` | `String` | Short cancellation code |
+| `caller` | `Address` | Relay signer or admin that cancelled |
+| `ledger` | `u32` | Ledger sequence at emit |
 
-**Emission order:** `expire_transaction` emits
-[`EventStatusChanged`](#eventstatuschanged) (`Pending` → `Failed`) first, then
-`EventTransactionExpired`. Subscribers that only care about the expiry signal
-SHOULD filter on the `expire` topic; those tracking the full state machine
-SHOULD consume both, in this order.
+### EventTransactionRetried
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `retry` |
+| **Struct** | `EventTransactionRetried` |
+| **Emitted by** | `retry_transaction` |
+| **When** | A `Failed` transaction is moved back to `Pending` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction id |
+| `retry_count` | `u32` | Retries used so far, including this one (max 3) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventTransactionTagged
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `tagged` |
+| **Struct** | `EventTransactionTagged` |
+| **Emitted by** | `add_transaction_tag` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction id |
+| `tag` | `String` | Tag added (1–32 bytes) |
+| `tag_count` | `u32` | Tags on the transaction after this call (max 8) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventTransactionsMerged
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `merged` |
+| **Struct** | `EventTransactionsMerged` |
+| **Emitted by** | `merge_duplicate_transactions` (break-glass admin action) |
+| **When** | A duplicate record is linked to its canonical original and moved to `Failed` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `canonical_tx_id` | `String` | Record that stays authoritative |
+| `duplicate_tx_id` | `String` | Record marked as merged |
+| `admin` | `Address` | Admin that performed the merge |
+| `reason` | `String` | Evidence-backed justification |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventForwardingIntent
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `fwd` |
+| **Struct** | `EventForwardingIntent` |
+| **Emitted by** | `complete_transaction`, `partial_complete_transaction` |
+| **When** | Only when the admin configured a route via `set_forwarding_route`; emitted last |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Completed transaction |
+| `next_phase` | `u32` | Phase the transaction should be forwarded to (e.g. `2` = Swap Engine) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventAmountCeilingSet
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `ceiling` |
+| **Struct** | `EventAmountCeilingSet` |
+| **Emitted by** | `set_amount_ceiling`, `set_default_amount_ceiling` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `anchor` | `Option<String>` | Anchor (asset issuer) the ceiling applies to; `None` for the contract-wide default |
+| `ceiling` | `Option<i128>` | New ceiling; `None` when cleared |
+| `admin` | `Address` | Admin that set it |
+| `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventAdminTransferProposed
 
@@ -274,8 +385,8 @@ SHOULD consume both, in this order.
 |--|--|
 | **Topics** | `synapse`, `relay` |
 | **Struct** | `EventRelaySignerRotated` |
-| **Emitted by** | `set_relay_signer` |
-| **When** | Admin rotates the trusted relay signer |
+| **Emitted by** | `set_relay_signer`, `finalize_relay_signer` |
+| **When** | The primary relay signer changes |
 | **Status** | Live |
 
 | Field | Type | Meaning |
@@ -284,38 +395,49 @@ SHOULD consume both, in this order.
 | `new_signer` | `Address` | New relay signer |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventUpgradeQuorumSet
+### EventRelaySignerChange
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `uqset` |
-| **Struct** | `EventUpgradeQuorumSet` |
-| **Emitted by** | `set_upgrade_quorum` |
-| **When** | Optional upgrade M-of-N quorum is configured or cleared (#87) |
+| **Topics** | `synapse`, `rs_prop` / `rs_canc` |
+| **Struct** | `EventRelaySignerChange` |
+| **Emitted by** | `propose_relay_signer` (`rs_prop`), `cancel_relay_signer_change` (`rs_canc`) |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `admin` | `Address` | Admin that wrote the config |
-| `threshold` | `u32` | M (0 when cleared) |
-| `member_count` | `u32` | N (0 when cleared) |
+| `new_signer` | `Address` | Proposed primary relay signer |
+| `eta_ledger` | `u32` | First ledger `finalize_relay_signer` is legal |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventUpgradeProposed
+### EventRelaySignerMembership
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `uprop` |
-| **Struct** | `EventUpgradeProposed` |
-| **Emitted by** | `propose_upgrade` |
-| **When** | Upgrade staged awaiting quorum co-signatures (#87) |
+| **Topics** | `synapse`, `rs_add` / `rs_rm` |
+| **Struct** | `EventRelaySignerMembership` |
+| **Emitted by** | `add_relay_signer` (`rs_add`), `remove_relay_signer` (`rs_rm`) |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `proposer` | `Address` | Admin that proposed |
-| `new_wasm_hash` | `BytesN<32>` | Proposed WASM hash |
-| `expected_schema_version` | `u32` | Schema version checked at propose time |
+| `signer` | `Address` | Signer added or removed |
+| `signer_count` | `u32` | Set size after the change |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventRelayThresholdChanged
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `rs_thr` |
+| **Struct** | `EventRelayThresholdChanged` |
+| **Emitted by** | `set_relay_threshold` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `old_threshold` | `u32` | Quorum before |
+| `new_threshold` | `u32` | Quorum after |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventContractUpgraded
@@ -324,8 +446,8 @@ SHOULD consume both, in this order.
 |--|--|
 | **Topics** | `synapse`, `upgrade` |
 | **Struct** | `EventContractUpgraded` |
-| **Emitted by** | `upgrade` |
-| **When** | After `update_current_contract_wasm` succeeds |
+| **Emitted by** | `upgrade`, `finalize_upgrade`, `upgrade_and_migrate`, `rollback_upgrade` |
+| **When** | After `update_current_contract_wasm` and the post-upgrade self-check succeed |
 | **Status** | Live |
 
 | Field | Type | Meaning |
@@ -333,6 +455,7 @@ SHOULD consume both, in this order.
 | `admin` | `Address` | Admin that authorised the upgrade |
 | `new_wasm_hash` | `BytesN<32>` | New contract wasm hash |
 | `ledger` | `u32` | Ledger sequence at emit |
+| `schema_version` | `u32` | On-chain schema version the upgrade was checked against |
 
 ### EventUpgradeProposed
 
@@ -362,6 +485,13 @@ SHOULD consume both, in this order.
 
 Emitted in addition to `EventContractUpgraded` after a successful timelocked swap.
 
+| Field | Type | Meaning |
+|-------|------|---------|
+| `admin` | `Address` | Admin that finalized |
+| `wasm_hash` | `BytesN<32>` | Installed WASM hash |
+| `schema_version` | `u32` | On-chain schema version |
+| `ledger` | `u32` | Ledger sequence at emit |
+
 ### EventUpgradeCancelled
 
 | | |
@@ -370,6 +500,12 @@ Emitted in addition to `EventContractUpgraded` after a successful timelocked swa
 | **Struct** | `EventUpgradeCancelled` |
 | **Emitted by** | `cancel_upgrade` |
 | **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `admin` | `Address` | Admin that cancelled |
+| `wasm_hash` | `BytesN<32>` | WASM hash that was pending |
+| `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventUpgradeRolledBack
 
@@ -381,6 +517,13 @@ Emitted in addition to `EventContractUpgraded` after a successful timelocked swa
 | **Status** | Live |
 
 Distinct from a forward `upgrade` event so monitors can alert differently.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `admin` | `Address` | Admin that rolled back |
+| `restored_wasm_hash` | `BytesN<32>` | Previous WASM hash, now installed again |
+| `schema_version` | `u32` | On-chain schema version |
+| `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventUpgradeMigrated
 
@@ -405,7 +548,7 @@ Distinct from a forward `upgrade` event so monitors can alert differently.
 |--|--|
 | **Topics** | `synapse`, `chk_pass` |
 | **Struct** | `EventUpgradeSelfCheckPassed` |
-| **Emitted by** | `upgrade` |
+| **Emitted by** | every upgrade path |
 | **When** | Post-upgrade storage-integrity self-check succeeded |
 | **Status** | Live |
 
@@ -420,7 +563,7 @@ Distinct from a forward `upgrade` event so monitors can alert differently.
 |--|--|
 | **Topics** | `synapse`, `chk_fail` |
 | **Struct** | `EventUpgradeSelfCheckFailed` |
-| **Emitted by** | `upgrade` |
+| **Emitted by** | every upgrade path |
 | **When** | Post-upgrade self-check failed; the upgrade transaction reverts |
 | **Status** | Live |
 
@@ -444,98 +587,122 @@ Verified by `test_pause::test_self_check_events_topics`.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `paused` | `bool` | New pause state |
+| `admin` | `Address` | Admin that toggled the pause |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventSignerAttestationSet
+### EventParamSet
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `attest` |
-| **Struct** | `EventSignerAttestationSet` |
-| **Emitted by** | `set_signer_attestation` |
-| **When** | Every attestation write, including no-op same-hash updates |
+| **Topics** | `synapse`, `param` |
+| **Struct** | `EventParamSet` |
+| **Emitted by** | `set_param` |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `signer` | `Address` | Relay signer that self-reported the fingerprint |
-| `build_hash` | `BytesN<32>` | Self-reported build/commit fingerprint (not cryptographically verified on-chain) |
+| `name` | `String` | Parameter name |
+| `value` | `i128` | New value |
+| `admin` | `Address` | Admin that set it |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventAdminRenounced
+### EventBonded
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `renounce` |
-| **Struct** | `EventAdminRenounced` |
-| **Emitted by** | `renounce_admin` |
-| **When** | Outgoing admin acknowledges step-down after a live successor accepted |
+| **Topics** | `synapse`, `bonded` |
+| **Struct** | `EventBonded` |
+| **Emitted by** | `bond_collateral` |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `former_admin` | `Address` | Outgoing admin |
-| `successor` | `Address` | Live admin installed by prior `accept_admin` |
+| `signer` | `Address` | Relay signer that bonded |
+| `amount` | `i128` | Amount added in this call |
+| `total` | `i128` | Bonded total after this call |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventGuardianSet
+### EventUnbondRequested
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `guardian` |
-| **Struct** | `EventGuardianSet` |
-| **Emitted by** | `set_guardian` |
-| **When** | Guardian address set or rotated |
+| **Topics** | `synapse`, `unbondrq` |
+| **Struct** | `EventUnbondRequested` |
+| **Emitted by** | `unbond_collateral` |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `guardian` | `Address` | New guardian |
+| `signer` | `Address` | Relay signer |
+| `amount` | `i128` | Amount requested to unbond |
+| `claimable_at_ledger` | `u32` | First ledger `claim_unbond` is legal |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventAutoPaused
+### EventUnbondClaimed
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `apause` |
-| **Struct** | `EventAutoPaused` |
-| **Emitted by** | `trip_auto_pause` |
-| **When** | Automatic circuit-breaker pause engaged |
+| **Topics** | `synapse`, `unbondcl` |
+| **Struct** | `EventUnbondClaimed` |
+| **Emitted by** | `claim_unbond` |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
+| `signer` | `Address` | Relay signer |
+| `amount` | `i128` | Amount released |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventAutoUnpaused
+### EventSlashed
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `aunpause` |
-| **Struct** | `EventAutoUnpaused` |
-| **Emitted by** | `unpause_auto` (when 2-of-3 quorum is met) |
-| **When** | Automatic pause released by a role pair |
+| **Topics** | `synapse`, `slashed` |
+| **Struct** | `EventSlashed` |
+| **Emitted by** | `slash_signer` |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `roles` | `UnpauseRoles` | Winning pair: `AdminGuardian` / `AdminRelay` / `GuardianRelay` |
+| `signer` | `Address` | Slashed relay signer |
+| `slashed_amount` | `i128` | Amount slashed |
+| `remaining_bond` | `i128` | Bond left after slashing |
+| `evidence_tx_id` | `String` | `transaction_id` of the conflicting-callback evidence |
+| `caller` | `Address` | Admin that submitted the evidence |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-### EventRelaySignerRotated
+### EventAnchorTierSet
 
 | | |
 |--|--|
-| **Topics** | `synapse`, `relay` |
-| **Struct** | `EventRelaySignerRotated` |
-| **Emitted by** | `set_relay_signer` |
-| **When** | Admin rotates the trusted relay signer |
+| **Topics** | `synapse`, `tierset` |
+| **Struct** | `EventAnchorTierSet` |
+| **Emitted by** | `set_anchor_tier` |
 | **Status** | Live |
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `old_signer` | `Address` | Previous relay signer |
-| `new_signer` | `Address` | New relay signer |
+| `anchor` | `Address` | Anchor the tier applies to |
+| `rebate_bps` | `u32` | Rebate in basis points (0–10 000) |
+| `label` | `String` | Tier label |
+| `admin` | `Address` | Admin that set it |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventRebateApplied
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `rebate` |
+| **Struct** | `EventRebateApplied` |
+| **Emitted by** | `compute_effective_fee` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `anchor` | `Address` | Anchor the fee was computed for |
+| `base_fee` | `i128` | Fee before rebate |
+| `effective_fee` | `i128` | Fee after rebate |
+| `rebate_bps` | `u32` | Rebate applied (0 when the anchor has no tier) |
 | `ledger` | `u32` | Ledger sequence at emit |
 
 ### EventDisputeRaised
@@ -632,44 +799,41 @@ names, types, and order are frozen.
 | `register_callback` (idempotent hit) | *(no events)* |
 | `start_processing` | 1. `status` (`Pending` → `Processing`) |
 | `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
+| `complete_transaction` (route configured) | 1. `status`<br>2. `done`<br>3. `fwd` |
+| `partial_complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `partial`<br>3. `fwd` *(route configured only)* |
 | `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
+| `cancel_transaction` | 1. `status` (`Pending`\|`Processing` → `Cancelled`)<br>2. `cancel` |
+| `retry_transaction` | 1. `status` (`Failed` → `Pending`)<br>2. `retry` |
+| `batch_register_callback` | 1..N. `reg` (batch order)<br>N+1. `batch` |
+| `merge_duplicate_transactions` | 1. `status` (only if the duplicate was not already `Failed`)<br>2. `merged` |
 | `propose_admin` | 1. `propose` |
 | `accept_admin` | 1. `admin` |
-| `set_relay_signer` | 1. `relay` |
+| `set_relay_signer` / `finalize_relay_signer` | 1. `relay` |
 | `upgrade` (success) | 1. `chk_pass`<br>2. `upgrade` |
 | `upgrade` (self-check failure) | 1. `chk_fail` *(invocation then reverts)* |
 | `propose_upgrade` | 1. `up_prop` |
-| `finalize_upgrade` | 1. `upgrade`<br>2. `up_fin` |
+| `finalize_upgrade` | 1. `chk_pass`<br>2. `upgrade`<br>3. `up_fin` |
 | `cancel_upgrade` | 1. `up_can` |
-| `rollback_upgrade` | 1. `upgrade`<br>2. `rollback` |
-| `upgrade_and_migrate` | 1. `upgrade`<br>2. `migrate` |
+| `rollback_upgrade` | 1. `chk_pass`<br>2. `upgrade`<br>3. `rollback` |
+| `upgrade_and_migrate` | 1. `chk_pass`<br>2. `upgrade`<br>3. `migrate` |
 | `pause` / `unpause` | 1. `pause` |
-| `set_signer_attestation` | 1. `attest` |
-| `renounce_admin` | 1. `renounce` |
-| `set_guardian` | 1. `guardian` |
-| `trip_auto_pause` | 1. `apause` |
-| `unpause_auto` (quorum met) | 1. `aunpause` |
-| `unpause_auto` (vote only) | *(no events)* |
+| `propose_relay_signer` | 1. `rs_prop` |
+| `cancel_relay_signer_change` | 1. `rs_canc` |
+| `add_relay_signer` / `remove_relay_signer` | 1. `rs_add` / `rs_rm` |
+| `set_relay_threshold` | 1. `rs_thr` |
 
 ### Worked examples
 
-Two high-traffic events already demonstrate the pattern:
-
-- [`EventStatusChanged`](#eventstatuschanged) — trailing `reason: Option<String>`
-  appended after `ledger`; all four existing emitters pass `None`.
-- [`EventTransactionCompleted`](#eventtransactioncompleted) — trailing
-  `settlement_asset: Option<String>` appended after `ledger`; the existing
-  emitter passes `None`.
+No event has used the additive pattern yet. `EventContractUpgraded.schema_version`
+predates it: it was appended as a plain trailing `u32` before this convention
+was written down, and is the only field added after first release.
 
 ### Subscriber compatibility
 
 A subscriber decoding with the **old** (pre-additive-field) schema against a
 **new** payload MUST NOT break. Because the new field is a trailing `Option<T>`,
 old decoders that ignore unknown trailing keys continue to work, and new
-decoders reading an old payload see the field as `None`. This is verified by the
-compatibility test in `src/events.rs`
-(`test_additive_field_old_decoder_compatibility`), which decodes a new-shape
-payload using old-shape decoding logic and asserts graceful handling.
+decoders reading an old payload see the field as `None`.
 
 Future entry-points wiring the dispute events (sibling issue):
 
@@ -696,9 +860,9 @@ called. The following orderings are part of the contract surface:
   `EventTransactionRegistered` events in batch order, followed by exactly one
   `EventBatchProcessed` summary event. The summary is always last, and is
   emitted even when `N == 1`.
-- `start_processing` / `complete_transaction` / `fail_transaction`:
-  `EventStatusChanged` first, then the terminal event
-  (`EventTransactionCompleted` / `EventTransactionFailed`) where applicable.
+- Every status transition: `EventStatusChanged` first, then the
+  transition-specific event (`done`, `partial`, `fail`, `cancel`, `retry`,
+  `merged`) where applicable, then `fwd` if a forwarding route is set.
 - `propose_admin` / `accept_admin` / `set_relay_signer` / `upgrade` / `pause` /
   `unpause`: single event each.
 
@@ -792,10 +956,8 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 `src/lib.rs`:
 
 1. Diff this file against `EventEmitter::*` and the `#[contracttype]` structs.
-2. Confirm topic symbols match `symbol_short!(...)` exactly (`init`, `reg`,
-   `pause`, `upgrade`, `status`, `done`, `fail`, `admin`, `relay`, `propose`,
-   `up_prop`, `up_fin`, `up_can`, `rollback`, `migrate`,
-   `attest`, `renounce`, `guardian`, `apause`, `aunpause`).
+2. Confirm topic symbols match `symbol_short!(...)` exactly (the §2 table;
+   `event_decoder_covers_catalogued_topics` checks this mechanically).
 3. Confirm multi-event order in §4 still matches the call sites — the
    conformance tests do not yet check emission order.
 4. Run `make check` and confirm all conformance tests pass (automated step above).
@@ -815,8 +977,3 @@ Before merging any PR that touches `src/events.rs` or event emit sites in
 - **Subscriber finality & reliability guidance:** [`docs/event-finality.md`](./docs/event-finality.md) —
   Stellar BFT finality model, confirmation depth, RPC polling loop, gap recovery,
   retention window, deduplication, and idempotency relationship
-
-## Addendum: `merged` event
-
-`EventTransactionsMerged { canonical_tx_id, duplicate_tx_id, admin, reason, ledger }`,
-topic `merged`, emitted once by `merge_duplicate_transactions` (break-glass admin action).

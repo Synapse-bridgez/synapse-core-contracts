@@ -195,32 +195,25 @@ The admin key is the **single most important secret** in the Synapse Bridge ecos
 - Admin operations SHOULD be logged and monitored off-chain
 - The admin key SHOULD NOT be the same key used for deployment or relay signing
 
-### Optional on-chain upgrade quorum (#87)
+### Not implemented: upgrade quorum (#87), key namespacing (#89), genesis hash (#90)
 
-Off-chain multisig custody of the admin key is necessary but opaque to the
-contract. Deployments that want an *on-chain* guarantee that `upgrade()` cannot
-proceed on a single admin signature alone may configure an optional
-`UpgradeQuorum { threshold, members }` via `set_upgrade_quorum`.
+These three were described here as shipped, but their code was lost in the
+#176–#197 merges and was not restored in #199:
 
-- Default: `None` — today's single-admin behaviour (full backward compatibility)
-- When set: `upgrade(…, cosigners)` and `propose_upgrade` / `approve_upgrade`
-  require at least `threshold` distinct member `require_auth()` co-signatures.
-  Admin alone is rejected with `InsufficientUpgradeQuorum`.
+- **#87 on-chain upgrade quorum.** Upgrades are admin-gated only. The
+  timelocked `propose_upgrade` / `finalize_upgrade` flow (ADR-0004) is the
+  on-chain review window; off-chain multisig custody of the admin key
+  (above) is still mandatory.
+- **#89 storage key namespacing.** Keys are plain `StorageKey` variants and
+  `SCHEMA_VERSION` is `1`. `upgrade_and_migrate` (ADR-0005) is the mechanism a
+  future relocating migration would use.
+- **#90 genesis WASM hash.** `initialize` takes no hash. The admin seeds the
+  installed hash once with `register_installed_wasm`; every upgrade then
+  records `previous_wasm_hash` in `get_upgrade_history()` and in the
+  `previous_upgrade()` rollback snapshot.
 
-### Storage key namespacing (#89)
-
-All ledger keys are `StorageKey::Ns(STORAGE_KEY_NAMESPACE, DataKey)`. Additive
-schema changes stay inside the current namespace; a relocating bump uses a new
-namespace plus `migrate_storage_keys` / `upgrade_and_migrate`. See
-`migrations.toml` for the human-readable note CI cross-checks against
-`schema_version()` (#88).
-
-### Previous WASM hash (#90)
-
-`initialize` records the genesis WASM hash; every successful `upgrade` copies
-it into `previous_wasm_hash` before installing the new blob.
-`get_previous_wasm_hash()` lets explorers verify upgrade provenance without
-replaying the full event log.
+Each needs a breaking change to `initialize`, `upgrade` or the storage layout,
+so each should come back as its own issue with a migration note.
 
 ---
 
@@ -333,3 +326,27 @@ one and restarts the delay. Assumptions: with the N-of-M set (ADR-0004) only the
 primary signer slot is rotated; the legacy immediate `set_relay_signer` stays for
 backward compatibility until a non-zero delay is configured, after which it returns
 `TimelockRequired`.
+
+## Error-code budget
+
+Soroban encodes a `#[contracterror]` enum's cases in the contract spec as an
+XDR array bounded at 50. Above that, the macro panics at compile time
+(`LengthExceedsMax`). Restoring the #176–#179 and #190–#191 entry points
+needed 61 variants, so related failures now share one:
+
+| Shared variant | Covers |
+|----------------|--------|
+| `InvalidAmount` | non-positive amounts and ceilings, out-of-range partial settlement |
+| `TimelockNotElapsed` | upgrade, relay-signer and unbond delays |
+| `NoPendingChange` | nothing to finalize / cancel (upgrade or relay signer) |
+| `InvalidTag` | empty tag, or tag cap reached |
+| `MigrationFailed` | migration failure, or its storage-touch bound exceeded |
+| `InvalidSlashEvidence` | `tx_id` mismatch, or payloads that do not conflict |
+| `NotRelaySigner` | caller, or removal target, is not in the relay set |
+| `DuplicateRequest` | duplicate `transaction_id`, or adding an existing signer |
+
+`ContractError` has 49 variants. Before adding one, check whether an existing
+variant already describes the failure from the caller's point of view (what
+they must change to succeed). If the enum ever needs to grow past 50, split
+it into one error enum per subsystem.
+

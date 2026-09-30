@@ -890,3 +890,133 @@ type = "u32"
         "Expected no failures on valid input, got: {failures:?}"
     );
 }
+
+// ─── EVENTS.md §2 table ↔ events.rs topic sync (CI step) ────────────────────
+
+/// `(struct, topic, emitter_fn)` rows from the EVENTS.md §2 status table.
+fn status_table_rows(events_md: &str) -> Vec<(String, String, String)> {
+    let start = events_md
+        .find("## 2. Implementation status")
+        .expect("EVENTS.md must have a `## 2. Implementation status` section");
+    let end = events_md[start..]
+        .find("\n## 3")
+        .map_or(events_md.len(), |e| start + e);
+    let mut rows = Vec::new();
+    for line in events_md[start..end].lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        // | [`Struct`](#anchor) | `topic` | `EventEmitter::fn` | ... | status |
+        if cells.len() < 5 || !cells[1].starts_with("[`Event") {
+            continue;
+        }
+        let strip = |c: &str| c.trim_matches('`').to_owned();
+        let struct_name = cells[1]
+            .trim_start_matches("[`")
+            .split('`')
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        let emitter = strip(cells[3])
+            .trim_start_matches("EventEmitter::")
+            .to_owned();
+        rows.push((struct_name, strip(cells[2]), emitter));
+    }
+    rows
+}
+
+/// Every `topics[1]` symbol published anywhere in `events.rs`.
+fn emitted_topics(events_rs: &str) -> Vec<String> {
+    let needle = "symbol_short!(\"synapse\"), symbol_short!(\"";
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(pos) = events_rs[from..].find(needle) {
+        let abs = from + pos + needle.len();
+        let end = events_rs[abs..].find('"').expect("unterminated symbol");
+        let topic = events_rs[abs..abs + end].to_owned();
+        if !out.contains(&topic) {
+            out.push(topic);
+        }
+        from = abs;
+    }
+    out
+}
+
+fn check_status_table(events_md: &str, events_rs: &str) -> Vec<String> {
+    let rows = status_table_rows(events_md);
+    let mut failures = Vec::new();
+    if rows.is_empty() {
+        failures.push("EVENTS.md §2 status table has no rows".to_owned());
+    }
+    for (struct_name, topic, emitter) in &rows {
+        if !events_rs.contains(&format!("pub struct {struct_name} ")) {
+            failures.push(format!(
+                "EVENTS.md §2 lists `{struct_name}`, not in events.rs"
+            ));
+        }
+        match extract_topic_for_emitter(events_rs, emitter) {
+            Some(actual) if &actual == topic => {}
+            Some(actual) => failures.push(format!(
+                "EVENTS.md §2: `EventEmitter::{emitter}` publishes `{actual}`, table says `{topic}`"
+            )),
+            None => failures.push(format!(
+                "EVENTS.md §2 lists `EventEmitter::{emitter}`, not in events.rs"
+            )),
+        }
+    }
+    for topic in emitted_topics(events_rs) {
+        if !rows.iter().any(|(_, t, _)| *t == topic) {
+            failures.push(format!(
+                "events.rs publishes topic `{topic}`, missing from EVENTS.md §2"
+            ));
+        }
+    }
+    failures
+}
+
+/// CI step "Verify reference event decoder stays in sync with events.rs":
+/// the EVENTS.md §2 table — the index subscribers decode from — must list
+/// exactly the topics `events.rs` publishes, each with its real emitter.
+#[test]
+fn event_decoder_covers_catalogued_topics() {
+    let failures = check_status_table(EVENTS_MD_SRC, EVENTS_RS_SRC);
+    assert!(
+        failures.is_empty(),
+        "EVENTS.md §2 ↔ events.rs topic drift ({} issue(s)):\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}
+
+/// The sync check must fail when a topic is emitted but not catalogued, and
+/// when the table lists a topic that is never emitted.
+#[test]
+fn event_decoder_sync_detects_drift() {
+    let events_rs = r#"
+        pub struct EventA {
+        pub struct EventB {
+        pub fn a(env: &Env) {
+            env.events().publish((symbol_short!("synapse"), symbol_short!("a")), 0);
+        }
+        pub fn b(env: &Env) {
+            env.events().publish((symbol_short!("synapse"), symbol_short!("b")), 0);
+        }
+    "#;
+    let md = "## 2. Implementation status\n\
+        | Event | Topic[1] | Emitter | Entry-point(s) | Status |\n\
+        |---|---|---|---|---|\n\
+        | [`EventA`](#a) | `a` | `EventEmitter::a` | `x` | **Live** |\n\
+        | [`EventC`](#c) | `c` | `EventEmitter::c` | `y` | **Live** |\n\
+        ## 3. Catalogue\n";
+    let failures = check_status_table(md, events_rs);
+    assert!(
+        failures.iter().any(|f| f.contains("topic `b`")),
+        "{failures:?}"
+    );
+    assert!(
+        failures.iter().any(|f| f.contains("`EventC`")),
+        "{failures:?}"
+    );
+    assert!(
+        failures.iter().any(|f| f.contains("EventEmitter::c")),
+        "{failures:?}"
+    );
+}
