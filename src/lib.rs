@@ -23,19 +23,29 @@
 //! storage.rs      ← all ledger read/write helpers
 //! events.rs       ← typed event emission
 //! validation.rs   ← input guards (account format, asset code, amount bounds)
-//! admin.rs        ← admin / owner management
+//! admin.rs        ← admin / owner management, relay quorum
+//! migration.rs    ← versioned upgrade-time migration registry
 //! ```
 
 mod admin;
 mod events;
+mod migration;
 mod storage;
 mod types;
 mod validation;
 
 #[cfg(test)]
+mod bench_events;
+#[cfg(test)]
+mod schema_ci;
+#[cfg(test)]
 mod test_events_conformance;
 #[cfg(test)]
 mod test_pause;
+#[cfg(test)]
+mod test_recovery;
+#[cfg(test)]
+mod test_upgrade_safety;
 #[cfg(test)]
 mod test_wave2;
 #[cfg(test)]
@@ -47,14 +57,18 @@ mod tests_invariants;
 #[cfg(test)]
 mod tests_state_machine;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
+use crate::migration::MigrationRegistry;
 use crate::storage::StorageClient;
 use crate::types::{
-    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, ParamEntry, SlashEvidence,
-    Transaction, TransactionStatus, UnbondRequest, SCHEMA_VERSION,
+    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, ParamEntry, PendingRelaySigner,
+    PendingUpgrade, RelaySignerSet, SchemaCompatRange, SlashEvidence, Transaction,
+    TransactionStatus, UnbondRequest, UpgradeCompatibility, UpgradeRecord, UpgradeSnapshot,
+    DEFAULT_RELAY_SIGNER_DELAY_LEDGERS, MAX_BATCH_SIZE, MAX_PAGE_LIMIT, MAX_RETRIES,
+    SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -143,9 +157,9 @@ impl SynapseCoreContract {
             return Err(ContractError::ContractPaused);
         }
 
-        // Only the trusted relay signer may forward Anchor Platform callbacks.
-        let relay = StorageClient::get_relay_signer(&env)?;
-        relay.require_auth();
+        // Only the trusted relay signer (plus quorum co-signers, if an N-of-M
+        // set is configured) may forward Anchor Platform callbacks.
+        AdminClient::require_relay(&env)?;
 
         Validator::validate_payload(&env, &payload)?;
 
@@ -163,28 +177,58 @@ impl SynapseCoreContract {
             return Err(ContractError::DuplicateRequest);
         }
 
-        let ledger = env.ledger().sequence();
-        let tx = Transaction {
-            id: payload.transaction_id.clone(),
-            stellar_account: payload.stellar_account.clone(),
-            amount: payload.amount,
-            asset_code: payload.asset_code.clone(),
-            asset_issuer: payload.asset_issuer.clone(),
-            status: TransactionStatus::Pending,
-            created_at_ledger: ledger,
-            updated_at_ledger: ledger,
-            anchor_transaction_id: payload.anchor_transaction_id.clone(),
-            callback_type: payload.callback_type.clone(),
-            callback_status: payload.callback_status.clone(),
-            stellar_tx_hash: String::from_str(&env, ""),
-            failure_reason: String::from_str(&env, ""),
-        };
-
-        StorageClient::save_transaction(&env, &tx);
-        StorageClient::set_idempotency_key(&env, &payload.idempotency_key);
-        EventEmitter::transaction_registered(&env, &tx);
-
+        let tx = Self::persist_new_transaction(&env, &payload);
         Ok(tx.id)
+    }
+
+    /// Register up to [`MAX_BATCH_SIZE`] callbacks atomically.
+    ///
+    /// Relay signer only (`caller` must be a relay signer; the admin cannot
+    /// ingest). Every payload is validated, and checked against on-chain and
+    /// in-batch duplicate `transaction_id`s, *before* any storage write; any
+    /// failure aborts the whole call with no partial writes. An empty or
+    /// oversized batch is rejected with [`ContractError::InvalidBatchSize`].
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionRegistered`] per payload, in batch
+    /// order, followed by exactly one [`events::EventBatchProcessed`].
+    pub fn batch_register_callback(
+        env: Env,
+        payloads: Vec<CallbackPayload>,
+        caller: Address,
+    ) -> Result<u32, ContractError> {
+        if StorageClient::is_paused(&env) {
+            return Err(ContractError::ContractPaused);
+        }
+        let n = payloads.len();
+        if n == 0 || n > MAX_BATCH_SIZE {
+            return Err(ContractError::InvalidBatchSize);
+        }
+        AdminClient::require_relay_signer(&env, &caller)?;
+
+        // Pass 1: validate everything; no writes.
+        for i in 0..n {
+            let p = payloads.get_unchecked(i);
+            Validator::validate_payload(&env, &p)?;
+            if StorageClient::transaction_exists(&env, &p.transaction_id) {
+                return Err(ContractError::DuplicateRequest);
+            }
+            for j in 0..i {
+                if payloads.get_unchecked(j).transaction_id == p.transaction_id {
+                    return Err(ContractError::DuplicateRequest);
+                }
+            }
+        }
+
+        // Pass 2: write.
+        for p in payloads.iter() {
+            Self::persist_new_transaction(&env, &p);
+        }
+        let first = payloads.get_unchecked(0).transaction_id;
+        let last = payloads.get_unchecked(n - 1).transaction_id;
+        EventEmitter::batch_processed(&env, &caller, n, &first, &last);
+
+        Ok(n)
     }
 
     // ── Status transitions ────────────────────────────────────────────────────
@@ -200,12 +244,7 @@ impl SynapseCoreContract {
         if tx.status != TransactionStatus::Pending {
             return Err(ContractError::InvalidStatusTransition);
         }
-        let old_status = tx.status.clone();
-        tx.status = TransactionStatus::Processing;
-        tx.updated_at_ledger = env.ledger().sequence();
-
-        StorageClient::save_transaction(&env, &tx);
-        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Processing);
+        Self::transition(&env, &mut tx, TransactionStatus::Processing);
 
         Ok(())
     }
@@ -227,14 +266,49 @@ impl SynapseCoreContract {
         if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
-        let old_status = tx.status.clone();
-        tx.status = TransactionStatus::Completed;
         tx.stellar_tx_hash = stellar_tx_hash.clone();
-        tx.updated_at_ledger = env.ledger().sequence();
-
-        StorageClient::save_transaction(&env, &tx);
-        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
+        Self::transition(&env, &mut tx, TransactionStatus::Completed);
         EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
+        Self::emit_forwarding_intent(&env, &tx_id);
+
+        Ok(())
+    }
+
+    /// Mark a `Processing` transaction as `Completed` with a settled amount
+    /// strictly between zero and the registered amount.
+    ///
+    /// Full settlements must use [`Self::complete_transaction`]. The settled
+    /// amount is stored in [`Transaction::settled_amount`].
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`], then
+    /// [`events::EventTransactionPartiallyCompleted`].
+    pub fn partial_complete_transaction(
+        env: Env,
+        tx_id: String,
+        settled_amount: i128,
+        stellar_tx_hash: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Processing {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        Validator::validate_settled_amount(settled_amount, tx.amount)?;
+        tx.stellar_tx_hash = stellar_tx_hash.clone();
+        tx.settled_amount = Some(settled_amount);
+        Self::transition(&env, &mut tx, TransactionStatus::Completed);
+        EventEmitter::transaction_partially_completed(
+            &env,
+            &tx_id,
+            tx.amount,
+            settled_amount,
+            &stellar_tx_hash,
+        );
+        Self::emit_forwarding_intent(&env, &tx_id);
 
         Ok(())
     }
@@ -256,16 +330,198 @@ impl SynapseCoreContract {
         if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
-        let old_status = tx.status.clone();
-        tx.status = TransactionStatus::Failed;
         tx.failure_reason = reason.clone();
-        tx.updated_at_ledger = env.ledger().sequence();
-
-        StorageClient::save_transaction(&env, &tx);
-        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
+        Self::transition(&env, &mut tx, TransactionStatus::Failed);
         EventEmitter::transaction_failed(&env, &tx_id, &reason);
 
         Ok(())
+    }
+
+    /// Cancel a `Pending` or `Processing` transaction (terminal `Cancelled`).
+    ///
+    /// Callable only by the admin or a relay signer. `Completed` and
+    /// `Failed` records are rejected with [`ContractError::CannotCancel`];
+    /// an already-`Cancelled` record with [`ContractError::AlreadyCancelled`].
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] and
+    /// [`events::EventTransactionCancelled`].
+    pub fn cancel_transaction(
+        env: Env,
+        tx_id: String,
+        reason: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_failure_reason(&reason)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        match tx.status {
+            TransactionStatus::Pending | TransactionStatus::Processing => {}
+            TransactionStatus::Cancelled => return Err(ContractError::AlreadyCancelled),
+            _ => return Err(ContractError::CannotCancel),
+        }
+        tx.failure_reason = reason.clone();
+        Self::transition(&env, &mut tx, TransactionStatus::Cancelled);
+        EventEmitter::transaction_cancelled(&env, &tx_id, &reason, &caller);
+
+        Ok(())
+    }
+
+    /// Move a `Failed` transaction back to `Pending` for reprocessing.
+    ///
+    /// Relay or admin only. Each call increments [`Transaction::retry_count`];
+    /// once it reaches [`MAX_RETRIES`] further calls fail with
+    /// [`ContractError::RetryLimitExceeded`]. The counter lives on the
+    /// persistent record, so it survives contract upgrades.
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] and
+    /// [`events::EventTransactionRetried`].
+    pub fn retry_transaction(
+        env: Env,
+        tx_id: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Failed {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        if tx.retry_count >= MAX_RETRIES {
+            return Err(ContractError::RetryLimitExceeded);
+        }
+        tx.retry_count += 1;
+        tx.failure_reason = String::from_str(&env, "");
+        Self::transition(&env, &mut tx, TransactionStatus::Pending);
+        EventEmitter::transaction_retried(&env, &tx_id, tx.retry_count);
+
+        Ok(())
+    }
+
+    /// Attach a short tag (e.g. `"vip"`, `"manual_review"`) to a transaction.
+    ///
+    /// Relay or admin only. Tags are non-empty, at most 32 bytes, and capped
+    /// at 8 per transaction. They are stored beside the record, not in it.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionTagged`].
+    pub fn add_transaction_tag(
+        env: Env,
+        tx_id: String,
+        tag: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        if !StorageClient::transaction_exists(&env, &tx_id) {
+            return Err(ContractError::TransactionNotFound);
+        }
+        let mut tags = StorageClient::get_tags(&env, &tx_id);
+        Validator::validate_tag(&tag, tags.len())?;
+        tags.push_back(tag.clone());
+        StorageClient::set_tags(&env, &tx_id, &tags);
+        EventEmitter::transaction_tagged(&env, &tx_id, &tag, tags.len());
+        Ok(())
+    }
+
+    /// Return the tags attached to `tx_id` (empty when untagged).
+    pub fn get_transaction_tags(env: Env, tx_id: String) -> Result<Vec<String>, ContractError> {
+        if !StorageClient::transaction_exists(&env, &tx_id) {
+            return Err(ContractError::TransactionNotFound);
+        }
+        Ok(StorageClient::get_tags(&env, &tx_id))
+    }
+
+    // ── Recovery / phase routing ──────────────────────────────────────────────
+
+    /// **Break-glass admin recovery** (not a routine operation): link
+    /// `duplicate_tx_id` to its canonical original after a replay slipped
+    /// through as a separate `transaction_id`.
+    ///
+    /// The duplicate is never deleted: its data stays queryable, it gets a
+    /// `MergedInto(canonical_tx_id)` marker (see [`Self::get_merged_into`]),
+    /// and its record is moved to `Failed` with `failure_reason = "merged"`
+    /// so it cannot pass for an active record. `reason` is the
+    /// evidence-backed justification and is carried in the event.
+    ///
+    /// # Errors
+    /// - [`ContractError::MergeSelf`] if both ids are equal.
+    /// - [`ContractError::AlreadyMerged`] if either side is already merged.
+    /// - [`ContractError::DuplicateSettled`] if the duplicate is `Completed`.
+    /// - [`ContractError::TransactionNotFound`] if either record is missing.
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] (when the status changes) and
+    /// [`events::EventTransactionsMerged`].
+    pub fn merge_duplicate_transactions(
+        env: Env,
+        canonical_tx_id: String,
+        duplicate_tx_id: String,
+        caller: Address,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::Unauthorised);
+        }
+        if canonical_tx_id == duplicate_tx_id {
+            return Err(ContractError::MergeSelf);
+        }
+        Validator::validate_failure_reason(&reason)?;
+        StorageClient::get_transaction(&env, &canonical_tx_id)?;
+        let mut dup = StorageClient::get_transaction(&env, &duplicate_tx_id)?;
+        if StorageClient::get_merged_into(&env, &duplicate_tx_id).is_some()
+            || StorageClient::get_merged_into(&env, &canonical_tx_id).is_some()
+        {
+            return Err(ContractError::AlreadyMerged);
+        }
+        if dup.status == TransactionStatus::Completed {
+            return Err(ContractError::DuplicateSettled);
+        }
+        dup.failure_reason = String::from_str(&env, "merged");
+        Self::transition(&env, &mut dup, TransactionStatus::Failed);
+        StorageClient::set_merged_into(&env, &duplicate_tx_id, &canonical_tx_id);
+        EventEmitter::transactions_merged(
+            &env,
+            &canonical_tx_id,
+            &duplicate_tx_id,
+            &admin,
+            &reason,
+        );
+        Ok(())
+    }
+
+    /// Return the canonical tx id `tx_id` was merged into by
+    /// [`Self::merge_duplicate_transactions`], or `None` if not merged.
+    pub fn get_merged_into(env: Env, tx_id: String) -> Option<String> {
+        StorageClient::get_merged_into(&env, &tx_id)
+    }
+
+    /// Configure the phase-router forwarding route for `tx_id`. Admin-gated.
+    ///
+    /// `next_phase == 0` clears the route (the default: no forwarding).
+    /// When set, completing the transaction emits
+    /// [`events::EventForwardingIntent`] after the `status`/`done` events.
+    /// Never performs a cross-contract call.
+    pub fn set_forwarding_route(
+        env: Env,
+        tx_id: String,
+        next_phase: u32,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let route = if next_phase == 0 {
+            None
+        } else {
+            Some(next_phase)
+        };
+        StorageClient::set_forward_route(&env, &tx_id, route);
+        Ok(())
+    }
+
+    /// Return the configured forwarding `next_phase` for `tx_id`, or `None`.
+    pub fn get_forwarding_route(env: Env, tx_id: String) -> Option<u32> {
+        StorageClient::get_forward_route(&env, &tx_id)
     }
 
     // ── Read-only queries ─────────────────────────────────────────────────────
@@ -276,6 +532,31 @@ impl SynapseCoreContract {
         // Read-only: intentionally NOT gated by the pause flag — pausing must
         // never brick reads.
         StorageClient::get_transaction(&env, &tx_id)
+    }
+
+    /// Return a page of transaction IDs currently in `status`.
+    ///
+    /// * `cursor` — zero-based offset; pass `0` for the first page, then the
+    ///   previous `cursor + returned.len()`. An empty page means the end.
+    /// * `limit`  — page size, `1..=MAX_PAGE_LIMIT` (else
+    ///   [`ContractError::InvalidPageLimit`]).
+    ///
+    /// Order is insertion order within a status until a transaction leaves
+    /// it (removal swaps the last entry into the gap), so a page walk that
+    /// races with transitions may skip or repeat an entry. Read-only and not
+    /// gated by the pause flag.
+    pub fn get_transactions_by_status(
+        env: Env,
+        status: TransactionStatus,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<Vec<String>, ContractError> {
+        if limit == 0 || limit > MAX_PAGE_LIMIT {
+            return Err(ContractError::InvalidPageLimit);
+        }
+        Ok(StorageClient::get_ids_by_status(
+            &env, status, cursor, limit,
+        ))
     }
 
     /// Return the current [`TransactionStatus`] without fetching the full record.
@@ -368,17 +649,212 @@ impl SynapseCoreContract {
         Ok(())
     }
 
-    /// Rotate the trusted relay signer address.
+    /// Rotate the trusted (primary) relay signer address immediately.
+    ///
+    /// Closed with [`ContractError::TimelockRequired`] once a non-zero
+    /// relay-signer delay is configured via [`Self::set_relay_signer_delay`];
+    /// rotation must then go through [`Self::propose_relay_signer`].
     ///
     /// # Events
     /// Emits [`events::EventRelaySignerRotated`] so off-chain monitoring can
     /// observe the rotation the same way it does [`Self::accept_admin`].
     pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
         AdminClient::require_admin(&env)?;
-        let old_signer = StorageClient::get_relay_signer(&env)?;
-        StorageClient::set_relay_signer(&env, &new_signer);
-        EventEmitter::relay_signer_rotated(&env, &old_signer, &new_signer);
+        if StorageClient::get_relay_signer_delay(&env).unwrap_or(0) > 0 {
+            return Err(ContractError::TimelockRequired);
+        }
+        Self::rotate_primary_relay(&env, &new_signer)
+    }
+
+    // ── Timelocked relay-signer rotation ──────────────────────────────────────
+
+    /// Configure the timelock delay (ledgers) for relay-signer rotation.
+    /// Admin-gated. A non-zero value also closes the immediate
+    /// [`Self::set_relay_signer`] path.
+    pub fn set_relay_signer_delay(env: Env, delay_ledgers: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_relay_signer_delay(&env, delay_ledgers);
         Ok(())
+    }
+
+    /// Start a timelocked rotation of the primary relay signer to
+    /// `new_signer`. Admin-gated. A second proposal while one is pending
+    /// **replaces** it (restarting the delay).
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerChange`] (topic `rs_prop`).
+    pub fn propose_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let delay = StorageClient::get_relay_signer_delay(&env)
+            .unwrap_or(DEFAULT_RELAY_SIGNER_DELAY_LEDGERS);
+        let eta_ledger = env.ledger().sequence().saturating_add(delay);
+        StorageClient::set_pending_relay_signer(
+            &env,
+            &PendingRelaySigner {
+                new_signer: new_signer.clone(),
+                eta_ledger,
+            },
+        );
+        EventEmitter::relay_signer_proposed(&env, &new_signer, eta_ledger);
+        Ok(())
+    }
+
+    /// Complete a pending rotation once `eta_ledger` has been reached.
+    ///
+    /// # Errors
+    /// [`ContractError::NoPendingChange`], [`ContractError::TimelockNotElapsed`].
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerRotated`].
+    pub fn finalize_relay_signer(env: Env) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let pending =
+            StorageClient::get_pending_relay_signer(&env).ok_or(ContractError::NoPendingChange)?;
+        if env.ledger().sequence() < pending.eta_ledger {
+            return Err(ContractError::TimelockNotElapsed);
+        }
+        StorageClient::clear_pending_relay_signer(&env);
+        Self::rotate_primary_relay(&env, &pending.new_signer)
+    }
+
+    /// Abort a pending rotation. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerChange`] (topic `rs_canc`).
+    pub fn cancel_relay_signer_change(env: Env) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let pending =
+            StorageClient::get_pending_relay_signer(&env).ok_or(ContractError::NoPendingChange)?;
+        StorageClient::clear_pending_relay_signer(&env);
+        EventEmitter::relay_signer_change_cancelled(&env, &pending.new_signer, pending.eta_ledger);
+        Ok(())
+    }
+
+    /// Return the pending relay-signer rotation, if any.
+    pub fn pending_relay_signer(env: Env) -> Option<PendingRelaySigner> {
+        StorageClient::get_pending_relay_signer(&env)
+    }
+
+    // ── Relay signer set (N-of-M) ─────────────────────────────────────────────
+
+    /// Return the relay signer set. Until membership is first changed this is
+    /// `{ signers: [relay_signer], threshold: 1 }`.
+    pub fn relay_signer_set(env: Env) -> Result<RelaySignerSet, ContractError> {
+        StorageClient::get_relay_signer_set(&env)
+    }
+
+    /// Register `signer`'s approval for the next relay-gated call
+    /// (multi-invocation quorum). Valid for
+    /// [`admin::RELAY_APPROVAL_WINDOW_LEDGERS`] and consumed by the gated call.
+    pub fn approve_relay_call(env: Env, signer: Address) -> Result<(), ContractError> {
+        let set = StorageClient::get_relay_signer_set(&env)?;
+        if !set.signers.contains(&signer) {
+            return Err(ContractError::NotRelaySigner);
+        }
+        signer.require_auth();
+        StorageClient::set_relay_approval(&env, &signer);
+        Ok(())
+    }
+
+    /// Add a signer to the relay set. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerMembership`] (topic `rs_add`).
+    pub fn add_relay_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        if set.signers.contains(&signer) {
+            return Err(ContractError::DuplicateRequest);
+        }
+        set.signers.push_back(signer.clone());
+        StorageClient::set_relay_signer_set(&env, &set);
+        EventEmitter::relay_signer_added(&env, &signer, set.signers.len());
+        Ok(())
+    }
+
+    /// Remove a signer from the relay set. Admin-gated; rejected with
+    /// [`ContractError::InvalidThreshold`] if it would leave fewer signers
+    /// than the threshold. Removing the primary promotes the next signer.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelaySignerMembership`] (topic `rs_rm`).
+    pub fn remove_relay_signer(env: Env, signer: Address) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        let idx = set
+            .signers
+            .first_index_of(&signer)
+            .ok_or(ContractError::NotRelaySigner)?;
+        if set.signers.len() - 1 < set.threshold {
+            return Err(ContractError::InvalidThreshold);
+        }
+        set.signers.remove(idx);
+        StorageClient::set_relay_signer_set(&env, &set);
+        if idx == 0 {
+            StorageClient::set_relay_signer(&env, &set.signers.get_unchecked(0));
+        }
+        StorageClient::clear_relay_approval(&env, &signer);
+        EventEmitter::relay_signer_removed(&env, &signer, set.signers.len());
+        Ok(())
+    }
+
+    /// Change the relay quorum threshold. Admin-gated; must satisfy
+    /// `1 <= threshold <= signers.len()`.
+    ///
+    /// # Events
+    /// Emits [`events::EventRelayThresholdChanged`].
+    pub fn set_relay_threshold(env: Env, threshold: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let mut set = StorageClient::get_relay_signer_set(&env)?;
+        if threshold == 0 || threshold > set.signers.len() {
+            return Err(ContractError::InvalidThreshold);
+        }
+        let old = set.threshold;
+        set.threshold = threshold;
+        StorageClient::set_relay_signer_set(&env, &set);
+        EventEmitter::relay_threshold_changed(&env, old, threshold);
+        Ok(())
+    }
+
+    // ── Amount ceilings ───────────────────────────────────────────────────────
+
+    /// Set (`Some`) or clear (`None`) the maximum callback `amount` accepted
+    /// for `anchor` (matched against the payload's `asset_issuer`).
+    /// Admin-gated; ceilings must be strictly positive.
+    ///
+    /// # Events
+    /// Emits [`events::EventAmountCeilingSet`].
+    pub fn set_amount_ceiling(
+        env: Env,
+        anchor: String,
+        ceiling: Option<i128>,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        Self::check_ceiling(ceiling)?;
+        StorageClient::set_amount_ceiling(&env, &anchor, ceiling);
+        EventEmitter::amount_ceiling_set(&env, Some(anchor), ceiling, &admin);
+        Ok(())
+    }
+
+    /// Set (`Some`) or clear (`None`) the ceiling applied to anchors without
+    /// their own entry. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventAmountCeilingSet`] with `anchor = None`.
+    pub fn set_default_amount_ceiling(
+        env: Env,
+        ceiling: Option<i128>,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        Self::check_ceiling(ceiling)?;
+        StorageClient::set_default_amount_ceiling(&env, ceiling);
+        EventEmitter::amount_ceiling_set(&env, None, ceiling, &admin);
+        Ok(())
+    }
+
+    /// Effective ceiling for `anchor` (`i128::MAX` when none applies).
+    pub fn get_amount_ceiling(env: Env, anchor: String) -> i128 {
+        StorageClient::get_amount_ceiling(&env, &anchor)
     }
 
     // ── Contract upgrade ───────────────────────────────────────────────────────
@@ -405,19 +881,227 @@ impl SynapseCoreContract {
     /// Because this entry point allows the admin to deploy arbitrary WASM, the
     /// admin key **MUST** be held by a multisig or DAO.  See `DECISIONS.md` for
     /// the full rationale and `README.md` for operational requirements.
+    ///
+    /// After the swap, [`StorageClient::post_upgrade_self_check`] must pass or
+    /// the whole invocation reverts with [`ContractError::SelfCheckFailed`].
+    /// A successful upgrade is appended to [`Self::get_upgrade_history`].
     pub fn upgrade(
         env: Env,
         new_wasm_hash: BytesN<32>,
         expected_schema_version: u32,
     ) -> Result<(), ContractError> {
         let admin = AdminClient::require_admin(&env)?;
-        let schema_version = StorageClient::get_schema_version(&env)?;
-        if schema_version != expected_schema_version {
-            return Err(ContractError::SchemaVersionMismatch);
+        Self::check_schema_compat(&env, expected_schema_version)?;
+        Self::swap_wasm(&env, &admin, &new_wasm_hash, false)?;
+        Ok(())
+    }
+
+    /// Read-only dry run of [`Self::upgrade`]'s guards for `caller`.
+    ///
+    /// Reports the first guard that would fail, in the same order `upgrade`
+    /// checks them, without requiring auth or writing storage. It cannot
+    /// check that `new_wasm_hash` is uploaded; that is a host-level check.
+    pub fn simulate_upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+    ) -> UpgradeCompatibility {
+        let _ = new_wasm_hash;
+        let admin = match StorageClient::get_admin(&env) {
+            Ok(a) => a,
+            Err(_) => return UpgradeCompatibility::NotInitialised,
+        };
+        if caller != admin {
+            return UpgradeCompatibility::CallerNotAdmin;
         }
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
-        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
+        match Self::check_schema_compat(&env, expected_schema_version) {
+            Ok(_) => UpgradeCompatibility::Compatible,
+            Err(ContractError::NotInitialised) => UpgradeCompatibility::NotInitialised,
+            Err(_) => UpgradeCompatibility::SchemaVersionMismatch,
+        }
+    }
+
+    /// Bounded, oldest-first history of successful upgrades.
+    pub fn get_upgrade_history(env: Env) -> Vec<UpgradeRecord> {
+        StorageClient::get_upgrade_history(&env)
+    }
+
+    /// Seed the WASM hash the contract was deployed with, so the first
+    /// upgrade records a real `previous_wasm_hash` and can be rolled back.
+    /// Admin-gated; only allowed while no hash is recorded.
+    pub fn register_installed_wasm(env: Env, wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        if StorageClient::get_current_wasm_hash(&env).is_some() {
+            return Err(ContractError::AlreadyInitialised);
+        }
+        StorageClient::set_current_wasm_hash(&env, &wasm_hash);
+        Ok(())
+    }
+
+    // ── Timelocked upgrade (ADR-0004) ─────────────────────────────────────────
+
+    /// Configure the `propose_upgrade` → `finalize_upgrade` delay in ledgers.
+    /// Admin-gated.
+    pub fn set_upgrade_delay(env: Env, delay_ledgers: u32) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        StorageClient::set_upgrade_delay(&env, delay_ledgers);
+        Ok(())
+    }
+
+    /// Current upgrade timelock delay in ledgers.
+    pub fn upgrade_delay(env: Env) -> u32 {
+        StorageClient::get_upgrade_delay(&env)
+    }
+
+    /// Stage an upgrade that [`Self::finalize_upgrade`] may apply once the
+    /// delay elapses. Admin-gated. The schema guard runs up front; a second
+    /// proposal replaces the first and restarts the delay.
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeProposed`].
+    pub fn propose_upgrade(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        Self::check_schema_compat(&env, expected_schema_version)?;
+        let eta_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(StorageClient::get_upgrade_delay(&env));
+        StorageClient::set_pending_upgrade(
+            &env,
+            &PendingUpgrade {
+                wasm_hash: new_wasm_hash.clone(),
+                expected_schema_version,
+                eta_ledger,
+            },
+        );
+        EventEmitter::upgrade_proposed(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            expected_schema_version,
+            eta_ledger,
+        );
+        Ok(())
+    }
+
+    /// Apply the pending upgrade once its ETA has been reached. Admin-gated.
+    ///
+    /// # Events
+    /// Emits `chk_pass`, `upgrade`, then [`events::EventUpgradeFinalized`].
+    pub fn finalize_upgrade(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let pending =
+            StorageClient::get_pending_upgrade(&env).ok_or(ContractError::NoPendingChange)?;
+        if env.ledger().sequence() < pending.eta_ledger {
+            return Err(ContractError::TimelockNotElapsed);
+        }
+        Self::check_schema_compat(&env, pending.expected_schema_version)?;
+        StorageClient::clear_pending_upgrade(&env);
+        let schema_version = Self::swap_wasm(&env, &admin, &pending.wasm_hash, false)?;
+        EventEmitter::upgrade_finalized(&env, &admin, &pending.wasm_hash, schema_version);
+        Ok(())
+    }
+
+    /// Discard the pending upgrade. Admin-gated.
+    ///
+    /// # Events
+    /// Emits [`events::EventUpgradeCancelled`].
+    pub fn cancel_upgrade(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let pending =
+            StorageClient::get_pending_upgrade(&env).ok_or(ContractError::NoPendingChange)?;
+        StorageClient::clear_pending_upgrade(&env);
+        EventEmitter::upgrade_cancelled(&env, &admin, &pending.wasm_hash);
+        Ok(())
+    }
+
+    /// Return the staged timelocked upgrade, if any.
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        StorageClient::get_pending_upgrade(&env)
+    }
+
+    // ── Migration / rollback (ADR-0005) ───────────────────────────────────────
+
+    /// Run migration `migration_id` from `migration.rs`, then swap the WASM,
+    /// atomically. Admin-gated. Any failure reverts both steps.
+    ///
+    /// # Events
+    /// Emits `chk_pass`, `upgrade`, then [`events::EventUpgradeMigrated`].
+    pub fn upgrade_and_migrate(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+        migration_id: u32,
+    ) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        Self::check_schema_compat(&env, expected_schema_version)?;
+        let touches = MigrationRegistry::run(&env, migration_id)?;
+        // A migration that touched no storage leaves the upgrade reversible.
+        Self::swap_wasm(&env, &admin, &new_wasm_hash, touches > 0)?;
+        EventEmitter::upgrade_migrated(&env, &admin, migration_id, touches, &new_wasm_hash);
+        Ok(())
+    }
+
+    /// Restore the WASM that was installed before the last upgrade.
+    /// Admin-gated.
+    ///
+    /// # Errors
+    /// - [`ContractError::NothingToRollback`] — no previous WASM recorded.
+    /// - [`ContractError::UpgradeNotReversible`] — the last upgrade migrated
+    ///   storage, so the old WASM may not understand it.
+    ///
+    /// # Events
+    /// Emits `chk_pass`, `upgrade`, then [`events::EventUpgradeRolledBack`].
+    pub fn rollback_upgrade(env: Env) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let previous =
+            StorageClient::get_previous_upgrade(&env).ok_or(ContractError::NothingToRollback)?;
+        if StorageClient::last_upgrade_migrated(&env) {
+            return Err(ContractError::UpgradeNotReversible);
+        }
+        Self::check_schema_compat(&env, previous.schema_version)?;
+        let schema_version = Self::swap_wasm(&env, &admin, &previous.wasm_hash, false)?;
+        EventEmitter::upgrade_rolled_back(&env, &admin, &previous.wasm_hash, schema_version);
+        Ok(())
+    }
+
+    /// The snapshot [`Self::rollback_upgrade`] would restore, if any.
+    pub fn previous_upgrade(env: Env) -> Option<UpgradeSnapshot> {
+        StorageClient::get_previous_upgrade(&env)
+    }
+
+    /// Whether the last upgrade migrated storage (blocks rollback).
+    pub fn last_upgrade_migrated(env: Env) -> bool {
+        StorageClient::last_upgrade_migrated(&env)
+    }
+
+    // ── Schema compatibility range (ADR-0006) ─────────────────────────────────
+
+    /// Accepted `expected_schema_version` window for the upgrade entry
+    /// points. Defaults to an exact match on [`Self::schema_version`].
+    pub fn schema_compatibility_range(env: Env) -> Result<SchemaCompatRange, ContractError> {
+        StorageClient::get_schema_compat_range(&env)
+    }
+
+    /// Declare the accepted `expected_schema_version` window. Admin-gated.
+    /// Must satisfy `min <= schema_version() <= max`, else
+    /// [`ContractError::InvalidSchemaCompatRange`].
+    pub fn set_schema_compatibility_range(
+        env: Env,
+        min: u32,
+        max: u32,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        let current = StorageClient::get_schema_version(&env)?;
+        if min > max || current < min || current > max {
+            return Err(ContractError::InvalidSchemaCompatRange);
+        }
+        StorageClient::set_schema_compat_range(&env, &SchemaCompatRange { min, max });
         Ok(())
     }
 
@@ -615,7 +1299,7 @@ impl SynapseCoreContract {
     ///
     /// # Errors
     /// - [`ContractError::NoPendingUnbond`] — no pending unbond for this signer.
-    /// - [`ContractError::UnbondDelayNotElapsed`] — too early.
+    /// - [`ContractError::TimelockNotElapsed`] — too early.
     ///
     /// # Events
     /// Emits [`events::EventUnbondClaimed`].
@@ -626,7 +1310,7 @@ impl SynapseCoreContract {
             .ok_or(ContractError::NoPendingUnbond)?;
 
         if env.ledger().sequence() < request.claimable_at_ledger {
-            return Err(ContractError::UnbondDelayNotElapsed);
+            return Err(ContractError::TimelockNotElapsed);
         }
 
         let amount = request.amount;
@@ -683,8 +1367,8 @@ impl SynapseCoreContract {
     ///
     /// # Errors
     /// - [`ContractError::SignerNotBonded`] — signer has no bond to slash.
-    /// - [`ContractError::EvidenceTxIdMismatch`] — evidence `tx_id` does not match both payloads.
-    /// - [`ContractError::EvidenceNotConflicting`] — payloads are identical in all substantive fields.
+    /// - [`ContractError::InvalidSlashEvidence`] — evidence `tx_id` does not match both payloads.
+    /// - [`ContractError::InvalidSlashEvidence`] — payloads are identical in all substantive fields.
     ///
     /// # Events
     /// Emits [`events::EventSlashed`].
@@ -702,7 +1386,7 @@ impl SynapseCoreContract {
         if evidence.payload_a.transaction_id != evidence.tx_id
             || evidence.payload_b.transaction_id != evidence.tx_id
         {
-            return Err(ContractError::EvidenceTxIdMismatch);
+            return Err(ContractError::InvalidSlashEvidence);
         }
 
         // 2. Verify the payloads differ in at least one substantive field
@@ -716,7 +1400,7 @@ impl SynapseCoreContract {
             || evidence.payload_a.callback_status != evidence.payload_b.callback_status;
 
         if !conflicting {
-            return Err(ContractError::EvidenceNotConflicting);
+            return Err(ContractError::InvalidSlashEvidence);
         }
 
         // 3. Load the bond record — there must be collateral to slash.
@@ -829,5 +1513,135 @@ impl SynapseCoreContract {
 
         EventEmitter::rebate_applied(&env, &anchor, base_fee, effective_fee, rebate_bps);
         Ok(effective_fee)
+    }
+}
+
+// ─── Internal helpers (not exported) ─────────────────────────────────────────
+
+impl SynapseCoreContract {
+    /// Persist a freshly validated payload as a `Pending` transaction, record
+    /// its idempotency key and index entry, and emit `reg`.
+    fn persist_new_transaction(env: &Env, payload: &CallbackPayload) -> Transaction {
+        let ledger = env.ledger().sequence();
+        let empty = String::from_str(env, "");
+        let tx = Transaction {
+            id: payload.transaction_id.clone(),
+            stellar_account: payload.stellar_account.clone(),
+            amount: payload.amount,
+            asset_code: payload.asset_code.clone(),
+            asset_issuer: payload.asset_issuer.clone(),
+            status: TransactionStatus::Pending,
+            created_at_ledger: ledger,
+            updated_at_ledger: ledger,
+            anchor_transaction_id: payload.anchor_transaction_id.clone(),
+            callback_type: payload.callback_type.clone(),
+            callback_status: payload.callback_status.clone(),
+            stellar_tx_hash: empty.clone(),
+            failure_reason: empty,
+            retry_count: 0,
+            settled_amount: None,
+        };
+        StorageClient::save_transaction(env, &tx);
+        StorageClient::index_status_change(env, &tx.id, None, TransactionStatus::Pending);
+        StorageClient::set_idempotency_key(env, &payload.idempotency_key);
+        EventEmitter::transaction_registered(env, &tx);
+        tx
+    }
+
+    /// Move `tx` to `new_status`: persist it, update the status index, and
+    /// emit `status`. Callers validate the transition first.
+    fn transition(env: &Env, tx: &mut Transaction, new_status: TransactionStatus) {
+        let old_status = tx.status;
+        tx.status = new_status;
+        tx.updated_at_ledger = env.ledger().sequence();
+        StorageClient::save_transaction(env, tx);
+        StorageClient::index_status_change(env, &tx.id, Some(old_status), new_status);
+        EventEmitter::status_changed(env, &tx.id, old_status, new_status);
+    }
+
+    /// Emit the phase-router forwarding intent if a route is configured.
+    fn emit_forwarding_intent(env: &Env, tx_id: &String) {
+        if let Some(next_phase) = StorageClient::get_forward_route(env, tx_id) {
+            EventEmitter::forwarding_intent(env, tx_id, next_phase);
+        }
+    }
+
+    /// Replace the primary relay signer, keeping the signer set consistent.
+    fn rotate_primary_relay(env: &Env, new_signer: &Address) -> Result<(), ContractError> {
+        let old_signer = StorageClient::get_relay_signer(env)?;
+        if let Some(set) = StorageClient::get_relay_signer_set_opt(env) {
+            if set.signers.first_index_of(new_signer).unwrap_or(0) != 0 {
+                return Err(ContractError::DuplicateRequest);
+            }
+        }
+        StorageClient::set_relay_signer(env, new_signer);
+        EventEmitter::relay_signer_rotated(env, &old_signer, new_signer);
+        Ok(())
+    }
+
+    /// Reject non-positive amount ceilings.
+    fn check_ceiling(ceiling: Option<i128>) -> Result<(), ContractError> {
+        match ceiling {
+            Some(c) if c <= 0 => Err(ContractError::InvalidAmount),
+            _ => Ok(()),
+        }
+    }
+
+    /// Require `expected` to fall inside the schema compatibility range.
+    fn check_schema_compat(env: &Env, expected: u32) -> Result<(), ContractError> {
+        let range = StorageClient::get_schema_compat_range(env)?;
+        if expected < range.min || expected > range.max {
+            return Err(ContractError::SchemaVersionMismatch);
+        }
+        Ok(())
+    }
+
+    /// Shared WASM-swap primitive for every upgrade path: swap, self-check,
+    /// then record history and the rollback snapshot. Returns the on-chain
+    /// schema version. Any `Err` reverts the whole invocation.
+    fn swap_wasm(
+        env: &Env,
+        admin: &Address,
+        new_wasm_hash: &BytesN<32>,
+        migrated: bool,
+    ) -> Result<u32, ContractError> {
+        let schema_version = StorageClient::get_schema_version(env)?;
+        let previous = StorageClient::get_current_wasm_hash(env);
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        if let Err(e) = StorageClient::post_upgrade_self_check(env) {
+            EventEmitter::upgrade_self_check_failed(env, schema_version);
+            return Err(e);
+        }
+        EventEmitter::upgrade_self_check_passed(env, schema_version);
+
+        StorageClient::append_upgrade_record(
+            env,
+            &UpgradeRecord {
+                previous_wasm_hash: previous
+                    .clone()
+                    .unwrap_or(BytesN::from_array(env, &[0u8; 32])),
+                new_wasm_hash: new_wasm_hash.clone(),
+                schema_version,
+                ledger: env.ledger().sequence(),
+                admin: admin.clone(),
+            },
+        );
+        match previous {
+            Some(wasm_hash) => StorageClient::set_previous_upgrade(
+                env,
+                &UpgradeSnapshot {
+                    wasm_hash,
+                    schema_version,
+                },
+            ),
+            None => StorageClient::clear_previous_upgrade(env),
+        }
+        StorageClient::set_current_wasm_hash(env, new_wasm_hash);
+        StorageClient::set_last_upgrade_migrated(env, migrated);
+        EventEmitter::contract_upgraded(env, admin, new_wasm_hash, schema_version);
+        Ok(schema_version)
     }
 }

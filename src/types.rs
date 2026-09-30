@@ -3,7 +3,7 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, String, Vec};
 
 /// Current on-chain storage schema version.
 ///
@@ -17,6 +17,26 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Maximum number of times a `Failed` transaction may be retried.
+pub const MAX_RETRIES: u32 = 3;
+
+/// Hard cap on the `limit` accepted by `get_transactions_by_status`.
+pub const MAX_PAGE_LIMIT: u32 = 50;
+
+/// Hard cap on the number of payloads accepted by `batch_register_callback`.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
+/// Maximum number of [`UpgradeRecord`]s retained by `get_upgrade_history`.
+/// The oldest record is evicted (FIFO) once the cap is reached.
+pub const MAX_UPGRADE_HISTORY: u32 = 32;
+
+/// Default timelock for `propose_upgrade` → `finalize_upgrade` (~24h at
+/// ~5s/ledger). Overridable via `set_upgrade_delay`.
+pub const DEFAULT_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
+/// Default relay-signer rotation timelock: ~24h at ~5s/ledger.
+pub const DEFAULT_RELAY_SIGNER_DELAY_LEDGERS: u32 = 17_280;
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -24,10 +44,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// State machine:
 /// ```text
 /// Pending ──► Processing ──► Completed
-///         └──────────────► Failed
+///   │             │
+///   ├─────────────┴────────► Failed ──(retry)──► Pending
+///   └─────────────┴────────► Cancelled
 /// ```
 #[contracttype]
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TransactionStatus {
     /// Initial state — callback received, not yet picked up by the processor.
     Pending,
@@ -36,7 +58,10 @@ pub enum TransactionStatus {
     /// Stellar on-chain settlement confirmed; ready for Phase 2 (Swap Engine).
     Completed,
     /// Terminal failure — reason stored in [`Transaction::failure_reason`].
+    /// May be moved back to `Pending` by `retry_transaction`.
     Failed,
+    /// Terminal withdrawal — voided by the relay or admin before settlement.
+    Cancelled,
 }
 
 // ─── Callback type ────────────────────────────────────────────────────────────
@@ -98,8 +123,16 @@ pub struct Transaction {
     /// Empty string until the transaction reaches `Completed`.
     pub stellar_tx_hash: String,
 
-    /// Short failure reason code — populated only on `Failed`.
+    /// Short failure reason code — populated only on `Failed` / `Cancelled`.
     pub failure_reason: String,
+
+    /// Number of times this transaction has been moved `Failed -> Pending`
+    /// via `retry_transaction`. Capped at [`MAX_RETRIES`].
+    pub retry_count: u32,
+
+    /// Amount actually settled when completed via
+    /// `partial_complete_transaction`; `None` for a full settlement.
+    pub settled_amount: Option<i128>,
 }
 
 // ─── Incoming webhook payload ─────────────────────────────────────────────────
@@ -187,6 +220,143 @@ pub enum StorageKey {
     // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
     /// Per-anchor tier config keyed by the anchor address.
     AnchorTier(soroban_sdk::Address),
+
+    // ── Transaction queries / metadata (#176, #177) ──────────────────────────
+    /// Per-status index size: number of transactions currently in a status.
+    StatusCount(TransactionStatus),
+    /// Per-status index slot `(status, i)` -> transaction ID, `i < count`.
+    /// Slots are dense; removal swaps the last slot into the gap so every
+    /// index update is O(1) and no single ledger entry grows unboundedly.
+    StatusSlot(TransactionStatus, u32),
+    /// Reverse pointer: transaction ID -> its slot in its current status.
+    StatusSlotOf(String),
+    /// Per-transaction tag list (`Vec<String>`), kept out of the
+    /// [`Transaction`] record so untagged transactions pay no extra rent.
+    TxTags(String),
+
+    // ── Amount ceilings (#178) ───────────────────────────────────────────────
+    /// Per-anchor (asset issuer) maximum accepted callback amount.
+    AmountCeiling(String),
+    /// Singleton: contract-wide default ceiling for anchors without an entry.
+    DefaultAmountCeiling,
+
+    // ── Recovery / phase routing (#179) ──────────────────────────────────────
+    /// Merge marker: duplicate tx id -> canonical tx id it was merged into.
+    MergedInto(String),
+    /// Per-transaction forwarding route (`next_phase`); absent = no forwarding.
+    ForwardRoute(String),
+
+    // ── Relay signer set / timelocked rotation (#179) ────────────────────────
+    /// Singleton: N-of-M relay signer set ([`RelaySignerSet`]). Absent until
+    /// the set is first changed; the single `RelaySigner` is then treated as
+    /// `threshold = 1, signers = [relay_signer]`.
+    RelaySignerSet,
+    /// Temporary: a signer's standing approval for the next gated relay call.
+    RelayApproval(Address),
+    /// Singleton: pending timelocked relay-signer change.
+    PendingRelaySigner,
+    /// Singleton: relay-signer timelock delay in ledgers (absent = default).
+    RelaySignerDelay,
+
+    // ── Upgrade safety (#190, #191) ──────────────────────────────────────────
+    /// Singleton: bounded `Vec<UpgradeRecord>` (see [`MAX_UPGRADE_HISTORY`]).
+    UpgradeHistory,
+    /// Singleton: WASM hash believed to be installed (seeded by
+    /// `register_installed_wasm`, then updated by every upgrade).
+    CurrentWasmHash,
+    /// Singleton: [`UpgradeSnapshot`] of the pre-upgrade WASM, used by
+    /// `rollback_upgrade`.
+    PreviousUpgrade,
+    /// Singleton: whether the last upgrade ran a storage migration.
+    LastUpgradeMigrated,
+    /// Singleton: scaffolding marker written by test migrations.
+    MigrationMarker,
+    /// Singleton: pending timelocked upgrade ([`PendingUpgrade`]).
+    PendingUpgrade,
+    /// Singleton: upgrade timelock delay in ledgers (absent = default).
+    UpgradeDelay,
+    /// Singleton: admin-declared [`SchemaCompatRange`] (absent = exact match).
+    SchemaCompatRange,
+}
+
+// ─── Relay signer set (#179) ──────────────────────────────────────────────────
+
+/// Pending timelocked relay-signer rotation, finalisable at `eta_ledger`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingRelaySigner {
+    pub new_signer: Address,
+    pub eta_ledger: u32,
+}
+
+/// N-of-M relay signer set: `threshold` distinct members must co-authorise
+/// each relay-gated call. `signers[0]` is the primary signer returned by
+/// `relay_signer()`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySignerSet {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
+// ─── Upgrade safety (#190, #191) ──────────────────────────────────────────────
+
+/// One entry in the on-chain upgrade history (`get_upgrade_history`).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpgradeRecord {
+    /// WASM hash before the upgrade (all zeroes if it was never registered).
+    pub previous_wasm_hash: BytesN<32>,
+    /// WASM hash installed by the upgrade.
+    pub new_wasm_hash: BytesN<32>,
+    /// On-chain schema version at the time of the upgrade.
+    pub schema_version: u32,
+    /// Ledger sequence of the upgrade.
+    pub ledger: u32,
+    /// Admin that authorised the upgrade.
+    pub admin: Address,
+}
+
+/// The WASM + schema a `rollback_upgrade` would restore.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpgradeSnapshot {
+    pub wasm_hash: BytesN<32>,
+    pub schema_version: u32,
+}
+
+/// A staged timelocked upgrade (`propose_upgrade`).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub expected_schema_version: u32,
+    /// First ledger at which `finalize_upgrade` is legal.
+    pub eta_ledger: u32,
+}
+
+/// Inclusive `[min, max]` window of `expected_schema_version` values the
+/// upgrade entry points accept (ADR-0006).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaCompatRange {
+    pub min: u32,
+    pub max: u32,
+}
+
+/// Verdict returned by the read-only `simulate_upgrade` dry-run. Mirrors the
+/// guard order of the real `upgrade` entry point.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpgradeCompatibility {
+    /// Every guard `upgrade` checks before the WASM swap would pass.
+    Compatible,
+    /// The contract has not been initialised.
+    NotInitialised,
+    /// `caller` is not the current admin.
+    CallerNotAdmin,
+    /// `expected_schema_version` is outside the accepted range.
+    SchemaVersionMismatch,
 }
 
 // ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
@@ -302,6 +472,11 @@ pub struct AnchorTierConfig {
 ///
 /// Uses [`contracterror`] so they surface correctly via the Soroban XDR and
 /// can be decoded by SDK clients / frontends.
+///
+/// **Soroban caps a contract error enum at 50 variants** (the spec's
+/// `cases<50>` XDR bound; the macro panics beyond it). New failure modes
+/// should reuse an existing variant with a broadened meaning before adding
+/// one — see DECISIONS.md "Error-code budget".
 #[contracterror]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
@@ -330,7 +505,9 @@ pub enum ContractError {
     // ── Payload validation ──────────────────────────────────────────────────
     /// `stellar_account` field is malformed.
     InvalidStellarAccount = 20,
-    /// `amount` is zero or negative.
+    /// An amount is out of range: a callback `amount` or amount ceiling that
+    /// is zero or negative, or a partial `settled_amount` not strictly
+    /// between zero and the registered amount.
     InvalidAmount = 21,
     /// `asset_code` is empty or exceeds 12 characters.
     InvalidAssetCode = 22,
@@ -340,32 +517,61 @@ pub enum ContractError {
     MissingIdempotencyKey = 24,
     /// A `String` field exceeds its maximum allowed length (cost-control cap).
     StringTooLong = 25,
+    /// `amount` exceeds the per-anchor (or default) amount ceiling.
+    AmountCeilingExceeded = 26,
 
     // ── Transaction lifecycle ───────────────────────────────────────────────
     /// No transaction with the given ID exists in storage.
     TransactionNotFound = 30,
     /// The requested status transition violates the state machine.
     InvalidStatusTransition = 31,
+    /// The transaction is already `Cancelled`; cancelling twice is rejected.
+    AlreadyCancelled = 32,
+    /// Cancellation was requested from a state that cannot be cancelled
+    /// (`Completed` or `Failed`).
+    CannotCancel = 33,
+    /// The transaction has already used all [`MAX_RETRIES`] retries.
+    RetryLimitExceeded = 34,
+    /// A pagination `limit` was zero or exceeded [`MAX_PAGE_LIMIT`].
+    InvalidPageLimit = 35,
+    /// A batch was empty or exceeded [`MAX_BATCH_SIZE`].
+    InvalidBatchSize = 36,
+    /// A transaction tag was empty, or the transaction already carries the
+    /// maximum number of tags. (Over-long tags are `StringTooLong`.)
+    InvalidTag = 37,
 
     // ── Idempotency ─────────────────────────────────────────────────────────
     /// Request is a duplicate within the retention window (matches Redis 429).
     DuplicateRequest = 40,
-
-    // ── Storage ─────────────────────────────────────────────────────────────
-    /// A ledger read/write produced an unexpected result.
-    StorageError = 50,
 
     // ── Upgrade safety ──────────────────────────────────────────────────────
     /// `upgrade()`'s `expected_schema_version` argument did not match the
     /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
     /// aborted before touching contract WASM.
     SchemaVersionMismatch = 60,
+    /// The post-upgrade storage self-check failed; the upgrade reverts.
+    SelfCheckFailed = 61,
+    /// A timelocked action (`finalize_upgrade`, `finalize_relay_signer`,
+    /// `claim_unbond`) was attempted before its delay elapsed.
+    TimelockNotElapsed = 62,
+    /// A finalize / cancel call found no pending upgrade or relay-signer
+    /// change.
+    NoPendingChange = 63,
+    /// A migration routine failed, or would exceed
+    /// `MAX_MIGRATION_STORAGE_TOUCHES`; the whole upgrade reverts.
+    MigrationFailed = 64,
+    /// `upgrade_and_migrate` was given an unregistered `migration_id`.
+    UnknownMigration = 65,
+    /// `rollback_upgrade` with no recorded previous WASM.
+    NothingToRollback = 67,
+    /// The last upgrade migrated storage, so it cannot be rolled back.
+    UpgradeNotReversible = 68,
+    /// A schema compatibility range must satisfy `min <= current <= max`.
+    InvalidSchemaCompatRange = 69,
 
     // ── Wave 2: Param Registry (#146) ───────────────────────────────────────
     /// `set_param` was called with an empty param name.
     InvalidParamName = 70,
-    /// `set_param` value is outside the allowed range for that parameter.
-    InvalidParamValue = 71,
     /// `get_param` was called for a param that has never been set.
     ParamNotFound = 72,
 
@@ -377,17 +583,13 @@ pub enum ContractError {
     /// `unbond_collateral` was called while a previous unbond request is still
     /// pending (i.e. not yet claimed).
     UnbondAlreadyPending = 82,
-    /// `claim_unbond` was called before the unbond delay has elapsed.
-    UnbondDelayNotElapsed = 83,
     /// `claim_unbond` was called but no pending unbond request exists.
     NoPendingUnbond = 84,
 
     // ── Wave 2: Slashing (#144) ─────────────────────────────────────────────
-    /// `slash_signer` evidence `tx_id` does not match both payloads'
-    /// `transaction_id` fields.
-    EvidenceTxIdMismatch = 90,
-    /// `slash_signer` evidence payloads are identical (no conflicting content).
-    EvidenceNotConflicting = 91,
+    /// `slash_signer` evidence is invalid: its `tx_id` does not match both
+    /// payloads' `transaction_id`, or the payloads do not conflict.
+    InvalidSlashEvidence = 90,
     /// `slash_signer` was called for a signer with no bonded collateral.
     SignerNotBonded = 92,
 
@@ -398,4 +600,20 @@ pub enum ContractError {
     InvalidTierLabel = 101,
     /// `get_anchor_tier` / `compute_effective_fee` anchor has no tier set.
     AnchorTierNotFound = 102,
+
+    // ── Recovery / merge (#179) ─────────────────────────────────────────────
+    /// `merge_duplicate_transactions` was given the same id for both sides.
+    MergeSelf = 110,
+    /// The duplicate (or canonical) record is already merged.
+    AlreadyMerged = 111,
+    /// The duplicate is `Completed` (settled); merging would be lossy.
+    DuplicateSettled = 112,
+
+    // ── Relay signer set (#179) ─────────────────────────────────────────────
+    /// Threshold is 0 or exceeds the number of signers.
+    InvalidThreshold = 120,
+    /// Fewer than `threshold` distinct signers authorised the call.
+    QuorumNotMet = 121,
+    /// A non-zero relay-signer delay is configured; use propose/finalize.
+    TimelockRequired = 122,
 }

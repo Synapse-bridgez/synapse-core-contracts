@@ -33,6 +33,13 @@
 
 #![cfg(test)]
 
+extern crate std;
+
+use std::borrow::ToOwned;
+use std::format;
+use std::string::String;
+use std::vec::Vec;
+
 // ─── Manifest types ──────────────────────────────────────────────────────────
 
 /// One field in a `#[contracttype]` struct, as declared in the manifest.
@@ -115,9 +122,8 @@ fn parse_manifest(src: &str) -> (u32, Vec<ManifestEvent>) {
             match ctx {
                 Context::TopLevel => {
                     if k == "schema_version" {
-                        schema_version = v
-                            .parse::<u32>()
-                            .expect("schema_version must be an integer");
+                        schema_version =
+                            v.parse::<u32>().expect("schema_version must be an integer");
                     }
                 }
                 Context::Event => {
@@ -130,12 +136,7 @@ fn parse_manifest(src: &str) -> (u32, Vec<ManifestEvent>) {
                     }
                 }
                 Context::Field => {
-                    let field = events
-                        .last_mut()
-                        .unwrap()
-                        .fields
-                        .last_mut()
-                        .unwrap();
+                    let field = events.last_mut().unwrap().fields.last_mut().unwrap();
                     match k {
                         "name" => field.name = v.to_owned(),
                         "type" => field.field_type = v.to_owned(),
@@ -289,10 +290,7 @@ fn extract_field(line: &str) -> Option<(&str, &str)> {
 /// whitespace-insensitive (e.g. `BytesN < 32 >` == `BytesN<32>`).
 fn normalise_type(t: &str) -> String {
     // 1. Collapse internal whitespace.
-    let collapsed: String = t
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
     // 2. Remove spaces around `<` and `>` for generic types.
     collapsed
         .replace("< ", "<")
@@ -540,7 +538,11 @@ fn test_events_md_conforms_to_manifest() {
 fn test_manifest_is_well_formed() {
     let (schema_version, events) = parse_manifest(MANIFEST_SRC);
     assert!(schema_version > 0, "schema_version must be ≥ 1");
-    assert_eq!(events.len(), 10, "Expected exactly 10 events in the manifest");
+    assert_eq!(
+        events.len(),
+        10,
+        "Expected exactly 10 events in the manifest"
+    );
 
     for ev in &events {
         assert!(
@@ -834,7 +836,9 @@ type = "u32"
         "Drift detection failed: wrong topic symbol should have produced failures"
     );
     assert!(
-        failures.iter().any(|f| f.contains("wrongtopic") || f.contains("init")),
+        failures
+            .iter()
+            .any(|f| f.contains("wrongtopic") || f.contains("init")),
         "Expected failure to mention mismatched topic, got: {failures:?}"
     );
 }

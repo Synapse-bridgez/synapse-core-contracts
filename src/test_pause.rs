@@ -12,7 +12,7 @@
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
-    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal, Vec,
+    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
 };
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
@@ -28,8 +28,7 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
     (env, client, admin, relay)
 }
 
@@ -98,8 +97,7 @@ fn test_only_admin_can_pause_and_unpause() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let attacker = Address::generate(&env);
 
@@ -202,8 +200,7 @@ fn test_upgrade_rejects_non_admin() {
     let client = SynapseCoreContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
-    let genesis = BytesN::from_array(&env, &[0x01u8; 32]);
-    client.initialize(&admin, &relay, &genesis);
+    client.initialize(&admin, &relay);
 
     let attacker = Address::generate(&env);
     let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
@@ -222,11 +219,11 @@ fn test_upgrade_rejects_non_admin() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "upgrade",
-                args: (dummy_hash.clone(), 1u32, Vec::<Address>::new(&env)).into_val(&env),
+                args: (dummy_hash.clone(), 1u32).into_val(&env),
                 sub_invokes: &[],
             },
         }])
-        .try_upgrade(&dummy_hash, &1, &Vec::<Address>::new(&env));
+        .try_upgrade(&dummy_hash, &1);
     assert!(attacker_attempt.is_err());
 }
 
@@ -236,14 +233,14 @@ fn test_upgrade_rejects_schema_version_mismatch() {
     // this is testable without a real uploaded WASM hash.
     let (env, client, _admin, _relay) = setup();
     let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
-    let result = client.try_upgrade(&dummy_hash, &999, &Vec::<Address>::new(&env));
+    let result = client.try_upgrade(&dummy_hash, &999);
     assert_eq!(result, Err(Ok(ContractError::SchemaVersionMismatch)));
 }
 
 #[test]
 fn test_schema_version_query_returns_current_version() {
     let (_env, client, _admin, _relay) = setup();
-    assert_eq!(client.schema_version(), 2);
+    assert_eq!(client.schema_version(), crate::types::SCHEMA_VERSION);
 }
 
 #[test]

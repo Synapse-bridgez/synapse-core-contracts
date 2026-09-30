@@ -140,6 +140,55 @@ pub struct EventPauseToggled {
     pub ledger: u32,
 }
 
+/// Emitted when a dispute is raised against a transaction.
+///
+/// A dispute may be raised more than once over a transaction's lifetime if
+/// the dispute state machine permits re-disputing after a prior resolution.
+/// Subscribers correlate raised/resolved pairs via the shared `tx_id` field.
+///
+/// Downstream support tooling and admin dashboards subscribe to this event
+/// to surface disputes in real time without polling ledger state.
+#[contracttype]
+pub struct EventDisputeRaised {
+    /// The transaction ID under dispute — shared with [`EventDisputeResolved`]
+    /// as the correlation key.
+    pub tx_id: String,
+    /// Short human-readable reason code supplied by the caller
+    /// (e.g. `"amount_mismatch"`, `"missing_settlement"`).
+    pub reason: String,
+    /// Address that raised the dispute (relay signer or admin).
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted when a raised dispute is resolved.
+///
+/// Subscribers correlate this with the preceding [`EventDisputeRaised`] for
+/// the same `tx_id` to reconstruct the full dispute lifecycle.
+///
+/// # `upheld` semantics
+///
+/// * `upheld = true`  — The dispute is **upheld**: the transaction is
+///   considered invalid and the outcome is **reverted to `Failed`**.
+///   Downstream systems (support tooling, audit logs) should treat this as
+///   a terminal failure equivalent to [`EventTransactionFailed`].
+///
+/// * `upheld = false` — The dispute is **rejected**: the original outcome
+///   stands and the transaction is **returned to `Completed`**.
+///   Downstream systems should resume treating the transaction as settled.
+#[contracttype]
+pub struct EventDisputeResolved {
+    /// The transaction ID — shared correlation key with [`EventDisputeRaised`].
+    pub tx_id: String,
+    /// Whether the dispute was upheld (`true` → reverted to `Failed`) or
+    /// rejected (`false` → returned to `Completed`). See doc-comment above
+    /// for the full semantics.
+    pub upheld: bool,
+    /// Address that resolved the dispute (admin only).
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
 // ─── Wave 2 event data structs ────────────────────────────────────────────────
 
 // ── Param Registry (#146) ──────────────────────────────────────────────────────
@@ -224,50 +273,6 @@ pub struct EventAnchorTierSet {
     pub rebate_bps: u32,
     /// Human-readable tier label.
     pub label: String,
-    pub adm
-    pub caller: soroban_sdk::Address,
-    pub ledger: u32,
-}
-
-/// Emitted when a raised dispute is resolved.
-///
-/// Subscribers correlate this with the preceding [`EventDisputeRaised`] for
-/// the same `tx_id` to reconstruct the full dispute lifecycle.
-///
-/// # `upheld` semantics
-///
-/// * `upheld = true`  — The dispute is **upheld**: the transaction is
-///   considered invalid and the outcome is **reverted to `Failed`**.
-///   Downstream systems (support tooling, audit logs) should treat this as
-///   a terminal failure equivalent to [`EventTransactionFailed`].
-///
-/// * `upheld = false` — The dispute is **rejected**: the original outcome
-///   stands and the transaction is **returned to `Completed`**.
-///   Downstream systems should resume treating the transaction as settled.
-#[contracttype]
-pub struct EventDisputeResolved {
-    /// The transaction ID — shared correlation key with [`EventDisputeRaised`].
-    pub tx_id: String,
-    /// Whether the dispute was upheld (`true` → reverted to `Failed`) or
-    /// rejected (`false` → returned to `Completed`). See doc-comment above
-    /// for the full semantics.
-    pub upheld: bool,
-    /// Address that resolved the dispute (admin only).
-    pub caller: soroban_sdk::Address,
-    pub ledger: u32,
-}
-
-// ── Anchor Rebate (#145) ────────────────────────────────────────────────────────
-
-/// Emitted by [`SynapseCoreContract::set_anchor_tier`] when the admin sets or
-/// updates an anchor's rebate tier.
-#[contracttype]
-pub struct EventAnchorTierSet {
-    pub anchor: soroban_sdk::Address,
-    /// Rebate in basis points (0–10_000).
-    pub rebate_bps: u32,
-    /// Human-readable tier label.
-    pub label: String,
     pub admin: soroban_sdk::Address,
     pub ledger: u32,
 }
@@ -286,7 +291,175 @@ pub struct EventRebateApplied {
     pub ledger: u32,
 }
 
+// ─── Transaction lifecycle extensions (#176, #177, #179) ─────────────────────
 
+/// Emitted by [`SynapseCoreContract::batch_register_callback`] exactly once,
+/// after all per-transaction `reg` events of the batch.
+#[contracttype]
+pub struct EventBatchProcessed {
+    pub caller: soroban_sdk::Address,
+    pub batch_size: u32,
+    pub first_tx_id: String,
+    pub last_tx_id: String,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::cancel_transaction`].
+#[contracttype]
+pub struct EventTransactionCancelled {
+    pub tx_id: String,
+    pub reason: String,
+    pub caller: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::retry_transaction`].
+#[contracttype]
+pub struct EventTransactionRetried {
+    pub tx_id: String,
+    pub retry_count: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::partial_complete_transaction`].
+#[contracttype]
+pub struct EventTransactionPartiallyCompleted {
+    pub tx_id: String,
+    pub original_amount: i128,
+    pub settled_amount: i128,
+    pub stellar_tx_hash: String,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::add_transaction_tag`].
+#[contracttype]
+pub struct EventTransactionTagged {
+    pub tx_id: String,
+    pub tag: String,
+    pub tag_count: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::merge_duplicate_transactions`].
+#[contracttype]
+pub struct EventTransactionsMerged {
+    pub canonical_tx_id: String,
+    pub duplicate_tx_id: String,
+    pub admin: soroban_sdk::Address,
+    pub reason: String,
+    pub ledger: u32,
+}
+
+/// Emitted by `complete_transaction` after `status` / `done` when a
+/// forwarding route is configured for the transaction.
+#[contracttype]
+pub struct EventForwardingIntent {
+    pub tx_id: String,
+    pub next_phase: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by `set_amount_ceiling` / `set_default_amount_ceiling`.
+/// `anchor` is `None` for the contract-wide default; `ceiling` is `None`
+/// when the ceiling was cleared.
+#[contracttype]
+pub struct EventAmountCeilingSet {
+    pub anchor: Option<String>,
+    pub ceiling: Option<i128>,
+    pub admin: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+// ─── Relay signer set (#179) ─────────────────────────────────────────────────
+
+/// Emitted when a signer joins or leaves the relay signer set.
+#[contracttype]
+pub struct EventRelaySignerMembership {
+    pub signer: soroban_sdk::Address,
+    pub signer_count: u32,
+    pub ledger: u32,
+}
+
+/// Emitted when the relay quorum threshold changes.
+#[contracttype]
+pub struct EventRelayThresholdChanged {
+    pub old_threshold: u32,
+    pub new_threshold: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by `propose_relay_signer` (topic `rs_prop`) and
+/// `cancel_relay_signer_change` (topic `rs_canc`).
+#[contracttype]
+pub struct EventRelaySignerChange {
+    pub new_signer: soroban_sdk::Address,
+    pub eta_ledger: u32,
+    pub ledger: u32,
+}
+
+// ─── Upgrade safety (#190, #191) ─────────────────────────────────────────────
+
+/// Emitted by [`SynapseCoreContract::propose_upgrade`].
+#[contracttype]
+pub struct EventUpgradeProposed {
+    pub admin: soroban_sdk::Address,
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub expected_schema_version: u32,
+    pub eta_ledger: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::finalize_upgrade`] after the
+/// `upgrade` event.
+#[contracttype]
+pub struct EventUpgradeFinalized {
+    pub admin: soroban_sdk::Address,
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub schema_version: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::cancel_upgrade`].
+#[contracttype]
+pub struct EventUpgradeCancelled {
+    pub admin: soroban_sdk::Address,
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::rollback_upgrade`] after the
+/// `upgrade` event.
+#[contracttype]
+pub struct EventUpgradeRolledBack {
+    pub admin: soroban_sdk::Address,
+    pub restored_wasm_hash: soroban_sdk::BytesN<32>,
+    pub schema_version: u32,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::upgrade_and_migrate`] after the
+/// `upgrade` event.
+#[contracttype]
+pub struct EventUpgradeMigrated {
+    pub admin: soroban_sdk::Address,
+    pub migration_id: u32,
+    pub storage_touches: u32,
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub ledger: u32,
+}
+
+/// Emitted when the post-upgrade storage self-check passes.
+#[contracttype]
+pub struct EventUpgradeSelfCheckPassed {
+    pub schema_version: u32,
+    pub ledger: u32,
+}
+
+/// Emitted when the post-upgrade storage self-check fails; the invocation
+/// then reverts, so on-chain observers only see this in simulation.
+#[contracttype]
+pub struct EventUpgradeSelfCheckFailed {
+    pub schema_version: u32,
     pub ledger: u32,
 }
 
@@ -446,6 +619,51 @@ impl EventEmitter {
         );
     }
 
+    /// Emit [`EventDisputeRaised`].
+    ///
+    /// Topics: `synapse` / `dispute`.
+    #[allow(dead_code)]
+    pub fn dispute_raised(
+        env: &Env,
+        tx_id: &String,
+        reason: &String,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("dispute")),
+            EventDisputeRaised {
+                tx_id: tx_id.clone(),
+                reason: reason.clone(),
+                caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventDisputeResolved`].
+    ///
+    /// Topics: `synapse` / `dsprslvd`.
+    ///
+    /// `upheld = true`  → dispute upheld, transaction reverted to `Failed`.
+    /// `upheld = false` → dispute rejected, transaction returned to `Completed`.
+    #[allow(dead_code)]
+    pub fn dispute_resolved(
+        env: &Env,
+        tx_id: &String,
+        upheld: bool,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("dsprslvd")),
+            EventDisputeResolved {
+                tx_id: tx_id.clone(),
+                upheld,
+                caller: caller.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
     // ── Wave 2 emitters ───────────────────────────────────────────────────────
 
     /// Emit [`EventParamSet`] — param registry update (#146).
@@ -526,33 +744,6 @@ impl EventEmitter {
         );
     }
 
-    /// Emit [`EventDisputeRaised`].
-    ///
-    /// Topics: `synapse` / `dispute`.
-    #[allow(dead_code)]
-    pub fn dispute_raised(
-        env: &Env,
-        tx_id: &String,
-        reason: &String,
-        caller: &soroban_sdk::Address,
-    ) {
-        env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("dispute")),
-            EventDisputeRaised {
-                tx_id: tx_id.clone(),
-                reason: reason.clone(),
-                caller: caller.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
-                caller: caller.clone(),
-                ledger: env.ledger().sequence(),
-            },
-        );
-    }
-
     /// Emit [`EventAnchorTierSet`] — anchor tier updated (#145).
     pub fn anchor_tier_set(
         env: &Env,
@@ -593,30 +784,318 @@ impl EventEmitter {
         );
     }
 
-    /// Emit [`EventDisputeResolved`].
-    ///
-    /// Topics: `synapse` / `dsprslvd`.
-    ///
-    /// `upheld = true`  → dispute upheld, transaction reverted to `Failed`.
-    /// `upheld = false` → dispute rejected, transaction returned to `Completed`.
-    #[allow(dead_code)]
-    pub fn dispute_resolved(
+    // ── Transaction lifecycle extensions ──────────────────────────────────────
+
+    /// Emit [`EventBatchProcessed`].
+    pub fn batch_processed(
+        env: &Env,
+        caller: &soroban_sdk::Address,
+        batch_size: u32,
+        first_tx_id: &String,
+        last_tx_id: &String,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("batch")),
+            EventBatchProcessed {
+                caller: caller.clone(),
+                batch_size,
+                first_tx_id: first_tx_id.clone(),
+                last_tx_id: last_tx_id.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionCancelled`].
+    pub fn transaction_cancelled(
         env: &Env,
         tx_id: &String,
-        upheld: bool,
+        reason: &String,
         caller: &soroban_sdk::Address,
     ) {
         env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("dsprslvd")),
-            EventDisputeResolved {
+            (symbol_short!("synapse"), symbol_short!("cancel")),
+            EventTransactionCancelled {
                 tx_id: tx_id.clone(),
-                upheld,
+                reason: reason.clone(),
                 caller: caller.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
     }
 
+    /// Emit [`EventTransactionRetried`].
+    pub fn transaction_retried(env: &Env, tx_id: &String, retry_count: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("retry")),
+            EventTransactionRetried {
+                tx_id: tx_id.clone(),
+                retry_count,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionPartiallyCompleted`].
+    pub fn transaction_partially_completed(
+        env: &Env,
+        tx_id: &String,
+        original_amount: i128,
+        settled_amount: i128,
+        stellar_tx_hash: &String,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("partial")),
+            EventTransactionPartiallyCompleted {
+                tx_id: tx_id.clone(),
+                original_amount,
+                settled_amount,
+                stellar_tx_hash: stellar_tx_hash.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionTagged`].
+    pub fn transaction_tagged(env: &Env, tx_id: &String, tag: &String, tag_count: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("tagged")),
+            EventTransactionTagged {
+                tx_id: tx_id.clone(),
+                tag: tag.clone(),
+                tag_count,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventTransactionsMerged`].
+    pub fn transactions_merged(
+        env: &Env,
+        canonical_tx_id: &String,
+        duplicate_tx_id: &String,
+        admin: &soroban_sdk::Address,
+        reason: &String,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("merged")),
+            EventTransactionsMerged {
+                canonical_tx_id: canonical_tx_id.clone(),
+                duplicate_tx_id: duplicate_tx_id.clone(),
+                admin: admin.clone(),
+                reason: reason.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventForwardingIntent`].
+    pub fn forwarding_intent(env: &Env, tx_id: &String, next_phase: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("fwd")),
+            EventForwardingIntent {
+                tx_id: tx_id.clone(),
+                next_phase,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventAmountCeilingSet`].
+    pub fn amount_ceiling_set(
+        env: &Env,
+        anchor: Option<String>,
+        ceiling: Option<i128>,
+        admin: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("ceiling")),
+            EventAmountCeilingSet {
+                anchor,
+                ceiling,
+                admin: admin.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    // ── Relay signer set ──────────────────────────────────────────────────────
+
+    /// Emit [`EventRelaySignerMembership`] with topic `rs_add`.
+    pub fn relay_signer_added(env: &Env, signer: &soroban_sdk::Address, signer_count: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_add")),
+            EventRelaySignerMembership {
+                signer: signer.clone(),
+                signer_count,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerMembership`] with topic `rs_rm`.
+    pub fn relay_signer_removed(env: &Env, signer: &soroban_sdk::Address, signer_count: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_rm")),
+            EventRelaySignerMembership {
+                signer: signer.clone(),
+                signer_count,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelayThresholdChanged`].
+    pub fn relay_threshold_changed(env: &Env, old_threshold: u32, new_threshold: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_thr")),
+            EventRelayThresholdChanged {
+                old_threshold,
+                new_threshold,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerChange`] with topic `rs_prop`.
+    pub fn relay_signer_proposed(env: &Env, new_signer: &soroban_sdk::Address, eta_ledger: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_prop")),
+            EventRelaySignerChange {
+                new_signer: new_signer.clone(),
+                eta_ledger,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventRelaySignerChange`] with topic `rs_canc`.
+    pub fn relay_signer_change_cancelled(
+        env: &Env,
+        new_signer: &soroban_sdk::Address,
+        eta_ledger: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rs_canc")),
+            EventRelaySignerChange {
+                new_signer: new_signer.clone(),
+                eta_ledger,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    // ── Upgrade safety ────────────────────────────────────────────────────────
+
+    /// Emit [`EventUpgradeProposed`].
+    pub fn upgrade_proposed(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        wasm_hash: &soroban_sdk::BytesN<32>,
+        expected_schema_version: u32,
+        eta_ledger: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("up_prop")),
+            EventUpgradeProposed {
+                admin: admin.clone(),
+                wasm_hash: wasm_hash.clone(),
+                expected_schema_version,
+                eta_ledger,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeCancelled`].
+    pub fn upgrade_cancelled(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        wasm_hash: &soroban_sdk::BytesN<32>,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("up_can")),
+            EventUpgradeCancelled {
+                admin: admin.clone(),
+                wasm_hash: wasm_hash.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeFinalized`].
+    pub fn upgrade_finalized(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        wasm_hash: &soroban_sdk::BytesN<32>,
+        schema_version: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("up_fin")),
+            EventUpgradeFinalized {
+                admin: admin.clone(),
+                wasm_hash: wasm_hash.clone(),
+                schema_version,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeRolledBack`].
+    pub fn upgrade_rolled_back(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        restored_wasm_hash: &soroban_sdk::BytesN<32>,
+        schema_version: u32,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("rollback")),
+            EventUpgradeRolledBack {
+                admin: admin.clone(),
+                restored_wasm_hash: restored_wasm_hash.clone(),
+                schema_version,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeMigrated`].
+    pub fn upgrade_migrated(
+        env: &Env,
+        admin: &soroban_sdk::Address,
+        migration_id: u32,
+        storage_touches: u32,
+        new_wasm_hash: &soroban_sdk::BytesN<32>,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("migrate")),
+            EventUpgradeMigrated {
+                admin: admin.clone(),
+                migration_id,
+                storage_touches,
+                new_wasm_hash: new_wasm_hash.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeSelfCheckPassed`].
+    pub fn upgrade_self_check_passed(env: &Env, schema_version: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("chk_pass")),
+            EventUpgradeSelfCheckPassed {
+                schema_version,
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventUpgradeSelfCheckFailed`].
+    pub fn upgrade_self_check_failed(env: &Env, schema_version: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("chk_fail")),
+            EventUpgradeSelfCheckFailed {
+                schema_version,
                 ledger: env.ledger().sequence(),
             },
         );

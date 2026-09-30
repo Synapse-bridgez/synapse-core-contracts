@@ -75,7 +75,8 @@ fn schema_version_from_release_wasm_matches_manifest() {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &relay, &wasm_hash);
+    client.initialize(&admin, &relay);
+    client.register_installed_wasm(&wasm_hash);
 
     let reported = client.schema_version();
     assert!(

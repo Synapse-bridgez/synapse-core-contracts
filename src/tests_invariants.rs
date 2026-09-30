@@ -46,14 +46,17 @@ use crate::{SynapseCoreContract, SynapseCoreContractClient};
 // ─── Invariant assertion helper ───────────────────────────────────────────────
 
 /// Tally per-status counts by reading `tx_ids` from the contract.
+///
+/// Returns `(pending, processing, completed, failed, cancelled)`.
 fn tally_counts(
     client: &SynapseCoreContractClient,
     tx_ids: &SorobanVec<String>,
-) -> (usize, usize, usize, usize) {
+) -> (usize, usize, usize, usize, usize) {
     let mut pending = 0usize;
     let mut processing = 0usize;
     let mut completed = 0usize;
     let mut failed = 0usize;
+    let mut cancelled = 0usize;
 
     for id in tx_ids.iter() {
         match client.get_status(&id) {
@@ -61,26 +64,56 @@ fn tally_counts(
             TransactionStatus::Processing => processing += 1,
             TransactionStatus::Completed => completed += 1,
             TransactionStatus::Failed => failed += 1,
+            TransactionStatus::Cancelled => cancelled += 1,
         }
     }
-    (pending, processing, completed, failed)
+    (pending, processing, completed, failed, cancelled)
 }
 
-/// Assert the conservation invariant.
+/// Total entries in the on-chain per-status index for `status`, walked with
+/// `get_transactions_by_status` pagination.
+fn index_count(client: &SynapseCoreContractClient, status: TransactionStatus) -> usize {
+    let mut cursor = 0u32;
+    loop {
+        let page =
+            client.get_transactions_by_status(&status, &cursor, &crate::types::MAX_PAGE_LIMIT);
+        if page.is_empty() {
+            return cursor as usize;
+        }
+        cursor += page.len();
+    }
+}
+
+/// Assert the conservation invariant: every registered transaction is in
+/// exactly one status bucket, and the on-chain status index agrees with the
+/// per-record statuses bucket by bucket.
 fn assert_conservation(
     client: &SynapseCoreContractClient,
     tx_ids: &SorobanVec<String>,
     total_registered: usize,
     label: &str,
 ) {
-    let (p, pr, c, f) = tally_counts(client, tx_ids);
-    let bucket_total = p + pr + c + f;
+    let (p, pr, c, f, x) = tally_counts(client, tx_ids);
+    let bucket_total = p + pr + c + f + x;
     assert_eq!(
-        bucket_total,
-        total_registered,
+        bucket_total, total_registered,
         "[{label}] conservation violated: \
-         total_registered={total_registered} but P={p}+Pr={pr}+C={c}+F={f}={bucket_total}"
+         total_registered={total_registered} but P={p}+Pr={pr}+C={c}+F={f}+X={x}={bucket_total}"
     );
+    let indexed = [
+        (TransactionStatus::Pending, p),
+        (TransactionStatus::Processing, pr),
+        (TransactionStatus::Completed, c),
+        (TransactionStatus::Failed, f),
+        (TransactionStatus::Cancelled, x),
+    ];
+    for (status, expected) in indexed {
+        assert_eq!(
+            index_count(client, status),
+            expected,
+            "[{label}] status index for {status:?} disagrees with record statuses"
+        );
+    }
 }
 
 // ─── Setup helpers ────────────────────────────────────────────────────────────
@@ -106,29 +139,83 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
 // Static tx_id / idem_key pairs — enough for all scenarios (max 30 used).
 // All IDs are unique, short enough (< 64 chars), and uppercase-only where needed.
 const TX_IDS: &[&str] = &[
-    "tx-inv-0000", "tx-inv-0001", "tx-inv-0002", "tx-inv-0003", "tx-inv-0004",
-    "tx-inv-0005", "tx-inv-0006", "tx-inv-0007", "tx-inv-0008", "tx-inv-0009",
-    "tx-inv-0010", "tx-inv-0011", "tx-inv-0012", "tx-inv-0013", "tx-inv-0014",
-    "tx-inv-0015", "tx-inv-0016", "tx-inv-0017", "tx-inv-0018", "tx-inv-0019",
-    "tx-inv-0020", "tx-inv-0021", "tx-inv-0022", "tx-inv-0023", "tx-inv-0024",
-    "tx-inv-0025", "tx-inv-0026", "tx-inv-0027", "tx-inv-0028", "tx-inv-0029",
+    "tx-inv-0000",
+    "tx-inv-0001",
+    "tx-inv-0002",
+    "tx-inv-0003",
+    "tx-inv-0004",
+    "tx-inv-0005",
+    "tx-inv-0006",
+    "tx-inv-0007",
+    "tx-inv-0008",
+    "tx-inv-0009",
+    "tx-inv-0010",
+    "tx-inv-0011",
+    "tx-inv-0012",
+    "tx-inv-0013",
+    "tx-inv-0014",
+    "tx-inv-0015",
+    "tx-inv-0016",
+    "tx-inv-0017",
+    "tx-inv-0018",
+    "tx-inv-0019",
+    "tx-inv-0020",
+    "tx-inv-0021",
+    "tx-inv-0022",
+    "tx-inv-0023",
+    "tx-inv-0024",
+    "tx-inv-0025",
+    "tx-inv-0026",
+    "tx-inv-0027",
+    "tx-inv-0028",
+    "tx-inv-0029",
 ];
 
 const IDEM_IDS: &[&str] = &[
-    "id-inv-0000", "id-inv-0001", "id-inv-0002", "id-inv-0003", "id-inv-0004",
-    "id-inv-0005", "id-inv-0006", "id-inv-0007", "id-inv-0008", "id-inv-0009",
-    "id-inv-0010", "id-inv-0011", "id-inv-0012", "id-inv-0013", "id-inv-0014",
-    "id-inv-0015", "id-inv-0016", "id-inv-0017", "id-inv-0018", "id-inv-0019",
-    "id-inv-0020", "id-inv-0021", "id-inv-0022", "id-inv-0023", "id-inv-0024",
-    "id-inv-0025", "id-inv-0026", "id-inv-0027", "id-inv-0028", "id-inv-0029",
+    "id-inv-0000",
+    "id-inv-0001",
+    "id-inv-0002",
+    "id-inv-0003",
+    "id-inv-0004",
+    "id-inv-0005",
+    "id-inv-0006",
+    "id-inv-0007",
+    "id-inv-0008",
+    "id-inv-0009",
+    "id-inv-0010",
+    "id-inv-0011",
+    "id-inv-0012",
+    "id-inv-0013",
+    "id-inv-0014",
+    "id-inv-0015",
+    "id-inv-0016",
+    "id-inv-0017",
+    "id-inv-0018",
+    "id-inv-0019",
+    "id-inv-0020",
+    "id-inv-0021",
+    "id-inv-0022",
+    "id-inv-0023",
+    "id-inv-0024",
+    "id-inv-0025",
+    "id-inv-0026",
+    "id-inv-0027",
+    "id-inv-0028",
+    "id-inv-0029",
 ];
 
 // Extra sets used for specific scenarios (pause/unpause additional registrations).
 const TX_IDS_B: &[&str] = &[
-    "tx-invb-0000", "tx-invb-0001", "tx-invb-0002", "tx-invb-0003",
+    "tx-invb-0000",
+    "tx-invb-0001",
+    "tx-invb-0002",
+    "tx-invb-0003",
 ];
 const IDEM_IDS_B: &[&str] = &[
-    "id-invb-0000", "id-invb-0001", "id-invb-0002", "id-invb-0003",
+    "id-invb-0000",
+    "id-invb-0001",
+    "id-invb-0002",
+    "id-invb-0003",
 ];
 
 fn make_payload(env: &Env, idx: usize) -> CallbackPayload {
@@ -206,7 +293,7 @@ fn invariant_batch_register_all_pending() {
 
     assert_conservation(&client, &ids, n, "batch_register_all_pending");
 
-    let (p, pr, c, f) = tally_counts(&client, &ids);
+    let (p, pr, c, f, _) = tally_counts(&client, &ids);
     assert_eq!(p, n, "all freshly registered txs must be Pending");
     assert_eq!(pr, 0);
     assert_eq!(c, 0);
@@ -227,24 +314,16 @@ fn invariant_all_transactions_reach_terminal_states() {
         let id = client.register_callback(&payload);
         client.start_processing(&id, &relay);
         if i % 2 == 0 {
-            client.complete_transaction(
-                &id,
-                &String::from_str(&env, "hash-term"),
-                &relay,
-            );
+            client.complete_transaction(&id, &String::from_str(&env, "hash-term"), &relay);
         } else {
-            client.fail_transaction(
-                &id,
-                &String::from_str(&env, "reason"),
-                &relay,
-            );
+            client.fail_transaction(&id, &String::from_str(&env, "reason"), &relay);
         }
         ids.push_back(id);
     }
 
     assert_conservation(&client, &ids, n, "all_terminal");
 
-    let (p, pr, c, f) = tally_counts(&client, &ids);
+    let (p, pr, c, f, _) = tally_counts(&client, &ids);
     assert_eq!(c, n / 2);
     assert_eq!(f, n / 2);
     assert_eq!(p, 0);
@@ -269,11 +348,7 @@ fn invariant_mixed_in_progress_and_terminal() {
             }
             _ => {
                 client.start_processing(&id, &relay);
-                client.complete_transaction(
-                    &id,
-                    &String::from_str(&env, "hash-mix"),
-                    &relay,
-                );
+                client.complete_transaction(&id, &String::from_str(&env, "hash-mix"), &relay);
             }
         }
         ids.push_back(id);
@@ -399,7 +474,7 @@ fn invariant_pseudorandom_operation_sequences() {
     // available slots.
     let seeds: &[(u64, usize)] = &[
         (0xDEAD_BEEF_CAFE_0001, 0),
-        (0x1234_5678_9ABC_DEF0, 6),  // use indices 6..17
+        (0x1234_5678_9ABC_DEF0, 6), // use indices 6..17
         (0xFEED_FACE_DEAD_BABE, 12),
         (0x0000_0000_FFFF_FFFF, 18),
         // Last seed re-uses indices 0..11 with a fresh contract — no ID collision
@@ -415,9 +490,10 @@ fn invariant_pseudorandom_operation_sequences() {
         let mut ids = SorobanVec::new(&env);
         // We track in-memory status with a fixed-size array.
         let mut statuses = [TransactionStatus::Pending; 12];
+        let mut retries = [0u32; 12];
 
         // Phase 1: register all transactions.
-        for i in 0..num_txs {
+        for (i, status) in statuses.iter_mut().enumerate() {
             let idx = offset + i;
             let payload = {
                 let account = g_address(&env);
@@ -435,7 +511,7 @@ fn invariant_pseudorandom_operation_sequences() {
             };
             let id = client.register_callback(&payload);
             ids.push_back(id);
-            statuses[i] = TransactionStatus::Pending;
+            *status = TransactionStatus::Pending;
         }
 
         assert_conservation(&client, &ids, num_txs, "rng:after_register");
@@ -446,19 +522,24 @@ fn invariant_pseudorandom_operation_sequences() {
             let id = ids.get(i as u32).unwrap();
 
             match &statuses[i] {
-                TransactionStatus::Pending => {
-                    if rng.next_bool() {
+                TransactionStatus::Pending => match rng.next_usize_below(3) {
+                    0 => {
                         client.start_processing(&id, &relay);
                         statuses[i] = TransactionStatus::Processing;
-                    } else {
-                        client.fail_transaction(
-                            &id,
-                            &String::from_str(&env, "rng-fail"),
-                            &relay,
-                        );
+                    }
+                    1 => {
+                        client.fail_transaction(&id, &String::from_str(&env, "rng-fail"), &relay);
                         statuses[i] = TransactionStatus::Failed;
                     }
-                }
+                    _ => {
+                        client.cancel_transaction(
+                            &id,
+                            &String::from_str(&env, "rng-cancel"),
+                            &relay,
+                        );
+                        statuses[i] = TransactionStatus::Cancelled;
+                    }
+                },
                 TransactionStatus::Processing => {
                     if rng.next_bool() {
                         client.complete_transaction(
@@ -468,16 +549,20 @@ fn invariant_pseudorandom_operation_sequences() {
                         );
                         statuses[i] = TransactionStatus::Completed;
                     } else {
-                        client.fail_transaction(
-                            &id,
-                            &String::from_str(&env, "rng-fail"),
-                            &relay,
-                        );
+                        client.fail_transaction(&id, &String::from_str(&env, "rng-fail"), &relay);
                         statuses[i] = TransactionStatus::Failed;
                     }
                 }
+                TransactionStatus::Failed => {
+                    // Failed is retryable until MAX_RETRIES is used up.
+                    if retries[i] < crate::types::MAX_RETRIES && rng.next_bool() {
+                        client.retry_transaction(&id, &relay);
+                        retries[i] += 1;
+                        statuses[i] = TransactionStatus::Pending;
+                    }
+                }
                 // Terminal — no-op.
-                TransactionStatus::Completed | TransactionStatus::Failed => {}
+                TransactionStatus::Completed | TransactionStatus::Cancelled => {}
             }
 
             // Assert conservation after every single operation.
@@ -485,11 +570,11 @@ fn invariant_pseudorandom_operation_sequences() {
         }
 
         // Final: in-memory model must match on-chain state.
-        for i in 0..num_txs {
+        for (i, expected) in statuses.iter().enumerate() {
             let id = ids.get(i as u32).unwrap();
             assert_eq!(
                 client.get_status(&id),
-                statuses[i],
+                *expected,
                 "seed={seed:#x}: in-memory model diverged from on-chain state at idx={i}"
             );
         }
@@ -511,11 +596,7 @@ fn invariant_no_transaction_vanishes() {
         if i % 3 == 0 {
             client.fail_transaction(&id, &String::from_str(&env, "r"), &relay);
         } else {
-            client.complete_transaction(
-                &id,
-                &String::from_str(&env, "hash-van"),
-                &relay,
-            );
+            client.complete_transaction(&id, &String::from_str(&env, "hash-van"), &relay);
         }
         ids.push_back(id);
     }

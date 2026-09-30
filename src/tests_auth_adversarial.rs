@@ -23,7 +23,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     Address, BytesN, Env, IntoVal, String,
 };
 
@@ -39,8 +39,6 @@ fn g_address(env: &Env) -> String {
         "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
     )
 }
-
-
 
 /// Build a clean contract environment with `mock_all_auths` for setup convenience.
 fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
@@ -203,7 +201,7 @@ fn auth_register_callback_admin_auth_rejected() {
 /// must be rejected.
 #[test]
 fn auth_register_callback_forged_relay_address_rejected() {
-    let (env, client, _admin, relay, contract_id) = setup_strict();
+    let (env, client, _admin, _relay, contract_id) = setup_strict();
     let forged_relay = Address::generate(&env);
     let payload = valid_payload(&env);
 
@@ -245,7 +243,7 @@ fn auth_register_callback_no_auth_rejected() {
 /// because it is not in the admin/relay set — checks role membership check.
 #[test]
 fn auth_start_processing_bystander_as_caller_rejected() {
-    let (env, client, _admin, relay) = setup();
+    let (env, client, _admin, _relay) = setup();
     let payload = valid_payload(&env);
     let tx_id = client.register_callback(&payload);
 
@@ -932,7 +930,7 @@ fn cross_role_relay_cannot_call_any_admin_only_function() {
     let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
 
     macro_rules! assert_relay_cannot {
-        ($fn_name:expr, $args:expr, $call:expr) => {{
+        ($fn_name:expr, $args:expr, $($call:tt)+) => {{
             let result = client
                 .mock_auths(&[MockAuth {
                     address: &relay,
@@ -943,7 +941,7 @@ fn cross_role_relay_cannot_call_any_admin_only_function() {
                         sub_invokes: &[],
                     },
                 }])
-                .$call;
+                .$($call)+;
             assert!(result.is_err(), "relay must not succeed on {}", $fn_name);
         }};
     }
@@ -1082,10 +1080,7 @@ fn replay_fresh_idem_key_same_tx_id_rejected_after_ttl() {
     // Original record must be untouched.
     let tx = client.get_transaction(&tx_id);
     assert_eq!(tx.status, TransactionStatus::Completed);
-    assert_eq!(
-        tx.stellar_tx_hash,
-        String::from_str(&env, "hash-replay")
-    );
+    assert_eq!(tx.stellar_tx_hash, String::from_str(&env, "hash-replay"));
 }
 
 /// [THREAT_MODEL §4.3] Attempting to complete a transaction twice (once it has
@@ -1114,8 +1109,7 @@ fn replay_fail_after_complete_rejected() {
     client.start_processing(&tx_id, &relay);
     client.complete_transaction(&tx_id, &String::from_str(&env, "hash-fin"), &relay);
 
-    let result =
-        client.try_fail_transaction(&tx_id, &String::from_str(&env, "too_late"), &relay);
+    let result = client.try_fail_transaction(&tx_id, &String::from_str(&env, "too_late"), &relay);
     assert_eq!(result, Err(Ok(ContractError::InvalidStatusTransition)));
 }
 
@@ -1162,19 +1156,11 @@ fn auth_uninitialised_contract_all_mutating_calls_rejected() {
         Err(Ok(ContractError::NotInitialised))
     );
     assert_eq!(
-        client.try_complete_transaction(
-            &dummy_tx_id,
-            &String::from_str(&env, "h"),
-            &some_addr
-        ),
+        client.try_complete_transaction(&dummy_tx_id, &String::from_str(&env, "h"), &some_addr),
         Err(Ok(ContractError::NotInitialised))
     );
     assert_eq!(
-        client.try_fail_transaction(
-            &dummy_tx_id,
-            &String::from_str(&env, "r"),
-            &some_addr
-        ),
+        client.try_fail_transaction(&dummy_tx_id, &String::from_str(&env, "r"), &some_addr),
         Err(Ok(ContractError::NotInitialised))
     );
     // Admin-only calls.
@@ -1190,14 +1176,6 @@ fn auth_uninitialised_contract_all_mutating_calls_rejected() {
         client.try_upgrade(&dummy_hash, &1),
         Err(Ok(ContractError::NotInitialised))
     );
-    assert_eq!(
-        client.try_pause(),
-        Err(Ok(ContractError::NotInitialised))
-    );
-    assert_eq!(
-        client.try_unpause(),
-        Err(Ok(ContractError::NotInitialised))
-    );
+    assert_eq!(client.try_pause(), Err(Ok(ContractError::NotInitialised)));
+    assert_eq!(client.try_unpause(), Err(Ok(ContractError::NotInitialised)));
 }
-
-

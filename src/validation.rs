@@ -252,12 +252,12 @@ impl Validator {
 
     /// Tag: non-empty, length-capped, and the tx must have room for one more.
     pub fn validate_tag(tag: &String, existing_count: u32) -> Result<(), ContractError> {
-        if tag.len() == 0 {
-            return Err(ContractError::EmptyTag);
+        if tag.is_empty() {
+            return Err(ContractError::InvalidTag);
         }
         enforce_max_length(tag, MAX_TAG_LEN)?;
         if existing_count >= MAX_TAGS_PER_TX {
-            return Err(ContractError::TooManyTags);
+            return Err(ContractError::InvalidTag);
         }
         Ok(())
     }
@@ -268,7 +268,7 @@ impl Validator {
     /// different bug class and are rejected too.
     pub fn validate_settled_amount(settled: i128, original: i128) -> Result<(), ContractError> {
         if settled <= 0 || settled >= original {
-            return Err(ContractError::InvalidSettledAmount);
+            return Err(ContractError::InvalidAmount);
         }
         Ok(())
     }

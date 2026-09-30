@@ -18,6 +18,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
