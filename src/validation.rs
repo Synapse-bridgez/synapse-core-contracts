@@ -48,8 +48,10 @@ const MAX_STELLAR_TX_HASH_LEN: u32 = 72;
 /// Maximum length for `failure_reason` (short human-readable code).
 const MAX_FAILURE_REASON_LEN: u32 = 64;
 /// Maximum length of a single transaction tag.
+#[allow(dead_code)] // no entry point uses tags yet (#199)
 pub const MAX_TAG_LEN: u32 = 32;
 /// Maximum number of tags per transaction.
+#[allow(dead_code)] // no entry point uses tags yet (#199)
 pub const MAX_TAGS_PER_TX: u32 = 8;
 
 /// Encoded ed25519 public-key strkey length (SEP-23).
@@ -147,16 +149,24 @@ impl Validator {
     /// Validate an incoming [`CallbackPayload`] before writing to ledger.
     ///
     /// Runs every sub-check and returns the first error encountered.
+    ///
+    /// The amount-ceiling check runs **last** (#116): it is the only sub-check
+    /// that reads ledger storage, so every pure-CPU check gets a chance to
+    /// reject the payload first. Running it after `validate_asset_issuer` also
+    /// guarantees the ceiling lookup is keyed on a well-formed issuer, and that
+    /// `AmountCeilingExceeded` is only ever returned for an otherwise-valid
+    /// payload — a precondition for the soft-failure path in
+    /// `register_callback` (#115).
     pub fn validate_payload(env: &Env, payload: &CallbackPayload) -> Result<(), ContractError> {
         Self::validate_stellar_account(env, &payload.stellar_account)?;
         Self::validate_amount(payload.amount)?;
-        Self::validate_amount_ceiling(env, &payload.asset_issuer, payload.amount)?;
         Self::validate_asset_code(env, &payload.asset_code)?;
         Self::validate_asset_issuer(env, &payload.asset_issuer)?;
         Self::validate_idempotency_key(env, &payload.idempotency_key)?;
         Self::validate_transaction_id(&payload.transaction_id)?;
         Self::validate_anchor_transaction_id(&payload.anchor_transaction_id)?;
         Self::validate_callback_status(&payload.callback_status)?;
+        Self::validate_amount_ceiling(env, &payload.asset_issuer, payload.amount)?;
         Ok(())
     }
 
@@ -251,8 +261,9 @@ impl Validator {
     }
 
     /// Tag: non-empty, length-capped, and the tx must have room for one more.
+    #[allow(dead_code)] // no entry point uses tags yet (#199)
     pub fn validate_tag(tag: &String, existing_count: u32) -> Result<(), ContractError> {
-        if tag.len() == 0 {
+        if tag.is_empty() {
             return Err(ContractError::EmptyTag);
         }
         enforce_max_length(tag, MAX_TAG_LEN)?;
@@ -266,6 +277,7 @@ impl Validator {
     ///
     /// Equal amounts must use `complete_transaction`; greater amounts are a
     /// different bug class and are rejected too.
+    #[allow(dead_code)] // partial settlement entry point not restored yet (#199)
     pub fn validate_settled_amount(settled: i128, original: i128) -> Result<(), ContractError> {
         if settled <= 0 || settled >= original {
             return Err(ContractError::InvalidSettledAmount);

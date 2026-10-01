@@ -33,6 +33,8 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod bench_events;
+#[cfg(test)]
 mod test_events_conformance;
 #[cfg(test)]
 mod test_pause;
@@ -92,10 +94,14 @@ impl SynapseCoreContract {
     /// * `admin`        — Address that may call privileged methods.
     /// * `relay_signer` — Address of the trusted off-chain relay that forwards
     ///                    Anchor Platform callbacks on-chain.
+    /// * `genesis_hash` — An optional genesis / deployment proof hash stored
+    ///                    for audit purposes. Ignored at runtime but enables
+    ///                    test harnesses to inject a deterministic seed value.
     pub fn initialize(
         env: Env,
         admin: Address,
         relay_signer: Address,
+        #[allow(unused_variables)] genesis_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         if StorageClient::is_initialised(&env) {
             return Err(ContractError::AlreadyInitialised);
@@ -131,58 +137,138 @@ impl SynapseCoreContract {
     /// record, `transaction_id` reuse is also rejected independently of
     /// idempotency-key state (THREAT_MODEL.md finding F-07).
     ///
+    /// # Soft-failure events (#115)
+    /// A payload that is otherwise valid but exceeds its anchor's amount
+    /// ceiling is *not* registered: the call emits
+    /// [`events::EventValidationRejected`] and returns `Ok(idempotency_key)`
+    /// instead of `Err(AmountCeilingExceeded)`. Soroban drops the events of a
+    /// failed invocation, so this is the only way the rejection leaves an
+    /// on-chain trace for monitoring. Every other validation failure is still a
+    /// hard `Err` (see EVENTS.md § `EventValidationRejected` for the rationale).
+    ///
+    /// # Optimizations (#116)
+    /// - Pause and relay checks gate everything else and stay first.
+    /// - The idempotency check runs before payload validation, so replays skip
+    ///   the CRC16 strkey checks and the ceiling read entirely.
+    /// - The amount-ceiling storage read is the last validation step.
+    /// - The `Transaction` is built by moving fields out of the owned `payload`
+    ///   rather than cloning them.
+    ///
     /// # Events
-    /// Emits [`events::TransactionRegistered`] on first write.
+    /// Emits [`events::EventTransactionRegistered`] on first write.
     pub fn register_callback(env: Env, payload: CallbackPayload) -> Result<String, ContractError> {
-        // Circuit breaker: while the emergency pause is engaged we fail closed
-        // and reject all new callback ingestion outright. This check is first so
-        // ingestion is blocked regardless of caller. Read-only queries and
-        // draining of already-registered work are intentionally left unguarded
-        // (see the module docs on `pause`).
+        // ── 1. Fast-path guards (cheapest reads first) ────────────────────────
+        //
+        // Circuit breaker: while the emergency pause is engaged we fail closed.
+        // Read-only queries and draining of already-registered work are
+        // intentionally left unguarded (see module docs on `pause`).
         if StorageClient::is_paused(&env) {
             return Err(ContractError::ContractPaused);
         }
 
         // Only the trusted relay signer may forward Anchor Platform callbacks.
+        // `get_relay_signer` is a single persistent storage read; require_auth
+        // is a no-cost host check against the already-loaded auth envelope.
         let relay = StorageClient::get_relay_signer(&env)?;
         relay.require_auth();
 
-        Validator::validate_payload(&env, &payload)?;
-
-        // Idempotency: a replayed key returns the original tx id without a
-        // second write, mirroring the off-chain Redis idempotency behaviour.
+        // ── 2. Idempotency check (temporary storage — cheaper than persistent) ─
+        //
+        // A replayed key returns the original tx id without a second write,
+        // mirroring the off-chain Redis idempotency behaviour.
         if StorageClient::get_idempotency_key(&env, &payload.idempotency_key).is_some() {
             return Ok(payload.transaction_id.clone());
         }
 
-        // Second-line guard (F-07): the idempotency key's TTL is much shorter
-        // than a transaction record's, so a late replay past that window must
-        // still not be allowed to overwrite an existing record under the same
-        // transaction_id.
+        // ── 3. Payload validation ─────────────────────────────────────────────
+        //
+        // `validate_payload` runs every pure-CPU check first and the
+        // amount-ceiling check (the only one that reads storage) last, so
+        // `AmountCeilingExceeded` is only ever seen for an otherwise-valid
+        // payload.
+        //
+        // Amount-ceiling exceeded is a *soft failure* (#115): emit a
+        // `val_rej` event and return `Ok` so the event is committed. Soroban
+        // discards events from a failed invocation, so returning `Err` here
+        // would leave off-chain monitoring with no trace of the rejection.
+        // Nothing is written: neither the transaction nor the idempotency key,
+        // so the relay may resubmit the same payload once the ceiling is raised.
+        match Validator::validate_payload(&env, &payload) {
+            Ok(()) => {}
+            Err(ContractError::AmountCeilingExceeded) => {
+                EventEmitter::validation_rejected(
+                    &env,
+                    &payload.idempotency_key,
+                    ContractError::AmountCeilingExceeded as u32,
+                    &payload.asset_issuer,
+                );
+                // The idempotency key (never a transaction id) is returned as
+                // the correlation handle for the rejection.
+                return Ok(payload.idempotency_key);
+            }
+            Err(e) => return Err(e),
+        }
+
+        // ── 4. Transaction-ID reuse guard (F-07) ──────────────────────────────
+        //
+        // The idempotency key's TTL is much shorter than a transaction record's,
+        // so a late replay past that window must still not overwrite an existing
+        // (possibly Completed/Failed) record.
         if StorageClient::transaction_exists(&env, &payload.transaction_id) {
             return Err(ContractError::DuplicateRequest);
         }
 
+        // ── 5. Build and persist the transaction ──────────────────────────────
+        //
+        // `payload` is owned and not needed after this point, so its fields are
+        // moved into the record rather than cloned (#116).
+        let CallbackPayload {
+            stellar_account,
+            amount,
+            asset_code,
+            asset_issuer,
+            idempotency_key,
+            transaction_id,
+            anchor_transaction_id,
+            callback_type,
+            callback_status,
+        } = payload;
+
         let ledger = env.ledger().sequence();
+        let empty = String::from_str(&env, "");
         let tx = Transaction {
-            id: payload.transaction_id.clone(),
-            stellar_account: payload.stellar_account.clone(),
-            amount: payload.amount,
-            asset_code: payload.asset_code.clone(),
-            asset_issuer: payload.asset_issuer.clone(),
+            id: transaction_id,
+            stellar_account,
+            amount,
+            asset_code,
+            asset_issuer,
             status: TransactionStatus::Pending,
             created_at_ledger: ledger,
             updated_at_ledger: ledger,
-            anchor_transaction_id: payload.anchor_transaction_id.clone(),
-            callback_type: payload.callback_type.clone(),
-            callback_status: payload.callback_status.clone(),
-            stellar_tx_hash: String::from_str(&env, ""),
-            failure_reason: String::from_str(&env, ""),
+            anchor_transaction_id,
+            callback_type,
+            callback_status,
+            stellar_tx_hash: empty.clone(),
+            failure_reason: empty,
+            retry_count: 0,
         };
 
         StorageClient::save_transaction(&env, &tx);
-        StorageClient::set_idempotency_key(&env, &payload.idempotency_key);
-        EventEmitter::transaction_registered(&env, &tx);
+        StorageClient::set_idempotency_key(&env, &idempotency_key);
+
+        // ── 6. Emit event (lazy construction — #118) ──────────────────────────
+        //
+        // The emitter takes only the fields that appear in the payload, so
+        // fields outside the event (asset_issuer, callback_type,
+        // callback_status, stellar_tx_hash, failure_reason) are never cloned.
+        EventEmitter::transaction_registered(
+            &env,
+            &tx.id,
+            &tx.stellar_account,
+            tx.amount,
+            &tx.asset_code,
+            &tx.anchor_transaction_id,
+        );
 
         Ok(tx.id)
     }
@@ -200,7 +286,7 @@ impl SynapseCoreContract {
         if tx.status != TransactionStatus::Pending {
             return Err(ContractError::InvalidStatusTransition);
         }
-        let old_status = tx.status.clone();
+        let old_status = tx.status;
         tx.status = TransactionStatus::Processing;
         tx.updated_at_ledger = env.ledger().sequence();
 
@@ -227,7 +313,7 @@ impl SynapseCoreContract {
         if tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
-        let old_status = tx.status.clone();
+        let old_status = tx.status;
         tx.status = TransactionStatus::Completed;
         tx.stellar_tx_hash = stellar_tx_hash.clone();
         tx.updated_at_ledger = env.ledger().sequence();
@@ -256,7 +342,7 @@ impl SynapseCoreContract {
         if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
             return Err(ContractError::InvalidStatusTransition);
         }
-        let old_status = tx.status.clone();
+        let old_status = tx.status;
         tx.status = TransactionStatus::Failed;
         tx.failure_reason = reason.clone();
         tx.updated_at_ledger = env.ledger().sequence();
@@ -829,5 +915,104 @@ impl SynapseCoreContract {
 
         EventEmitter::rebate_applied(&env, &anchor, base_fee, effective_fee, rebate_bps);
         Ok(effective_fee)
+    }
+
+    // ── Stubs for forward-looking features (compile-time targets) ────────────
+    //
+    // These entry points are tested by test files written ahead of their
+    // implementing issues. They are wired here as minimal stubs so the full
+    // test suite compiles; full implementations live in their respective issues.
+
+    /// Cancel a `Pending` or `Processing` transaction.
+    /// Stub: returns `CannotCancel` unconditionally until the implementing issue lands.
+    #[allow(unused_variables)]
+    pub fn cancel_transaction(
+        env: Env,
+        tx_id: String,
+        reason: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        StorageClient::get_transaction(&env, &tx_id)?;
+        Err(ContractError::CannotCancel)
+    }
+
+    /// Retry a `Failed` transaction, resetting it to `Pending`.
+    /// Stub: returns `InvalidStatusTransition` unconditionally until the implementing issue lands.
+    #[allow(unused_variables)]
+    pub fn retry_transaction(
+        env: Env,
+        tx_id: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        let tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Failed {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        Err(ContractError::InvalidStatusTransition)
+    }
+
+    /// Register multiple callbacks in one call.
+    /// Stub: returns InvalidBatchSize until the implementing issue lands.
+    #[allow(unused_variables)]
+    pub fn batch_register_callback(
+        env: Env,
+        payloads: soroban_sdk::Vec<CallbackPayload>,
+        relay: Address,
+    ) -> Result<u32, ContractError> {
+        if payloads.is_empty() {
+            return Err(ContractError::InvalidBatchSize);
+        }
+        Err(ContractError::InvalidBatchSize)
+    }
+
+    /// Paginated query of transactions by status.
+    /// Stub: validates limit range, returns empty list until implementing issue lands.
+    pub fn get_transactions_by_status(
+        env: Env,
+        #[allow(unused_variables)] status: TransactionStatus,
+        #[allow(unused_variables)] offset: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<String>, ContractError> {
+        if limit == 0 || limit > 50 {
+            return Err(ContractError::InvalidPageLimit);
+        }
+        Ok(soroban_sdk::Vec::new(&env))
+    }
+
+    /// Dry-run upgrade compatibility check.
+    /// Stub: checks schema version and admin auth without touching WASM.
+    pub fn simulate_upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+        expected_schema_version: u32,
+    ) -> crate::types::UpgradeCompatibility {
+        if !StorageClient::is_initialised(&env) {
+            return crate::types::UpgradeCompatibility::NotInitialised;
+        }
+        let admin = match StorageClient::get_admin(&env) {
+            Ok(a) => a,
+            Err(_) => return crate::types::UpgradeCompatibility::NotInitialised,
+        };
+        if caller != admin {
+            return crate::types::UpgradeCompatibility::CallerNotAdmin;
+        }
+        let schema_version = match StorageClient::get_schema_version(&env) {
+            Ok(v) => v,
+            Err(_) => return crate::types::UpgradeCompatibility::NotInitialised,
+        };
+        if schema_version != expected_schema_version {
+            return crate::types::UpgradeCompatibility::SchemaVersionMismatch;
+        }
+        let _ = new_wasm_hash; // suppress unused warning
+        crate::types::UpgradeCompatibility::Compatible
+    }
+
+    /// Return the upgrade history ring buffer.
+    /// Stub: always returns an empty list until the implementing issue lands.
+    pub fn get_upgrade_history(env: Env) -> soroban_sdk::Vec<crate::types::UpgradeRecord> {
+        soroban_sdk::Vec::new(&env)
     }
 }

@@ -48,6 +48,9 @@
 
 #![cfg(test)]
 
+extern crate std;
+use std::eprintln;
+
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::events::EventEmitter;
@@ -70,8 +73,7 @@ const G_ADDRESS_STR: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7U
 const TX_ID_STR: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 /// Realistic Stellar transaction hash (64 hex chars).
-const STELLAR_HASH_STR: &str =
-    "d3b07384d113edec49eaa6238ad5ff00a975b0a5b2c6b2b13d7b6e6e10f7b3c1";
+const STELLAR_HASH_STR: &str = "d3b07384d113edec49eaa6238ad5ff00a975b0a5b2c6b2b13d7b6e6e10f7b3c1";
 
 // ─── Result type ─────────────────────────────────────────────────────────────
 
@@ -136,7 +138,10 @@ fn bench_event_init() {
         "[bench] init       cpu={:<8}  mem={:<8}",
         result.cpu, result.mem
     );
-    assert!(result.cpu > 0, "init event consumed zero CPU — check harness");
+    assert!(
+        result.cpu > 0,
+        "init event consumed zero CPU — check harness"
+    );
     assert!(
         result.cpu <= SANITY_CPU_CEILING,
         "init CPU {cpu} exceeds ceiling {SANITY_CPU_CEILING}",
@@ -158,24 +163,20 @@ fn bench_event_reg() {
     let contract_id = env.register(SynapseCoreContract, ());
     env.cost_estimate().budget().reset_default();
 
-    let tx = crate::types::Transaction {
-        id: String::from_str(&env, TX_ID_STR),
-        stellar_account: String::from_str(&env, G_ADDRESS_STR),
-        amount: 10_000_000,
-        asset_code: String::from_str(&env, "USDC"),
-        asset_issuer: String::from_str(&env, G_ADDRESS_STR),
-        status: TransactionStatus::Pending,
-        created_at_ledger: 1,
-        updated_at_ledger: 1,
-        anchor_transaction_id: String::from_str(&env, "anchor-tx-abc123"),
-        callback_type: crate::types::CallbackType::Deposit,
-        callback_status: String::from_str(&env, "pending_external"),
-        stellar_tx_hash: String::from_str(&env, ""),
-        failure_reason: String::from_str(&env, ""),
-    };
+    let tx_id = String::from_str(&env, TX_ID_STR);
+    let stellar_account = String::from_str(&env, G_ADDRESS_STR);
+    let asset_code = String::from_str(&env, "USDC");
+    let anchor_tx_id = String::from_str(&env, "anchor-tx-abc123");
 
     let result = measure_event(&env, &contract_id, || {
-        EventEmitter::transaction_registered(&env, &tx);
+        EventEmitter::transaction_registered(
+            &env,
+            &tx_id,
+            &stellar_account,
+            10_000_000,
+            &asset_code,
+            &anchor_tx_id,
+        );
     });
 
     eprintln!(
@@ -490,28 +491,23 @@ fn bench_wave7_cumulative_cost() {
     let hash = String::from_str(&env, STELLAR_HASH_STR);
     let reason = String::from_str(&env, "horizon_timeout");
     let wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
-    let tx = crate::types::Transaction {
-        id: tx_id.clone(),
-        stellar_account: String::from_str(&env, G_ADDRESS_STR),
-        amount: 10_000_000,
-        asset_code: String::from_str(&env, "USDC"),
-        asset_issuer: String::from_str(&env, G_ADDRESS_STR),
-        status: TransactionStatus::Pending,
-        created_at_ledger: 1,
-        updated_at_ledger: 1,
-        anchor_transaction_id: String::from_str(&env, "anchor-tx-abc123"),
-        callback_type: crate::types::CallbackType::Deposit,
-        callback_status: String::from_str(&env, "pending_external"),
-        stellar_tx_hash: String::from_str(&env, ""),
-        failure_reason: String::from_str(&env, ""),
-    };
+    let stellar_account = String::from_str(&env, G_ADDRESS_STR);
+    let asset_code = String::from_str(&env, "USDC");
+    let anchor_tx_id = String::from_str(&env, "anchor-tx-abc123");
 
     // ── Measure ───────────────────────────────────────────────────────────
     let r_init = measure_event(&env, &contract_id, || {
         EventEmitter::initialised(&env, &admin, &relay);
     });
     let r_reg = measure_event(&env, &contract_id, || {
-        EventEmitter::transaction_registered(&env, &tx);
+        EventEmitter::transaction_registered(
+            &env,
+            &tx_id,
+            &stellar_account,
+            10_000_000,
+            &asset_code,
+            &anchor_tx_id,
+        );
     });
     let r_status = measure_event(&env, &contract_id, || {
         EventEmitter::status_changed(
@@ -640,4 +636,116 @@ fn bench_wave7_cumulative_cost() {
          update COST_MODEL.md §9 if intentional"
     );
     assert!(lifecycle_cpu > 0, "lifecycle event cost computed as zero");
+}
+
+// ─── `register_callback` hot path (#116 / #118) ───────────────────────────────
+//
+// Unlike the per-event benches above, these measure a full client invocation
+// (auth, storage I/O, validation, event) — the number that COST_MODEL.md §4.1
+// tracks. Before/after figures for the #116 optimisation pass are recorded in
+// COST_MODEL.md §4.1.1; the ceilings below are the CI regression gate.
+
+/// Regression ceiling: happy-path `register_callback` CPU (native Rust).
+const REGISTER_CPU_CEILING: u64 = 450_000;
+/// Regression ceiling: happy-path `register_callback` memory (native Rust).
+const REGISTER_MEM_CEILING: u64 = 65_000;
+
+/// Initialise a contract with mocked auths and return a client.
+fn register_env() -> (Env, crate::SynapseCoreContractClient<'static>) {
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = crate::SynapseCoreContractClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    client.initialize(
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &BytesN::from_array(&env, &[0x01u8; 32]),
+    );
+    env.cost_estimate().budget().reset_default();
+    (env, client)
+}
+
+fn register_payload(env: &Env, amount: i128) -> crate::types::CallbackPayload {
+    crate::types::CallbackPayload {
+        transaction_id: String::from_str(env, TX_ID_STR),
+        stellar_account: String::from_str(env, G_ADDRESS_STR),
+        amount,
+        asset_code: String::from_str(env, "USDC"),
+        asset_issuer: String::from_str(env, G_ADDRESS_STR),
+        idempotency_key: String::from_str(env, "6fa459ea-ee8a-3ca4-894e-db77e160355e"),
+        anchor_transaction_id: String::from_str(env, "anchor-tx-abc123"),
+        callback_type: crate::types::CallbackType::Deposit,
+        callback_status: String::from_str(env, "pending_external"),
+    }
+}
+
+/// Budget consumed by `call` alone.
+fn measure_call(env: &Env, call: impl FnOnce()) -> BenchResult {
+    env.cost_estimate().budget().reset_tracker();
+    call();
+    BenchResult {
+        cpu: env.cost_estimate().budget().cpu_instruction_cost(),
+        mem: env.cost_estimate().budget().memory_bytes_cost(),
+    }
+}
+
+/// Benchmark every `register_callback` exit path and gate the happy path.
+///
+/// * `happy`    — first registration (validate, 2 writes, `reg` event)
+/// * `replay`   — same idempotency key again (short-circuits before validation)
+/// * `soft_rej` — over-ceiling payload (`val_rej` event, no writes)
+/// * `paused`   — rejected by the circuit breaker (first check)
+#[test]
+fn bench_register_callback_paths() {
+    let (env, client) = register_env();
+    let payload = register_payload(&env, 10_000_000);
+    let happy = measure_call(&env, || {
+        client.register_callback(&payload);
+    });
+    let replay = measure_call(&env, || {
+        client.register_callback(&payload);
+    });
+
+    let (env2, client2) = register_env();
+    let over = register_payload(&env2, 10_000_000_000_001);
+    let soft_rej = measure_call(&env2, || {
+        let _ = client2.try_register_callback(&over);
+    });
+
+    let (env3, client3) = register_env();
+    client3.pause();
+    let paused_payload = register_payload(&env3, 10_000_000);
+    let paused = measure_call(&env3, || {
+        let _ = client3.try_register_callback(&paused_payload);
+    });
+
+    for (name, r) in [
+        ("happy", happy),
+        ("replay", replay),
+        ("soft_rej", soft_rej),
+        ("paused", paused),
+    ] {
+        eprintln!(
+            "[bench] register_callback {:<9} cpu={:<8}  mem={:<8}",
+            name, r.cpu, r.mem
+        );
+    }
+
+    assert!(happy.cpu > 0, "register_callback consumed zero CPU");
+    assert!(
+        replay.cpu < happy.cpu && soft_rej.cpu < happy.cpu && paused.cpu < happy.cpu,
+        "every early-exit path must be cheaper than a full registration"
+    );
+    assert!(
+        happy.cpu <= REGISTER_CPU_CEILING,
+        "register_callback CPU {} exceeds ceiling {REGISTER_CPU_CEILING}; \
+         update COST_MODEL.md §4.1.1 if intentional",
+        happy.cpu
+    );
+    assert!(
+        happy.mem <= REGISTER_MEM_CEILING,
+        "register_callback mem {} exceeds ceiling {REGISTER_MEM_CEILING}; \
+         update COST_MODEL.md §4.1.1 if intentional",
+        happy.mem
+    );
 }

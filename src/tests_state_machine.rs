@@ -40,7 +40,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
@@ -61,7 +61,7 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &relay);
+    client.initialize(&admin, &relay, &BytesN::from_array(&env, &[0x01u8; 32]));
     (env, client, admin, relay)
 }
 
@@ -130,10 +130,7 @@ fn status_index(s: &TransactionStatus) -> usize {
 ///
 /// Returns `Some(to_status)` for a valid transition, `None` for an invalid one
 /// (which must produce `InvalidStatusTransition` from the contract).
-fn model_transition(
-    from: &TransactionStatus,
-    entry: EntryPoint,
-) -> Option<TransactionStatus> {
+fn model_transition(from: &TransactionStatus, entry: EntryPoint) -> Option<TransactionStatus> {
     match (from, entry) {
         // ── Valid transitions ──────────────────────────────────────────────
         (TransactionStatus::Pending, EntryPoint::StartProcessing) => {
@@ -241,7 +238,10 @@ fn model_transition_count_matches_spec() {
         .count();
 
     // Pending→Processing, Processing→Completed, Pending→Failed, Processing→Failed
-    assert_eq!(count, 4, "expected exactly 4 valid transitions in the model");
+    assert_eq!(
+        count, 4,
+        "expected exactly 4 valid transitions in the model"
+    );
 }
 
 // ─── Exhaustive contract conformance check ────────────────────────────────────
@@ -273,6 +273,9 @@ fn drive_to_status(
         TransactionStatus::Failed => {
             client.fail_transaction(&id, &String::from_str(env, "reason-sm"), relay);
         }
+        TransactionStatus::Cancelled => {
+            // Stub state — not yet reachable via contract; no-op.
+        }
     }
 
     id
@@ -281,10 +284,10 @@ fn drive_to_status(
 // Static lookup table mapping (status_idx, ep_idx) to a unique tx_id and idem key.
 // 4 statuses × 3 entry points = 12 pairs. IDs must fit within MAX_TX_ID_LEN (64).
 const TX_IDS: [[&str; 3]; 4] = [
-    ["tx-sm-p-sp", "tx-sm-p-ct", "tx-sm-p-ft"],     // Pending
-    ["tx-sm-pr-sp", "tx-sm-pr-ct", "tx-sm-pr-ft"],  // Processing
-    ["tx-sm-c-sp", "tx-sm-c-ct", "tx-sm-c-ft"],     // Completed
-    ["tx-sm-f-sp", "tx-sm-f-ct", "tx-sm-f-ft"],     // Failed
+    ["tx-sm-p-sp", "tx-sm-p-ct", "tx-sm-p-ft"],    // Pending
+    ["tx-sm-pr-sp", "tx-sm-pr-ct", "tx-sm-pr-ft"], // Processing
+    ["tx-sm-c-sp", "tx-sm-c-ct", "tx-sm-c-ft"],    // Completed
+    ["tx-sm-f-sp", "tx-sm-f-ct", "tx-sm-f-ft"],    // Failed
 ];
 
 const IDEM_IDS: [[&str; 3]; 4] = [
@@ -316,7 +319,9 @@ fn exhaustive_transition_conformance_with_model() {
                 client.get_status(&id),
                 *from_status,
                 "pre-condition: failed to drive tx to {:?} (status_idx={}, ep_idx={})",
-                from_status, status_idx, ep_idx
+                from_status,
+                status_idx,
+                ep_idx
             );
 
             let predicted = model_transition(from_status, entry_point);
@@ -332,7 +337,10 @@ fn exhaustive_transition_conformance_with_model() {
                                 result.is_ok(),
                                 "Model says {:?} --start_processing--> {:?} is valid, \
                                  but contract returned Err (status_idx={}, ep_idx={})",
-                                from_status, expected_next, status_idx, ep_idx
+                                from_status,
+                                expected_next,
+                                status_idx,
+                                ep_idx
                             );
                             assert_eq!(client.get_status(&id), expected_next);
                         }
@@ -343,7 +351,9 @@ fn exhaustive_transition_conformance_with_model() {
                                 "Model says {:?} --start_processing--> INVALID, \
                                  but contract did not return InvalidStatusTransition \
                                  (status_idx={}, ep_idx={})",
-                                from_status, status_idx, ep_idx
+                                from_status,
+                                status_idx,
+                                ep_idx
                             );
                         }
                     }
@@ -357,7 +367,10 @@ fn exhaustive_transition_conformance_with_model() {
                                 result.is_ok(),
                                 "Model says {:?} --complete_transaction--> {:?} is valid, \
                                  but contract returned Err (status_idx={}, ep_idx={})",
-                                from_status, expected_next, status_idx, ep_idx
+                                from_status,
+                                expected_next,
+                                status_idx,
+                                ep_idx
                             );
                             assert_eq!(client.get_status(&id), expected_next);
                         }
@@ -368,7 +381,9 @@ fn exhaustive_transition_conformance_with_model() {
                                 "Model says {:?} --complete_transaction--> INVALID, \
                                  but contract did not return InvalidStatusTransition \
                                  (status_idx={}, ep_idx={})",
-                                from_status, status_idx, ep_idx
+                                from_status,
+                                status_idx,
+                                ep_idx
                             );
                         }
                     }
@@ -382,7 +397,10 @@ fn exhaustive_transition_conformance_with_model() {
                                 result.is_ok(),
                                 "Model says {:?} --fail_transaction--> {:?} is valid, \
                                  but contract returned Err (status_idx={}, ep_idx={})",
-                                from_status, expected_next, status_idx, ep_idx
+                                from_status,
+                                expected_next,
+                                status_idx,
+                                ep_idx
                             );
                             assert_eq!(client.get_status(&id), expected_next);
                         }
@@ -393,7 +411,9 @@ fn exhaustive_transition_conformance_with_model() {
                                 "Model says {:?} --fail_transaction--> INVALID, \
                                  but contract did not return InvalidStatusTransition \
                                  (status_idx={}, ep_idx={})",
-                                from_status, status_idx, ep_idx
+                                from_status,
+                                status_idx,
+                                ep_idx
                             );
                         }
                     }
@@ -470,8 +490,14 @@ fn sm_updated_at_ledger_monotonically_non_decreasing() {
     client.complete_transaction(&id, &String::from_str(&env, "h"), &relay);
     let t2 = client.get_transaction(&id).updated_at_ledger;
 
-    assert!(t1 >= t0, "updated_at_ledger went backwards: t0={t0} t1={t1}");
-    assert!(t2 >= t1, "updated_at_ledger went backwards: t1={t1} t2={t2}");
+    assert!(
+        t1 >= t0,
+        "updated_at_ledger went backwards: t0={t0} t1={t1}"
+    );
+    assert!(
+        t2 >= t1,
+        "updated_at_ledger went backwards: t1={t1} t2={t2}"
+    );
 }
 
 /// `created_at_ledger` must never change once set.
@@ -498,11 +524,7 @@ fn sm_skip_pending_to_completed_rejected() {
     let payload = make_payload(&env, "tx-skip-pend-comp", "idem-skip-pend-comp");
     let id = client.register_callback(&payload);
 
-    let result = client.try_complete_transaction(
-        &id,
-        &String::from_str(&env, "hash"),
-        &relay,
-    );
+    let result = client.try_complete_transaction(&id, &String::from_str(&env, "hash"), &relay);
     assert_eq!(result, Err(Ok(ContractError::InvalidStatusTransition)));
     assert_eq!(client.get_status(&id), TransactionStatus::Pending);
 }
@@ -541,11 +563,7 @@ fn sm_failed_to_completed_rejected() {
     let id = client.register_callback(&payload);
     client.fail_transaction(&id, &String::from_str(&env, "r"), &relay);
 
-    let result = client.try_complete_transaction(
-        &id,
-        &String::from_str(&env, "h"),
-        &relay,
-    );
+    let result = client.try_complete_transaction(&id, &String::from_str(&env, "h"), &relay);
     assert_eq!(result, Err(Ok(ContractError::InvalidStatusTransition)));
 }
 
@@ -558,8 +576,7 @@ fn sm_completed_to_failed_rejected() {
     client.start_processing(&id, &relay);
     client.complete_transaction(&id, &String::from_str(&env, "h"), &relay);
 
-    let result =
-        client.try_fail_transaction(&id, &String::from_str(&env, "r"), &relay);
+    let result = client.try_fail_transaction(&id, &String::from_str(&env, "r"), &relay);
     assert_eq!(result, Err(Ok(ContractError::InvalidStatusTransition)));
 }
 

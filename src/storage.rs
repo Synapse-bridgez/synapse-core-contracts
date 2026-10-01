@@ -15,7 +15,8 @@
 use soroban_sdk::{Address, Env, String};
 
 use crate::types::{
-    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction, UnbondRequest,
+    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, StoredTransaction,
+    Transaction, UnbondRequest,
 };
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
@@ -145,14 +146,21 @@ impl StorageClient {
 
     /// Read a [`Transaction`] by its ID.
     ///
+    /// The record is stored as a [`StoredTransaction`] with a bit-packed
+    /// status (#117) and unpacked here, so callers always see the public
+    /// [`Transaction`] shape. A record whose status nibble is unassigned was
+    /// written by a newer schema and yields `SchemaVersionMismatch`.
+    ///
     /// Extends the ledger TTL on each access so active records are never evicted.
     pub fn get_transaction(env: &Env, tx_id: &String) -> Result<Transaction, ContractError> {
         let key = StorageKey::Transaction(tx_id.clone());
         let tx = env
             .storage()
             .persistent()
-            .get::<StorageKey, Transaction>(&key)
-            .ok_or(ContractError::TransactionNotFound)?;
+            .get::<StorageKey, StoredTransaction>(&key)
+            .ok_or(ContractError::TransactionNotFound)?
+            .unpack()
+            .ok_or(ContractError::SchemaVersionMismatch)?;
         env.storage().persistent().extend_ttl(
             &key,
             TRANSACTION_MIN_TTL_LEDGERS,
@@ -161,10 +169,13 @@ impl StorageClient {
         Ok(tx)
     }
 
-    /// Persist (insert or update) a [`Transaction`].
+    /// Persist (insert or update) a [`Transaction`], packing its status into
+    /// a [`StoredTransaction`] (#117).
     pub fn save_transaction(env: &Env, tx: &Transaction) {
         let key = StorageKey::Transaction(tx.id.clone());
-        env.storage().persistent().set(&key, tx);
+        env.storage()
+            .persistent()
+            .set(&key, &StoredTransaction::pack(tx));
         env.storage().persistent().extend_ttl(
             &key,
             TRANSACTION_MIN_TTL_LEDGERS,
@@ -285,5 +296,64 @@ impl StorageClient {
         env.storage()
             .persistent()
             .set(&StorageKey::AnchorTier(config.anchor.clone()), config);
+    }
+}
+
+// ─── Amount ceiling (#116 / #115 hot-path guard) ──────────────────────────────
+
+/// Default per-anchor amount ceiling in stroops when no explicit ceiling is set.
+///
+/// 1 million XLM × 10_000_000 stroops/XLM = 10^13 stroops.
+const DEFAULT_AMOUNT_CEILING_STROOPS: i128 = 10_000_000_000_000;
+
+impl StorageClient {
+    /// Read the amount ceiling for `anchor` (keyed by `asset_issuer` string).
+    ///
+    /// Returns the stored ceiling if one has been set, otherwise the contract-
+    /// wide default ([`DEFAULT_AMOUNT_CEILING_STROOPS`]).
+    ///
+    /// This is on the hot path of every `register_callback` call, so it does
+    /// **not** extend TTL — the ceiling record is expected to be warm in the
+    /// validator's budget or absent (fallback to default).
+    pub fn get_amount_ceiling(env: &Env, anchor: &String) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, i128>(&StorageKey::AmountCeiling(anchor.clone()))
+            .unwrap_or(DEFAULT_AMOUNT_CEILING_STROOPS)
+    }
+
+    /// Set the amount ceiling for `anchor`.
+    ///
+    /// Only tests call this today; the admin setter returns with #199.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_amount_ceiling(env: &Env, anchor: &String, ceiling: i128) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AmountCeiling(anchor.clone()), &ceiling);
+    }
+}
+
+// ─── Stubs for forward-looking upgrade history features ───────────────────────
+
+#[allow(dead_code)] // wired up when the upgrade-history entry points return (#199)
+impl StorageClient {
+    /// Append an upgrade record to the on-chain history ring buffer.
+    /// Stub implementation until the upgrade history issue lands.
+    #[allow(unused_variables)]
+    pub fn append_upgrade_record(env: &Env, record: &crate::types::UpgradeRecord) {
+        // no-op stub
+    }
+
+    /// Read the upgrade history ring buffer.
+    /// Stub: always returns an empty Vec.
+    pub fn get_upgrade_history(env: &Env) -> soroban_sdk::Vec<crate::types::UpgradeRecord> {
+        soroban_sdk::Vec::new(env)
+    }
+
+    /// Post-upgrade self-check: verify storage keys are intact after WASM swap.
+    /// Stub: always returns Ok.
+    pub fn post_upgrade_self_check(env: &Env) -> Result<(), crate::types::ContractError> {
+        let _ = env;
+        Ok(())
     }
 }

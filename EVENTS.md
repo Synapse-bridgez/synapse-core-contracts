@@ -81,6 +81,7 @@ supported.
 | [`EventAutoUnpaused`](#eventautounpaused) | `aunpause` | `EventEmitter::auto_unpaused` | `unpause_auto` (quorum met) | **Live** |
 | [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` (sibling issue) | **Schema locked** |
 | [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` (sibling issue) | **Schema locked** |
+| [`EventValidationRejected`](#eventvalidationrejected) | `val_rej` | `EventEmitter::validation_rejected` | `register_callback` (soft-failure path, #115) | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -598,6 +599,50 @@ Verified by snapshot-style tests
 `tests::test_dispute_resolved_upheld_true_event_payload_snapshot` and
 `tests::test_dispute_resolved_upheld_false_event_payload_snapshot`
 (topics `synapse` / `dsprslvd`).
+
+### EventValidationRejected
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `val_rej` |
+| **Struct** | `EventValidationRejected` |
+| **Emitted by** | `register_callback` (soft-failure path, #115) |
+| **When** | An otherwise-valid payload is rejected for a recoverable, operationally interesting reason |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `idempotency_key` | `String` | Idempotency key of the rejected payload — the relay's correlation handle |
+| `reason_code` | `u32` | `ContractError` discriminant for the rejection (e.g. `110` = `AmountCeilingExceeded`) |
+| `anchor` | `String` | Anchor the payload was attributed to (its `asset_issuer`) |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+**Why the call returns `Ok`:** Soroban discards every event published by an
+invocation that ultimately fails. An event emitted just before
+`return Err(..)` never reaches subscribers or RPC `getEvents`. To leave an
+on-chain trace, a soft-failure rejection must therefore *succeed* as an
+invocation: `register_callback` writes nothing (no transaction record, no
+idempotency key), publishes `val_rej`, and returns `Ok(idempotency_key)`.
+Relays MUST NOT treat an `Ok` return as proof of registration; confirm with
+the matching `reg` event or `get_transaction`. Because the idempotency key
+is not recorded, the relay may resubmit the same payload once the ceiling is
+raised.
+
+**Which rejections emit `val_rej`:**
+
+| Rejection | Emits `val_rej`? | Why |
+|-----------|------------------|-----|
+| `AmountCeilingExceeded` (110) | **Yes** | Repeated ceiling hits from one anchor are a useful operational/security signal, and the payload is otherwise well-formed. |
+| Malformed fields (`InvalidStellarAccount`, `InvalidAmount`, `InvalidAssetCode`, `InvalidAssetIssuer`, `MissingIdempotencyKey`, `StringTooLong`) | No: hard `Err` | Relay bugs, not anchor behaviour. Soft-accepting them would hide defects and make the call's return value unreliable. |
+| `ContractPaused`, relay auth failure | No: hard `Err` | Checked before the payload is read. Auth failures in particular must revert. |
+| `DuplicateRequest` (F-07) | No: hard `Err` | Already visible to the relay; replay attempts are covered by THREAT_MODEL.md. |
+
+The ceiling check is the last validation step, so a payload that is both
+over-ceiling and malformed gets the hard error for the malformed field,
+not a `val_rej` event.
+
+Verified end to end by `tests::test_amount_ceiling_rejection_emits_validation_rejected_event`
+(topics `synapse` / `val_rej`).
 
 ---
 

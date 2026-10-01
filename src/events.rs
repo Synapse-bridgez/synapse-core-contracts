@@ -19,6 +19,13 @@
 //! emission order are versioned for Phase 2 / Phase 3 subscribers. See
 //! [`EVENTS.md`](../EVENTS.md) (catalogue + semver) and
 //! [`CHANGELOG.md`](../CHANGELOG.md#event-schema).
+//!
+//! ## Lazy construction (#118)
+//!
+//! Event structs are constructed immediately before `env.events().publish()`
+//! on the paths that actually emit, never earlier. This avoids wasting CPU and
+//! memory building payloads on rejection paths (e.g. paused, duplicate, auth
+//! failure) that never reach the publish site.
 
 use soroban_sdk::{contracttype, symbol_short, Env, String};
 
@@ -224,7 +231,39 @@ pub struct EventAnchorTierSet {
     pub rebate_bps: u32,
     /// Human-readable tier label.
     pub label: String,
-    pub adm
+    pub admin: soroban_sdk::Address,
+    pub ledger: u32,
+}
+
+/// Emitted by [`SynapseCoreContract::compute_effective_fee`] when the rebate
+/// is applied to a base fee amount (informational / audit trail).
+#[contracttype]
+pub struct EventRebateApplied {
+    pub anchor: soroban_sdk::Address,
+    /// Base fee before rebate (in the same unit as the fee param).
+    pub base_fee: i128,
+    /// Effective fee after applying the rebate.
+    pub effective_fee: i128,
+    /// Rebate in basis points that was applied.
+    pub rebate_bps: u32,
+    pub ledger: u32,
+}
+
+// ── Dispute events ─────────────────────────────────────────────────────────────
+
+/// Emitted when a dispute is raised against a completed transaction.
+///
+/// Subscribers correlate this with a subsequent [`EventDisputeResolved`] for
+/// the same `tx_id` to reconstruct the full dispute lifecycle.
+///
+/// Topics: `synapse` / `dispute`.
+#[contracttype]
+pub struct EventDisputeRaised {
+    /// The transaction ID this dispute concerns.
+    pub tx_id: String,
+    /// Short human-readable reason code (e.g. "amount_mismatch").
+    pub reason: String,
+    /// Address that raised the dispute.
     pub caller: soroban_sdk::Address,
     pub ledger: u32,
 }
@@ -244,6 +283,8 @@ pub struct EventAnchorTierSet {
 /// * `upheld = false` — The dispute is **rejected**: the original outcome
 ///   stands and the transaction is **returned to `Completed`**.
 ///   Downstream systems should resume treating the transaction as settled.
+///
+/// Topics: `synapse` / `dsprslvd`.
 #[contracttype]
 pub struct EventDisputeResolved {
     /// The transaction ID — shared correlation key with [`EventDisputeRaised`].
@@ -257,41 +298,44 @@ pub struct EventDisputeResolved {
     pub ledger: u32,
 }
 
-// ── Anchor Rebate (#145) ────────────────────────────────────────────────────────
+// ── Soft-failure events (#115) ─────────────────────────────────────────────────
 
-/// Emitted by [`SynapseCoreContract::set_anchor_tier`] when the admin sets or
-/// updates an anchor's rebate tier.
+/// Emitted when `register_callback` rejects a payload for a recoverable
+/// validation reason (e.g. amount ceiling exceeded) rather than hard-panicking.
+///
+/// This event is emitted **instead of returning an error** on select validation
+/// paths where the rejection is operationally informative — an anchor repeatedly
+/// hitting its ceiling is an observable signal for off-chain monitoring — but the
+/// individual call failure is not a state-machine problem.
+///
+/// `reason_code` mirrors the [`ContractError`] discriminant as a `u32` so
+/// subscribers can filter by rejection type without decoding XDR error values.
+///
+/// Topics: `synapse` / `val_rej`.
 #[contracttype]
-pub struct EventAnchorTierSet {
-    pub anchor: soroban_sdk::Address,
-    /// Rebate in basis points (0–10_000).
-    pub rebate_bps: u32,
-    /// Human-readable tier label.
-    pub label: String,
-    pub admin: soroban_sdk::Address,
-    pub ledger: u32,
-}
-
-/// Emitted by [`SynapseCoreContract::compute_effective_fee`] when the rebate
-/// is applied to a base fee amount (informational / audit trail).
-#[contracttype]
-pub struct EventRebateApplied {
-    pub anchor: soroban_sdk::Address,
-    /// Base fee before rebate (in the same unit as the fee param).
-    pub base_fee: i128,
-    /// Effective fee after applying the rebate.
-    pub effective_fee: i128,
-    /// Rebate in basis points that was applied.
-    pub rebate_bps: u32,
-    pub ledger: u32,
-}
-
-
+pub struct EventValidationRejected {
+    /// Idempotency key from the rejected payload (correlation handle for the relay).
+    pub idempotency_key: String,
+    /// Numeric reason code — mirrors the `ContractError` discriminant (`u32`).
+    pub reason_code: u32,
+    /// Anchor the rejected payload was attributed to (its `asset_issuer`), so
+    /// monitoring can detect one anchor repeatedly hitting its ceiling.
+    pub anchor: String,
+    /// Ledger sequence at rejection time.
     pub ledger: u32,
 }
 
 // ─── Emitter ─────────────────────────────────────────────────────────────────
 
+/// Stateless helper that constructs and publishes every event type.
+///
+/// ## Lazy construction (#118)
+///
+/// All emitter methods build the event struct **immediately before** calling
+/// `env.events().publish()`. No caller pre-builds a struct and passes it in;
+/// all required data is forwarded as individual primitives or references.
+/// This ensures zero event-construction cost on paths that never reach an
+/// emitter call (rejected auth, paused, duplicate, validation failure).
 pub struct EventEmitter;
 
 impl EventEmitter {
@@ -301,6 +345,7 @@ impl EventEmitter {
         admin: &soroban_sdk::Address,
         relay_signer: &soroban_sdk::Address,
     ) {
+        // Struct constructed lazily here, not by the caller.
         env.events().publish(
             (symbol_short!("synapse"), symbol_short!("init")),
             EventInitialised {
@@ -312,15 +357,27 @@ impl EventEmitter {
     }
 
     /// Emit [`EventTransactionRegistered`].
-    pub fn transaction_registered(env: &Env, tx: &crate::types::Transaction) {
+    ///
+    /// Takes individual fields rather than a full `&Transaction` to avoid
+    /// cloning the entire struct when some fields (asset_issuer, callback_type,
+    /// callback_status, stellar_tx_hash, failure_reason) are not part of the
+    /// event payload. (#118 lazy construction + #116 clone reduction)
+    pub fn transaction_registered(
+        env: &Env,
+        tx_id: &String,
+        stellar_account: &String,
+        amount: i128,
+        asset_code: &String,
+        anchor_transaction_id: &String,
+    ) {
         env.events().publish(
             (symbol_short!("synapse"), symbol_short!("reg")),
             EventTransactionRegistered {
-                tx_id: tx.id.clone(),
-                stellar_account: tx.stellar_account.clone(),
-                amount: tx.amount,
-                asset_code: tx.asset_code.clone(),
-                anchor_transaction_id: tx.anchor_transaction_id.clone(),
+                tx_id: tx_id.clone(),
+                stellar_account: stellar_account.clone(),
+                amount,
+                asset_code: asset_code.clone(),
+                anchor_transaction_id: anchor_transaction_id.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
@@ -547,6 +604,24 @@ impl EventEmitter {
         );
     }
 
+    /// Emit [`EventDisputeResolved`].
+    ///
+    /// Topics: `synapse` / `dsprslvd`.
+    ///
+    /// `upheld = true`  → dispute upheld, transaction reverted to `Failed`.
+    /// `upheld = false` → dispute rejected, transaction returned to `Completed`.
+    #[allow(dead_code)]
+    pub fn dispute_resolved(
+        env: &Env,
+        tx_id: &String,
+        upheld: bool,
+        caller: &soroban_sdk::Address,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("dsprslvd")),
+            EventDisputeResolved {
+                tx_id: tx_id.clone(),
+                upheld,
                 caller: caller.clone(),
                 ledger: env.ledger().sequence(),
             },
@@ -593,32 +668,51 @@ impl EventEmitter {
         );
     }
 
-    /// Emit [`EventDisputeResolved`].
+    // ── Soft-failure emitters (#115) ──────────────────────────────────────────
+
+    /// Emit [`EventValidationRejected`] — soft-failure validation rejection.
     ///
-    /// Topics: `synapse` / `dsprslvd`.
+    /// Called on select recoverable validation paths in `register_callback`
+    /// where the caller's payload is invalid but the failure is operationally
+    /// observable rather than a hard contract panic. The contract returns
+    /// `Ok(idempotency_key)` so the event is committed (Soroban drops events
+    /// from failed invocations); the event is the rejection signal.
     ///
-    /// `upheld = true`  → dispute upheld, transaction reverted to `Failed`.
-    /// `upheld = false` → dispute rejected, transaction returned to `Completed`.
-    #[allow(dead_code)]
-    pub fn dispute_resolved(
+    /// `reason_code` is a [`crate::types::ContractError`] discriminant.
+    pub fn validation_rejected(
         env: &Env,
-        tx_id: &String,
-        upheld: bool,
-        caller: &soroban_sdk::Address,
+        idempotency_key: &String,
+        reason_code: u32,
+        anchor: &String,
     ) {
         env.events().publish(
-            (symbol_short!("synapse"), symbol_short!("dsprslvd")),
-            EventDisputeResolved {
-                tx_id: tx_id.clone(),
-                upheld,
-                caller: caller.clone(),
+            (symbol_short!("synapse"), symbol_short!("val_rej")),
+            EventValidationRejected {
+                idempotency_key: idempotency_key.clone(),
+                reason_code,
+                anchor: anchor.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
     }
 
-                ledger: env.ledger().sequence(),
-            },
+    // ── Stubs for forward-looking upgrade self-check events ───────────────────
+
+    /// Emit an upgrade self-check passed event (stub for forward-looking tests).
+    #[allow(dead_code)]
+    pub fn upgrade_self_check_passed(env: &Env, schema_version: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("chk_pass")),
+            schema_version,
+        );
+    }
+
+    /// Emit an upgrade self-check failed event (stub for forward-looking tests).
+    #[allow(dead_code)]
+    pub fn upgrade_self_check_failed(env: &Env, schema_version: u32) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("chk_fail")),
+            schema_version,
         );
     }
 }

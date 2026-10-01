@@ -262,3 +262,26 @@ type = "soroban_sdk::Address"
 [[event.fields]]
 name = "ledger"
 type = "u32"
+
+# ── Soft-failure validation rejection (#115) ─────────────────────────────────
+
+[[event]]
+struct_name = "EventValidationRejected"
+topic       = "val_rej"
+emitter_fn  = "validation_rejected"
+
+[[event.fields]]
+name = "idempotency_key"
+type = "String"
+
+[[event.fields]]
+name = "reason_code"
+type = "u32"
+
+[[event.fields]]
+name = "anchor"
+type = "String"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"

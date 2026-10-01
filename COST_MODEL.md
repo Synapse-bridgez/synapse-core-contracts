@@ -35,7 +35,7 @@ Key: `StorageKey::Transaction(tx_id)` where `tx_id` is a UUID (36 chars).
 | `amount`               | `i128`           | 16 B     | Fixed-width                                  |
 | `asset_code`           | `String`         | 16 B     | 12 chars + 4-byte prefix (capped by validator) |
 | `asset_issuer`         | `String`         | 60 B     | 56-char G-address + 4-byte prefix            |
-| `status`               | `TransactionStatus` | 4 B   | 4-byte enum discriminant                     |
+| `status_flags`         | `u32`            | 4 B      | Bit-packed status (#117); see §2.1.2         |
 | `created_at_ledger`    | `u32`            | 4 B      |                                              |
 | `updated_at_ledger`    | `u32`            | 4 B      |                                              |
 | `anchor_transaction_id`| `String`         | 40 B     | ~36 chars (opaque ID) + 4-byte prefix        |
@@ -68,6 +68,26 @@ Tags are capped at 8 per transaction and 32 chars each. Each tag costs
 Even at the cap the record stays within the 512 B fee-rounding bucket only
 when other fields are near their typical sizes; budget up to the next bucket
 for fully tagged records.
+
+#### 2.1.2 Bit-packed status (#117)
+
+The ledger entry is a `StoredTransaction`, which replaces the
+`TransactionStatus` enum with a `u32` (`StatusFlags`: status nibble in bits
+7:4, all other bits reserved for future flags). A `#[contracttype]` unit enum
+serialises as a one-element `ScVec` holding the variant name as an
+`ScSymbol`, so the packed word is smaller for every status.
+`StorageClient` converts at the storage boundary; `get_transaction()` still
+returns the unpacked `Transaction`.
+
+Measured XDR size of a full record (`tests::test_packed_transaction_is_smaller_than_unpacked`):
+
+| Status                              | Unpacked | Packed | Saved |
+|-------------------------------------|----------|--------|-------|
+| `Pending`, `Failed`                 | 632 B    | 616 B  | 16 B  |
+| `Processing`, `Completed`, `Cancelled` | 636 B | 616 B  | 20 B  |
+
+That is ~3% of persistent rent per record. The packed size no longer
+depends on the status, so status transitions never resize the entry.
 
 ### 2.2 Temporary entry — idempotency key
 
@@ -104,6 +124,54 @@ for fully tagged records.
 | Write idempotency key   | 64 B   | 0.0050    | 64 × 0.5 × 1e-7 = 0.0000032 | 0.00500 |
 | CPU/memory              |        |           |                        | 0.0010      |
 | **Total register**      |        |           |                        | **~0.0111 XLM** |
+
+#### 4.1.1 Hot-path profile and optimisation (#116)
+
+Measured by `bench_events::bench_register_callback_paths`: a full client
+invocation (auth, storage, validation, event) with the Soroban test budget.
+Native Rust numbers, so read them as relative, not absolute (see §9.1).
+
+**Where the cost goes (happy path, ~149k CPU):** two persistent/temporary
+writes plus the `reg` event dominate. Of the validation, the two SEP-23
+CRC16 strkey checks (`stellar_account`, `asset_issuer`) are the largest
+pure-CPU part. The amount-ceiling lookup is the only validation step that
+reads storage.
+
+**Changes:**
+
+1. The idempotency check runs before payload validation, so replays skip
+   both CRC16 checks and the ceiling read.
+2. The amount-ceiling storage read moved from 3rd to last in
+   `validate_payload`, so every pure-CPU check can reject first and the
+   lookup is always keyed on a well-formed issuer.
+3. The `Transaction` is built by moving fields out of the owned payload
+   instead of cloning them, and `transaction_registered` takes only the
+   fields in its payload (#118).
+4. Status is stored bit-packed (§2.1.2).
+
+| Path (native Rust)             | CPU before | CPU after | Mem before | Mem after |
+|--------------------------------|-----------:|----------:|-----------:|----------:|
+| happy (first registration)     | 149 177    | 148 523   | 21 133     | 21 005    |
+| replay (same idempotency key)  | 63 383     | 54 768 (−13.6%) | 8 178 | 7 442 (−9.0%) |
+| over ceiling                   | 51 650 ¹   | 67 988 ²  | 7 130      | 9 111     |
+| paused                         | 23 246     | 23 246    | 2 930      | 2 930     |
+
+¹ Before: hard `Err` at the 3rd validation step; the call reverts.
+² After: soft rejection (#115). All validation runs, then a committed
+`val_rej` event. The extra cost buys the observable trace.
+
+The happy-path win is small: its cost is dominated by the two ledger
+writes, which these changes don't touch. The main gain is on replays, which
+relays send whenever they retry.
+
+**CI gate:** `bench_register_callback_paths` asserts happy-path
+CPU ≤ 450 000 and memory ≤ 65 000 (~3× measured), and that every early-exit
+path costs less than a full registration. It runs as part of `make test`;
+`make bench` prints the `[bench]` lines.
+
+| Date       | CPU ceiling | Mem ceiling | Reason                         |
+|------------|-------------|-------------|--------------------------------|
+| 2026-10-01 | 450 000     | 65 000      | Initial gate (#116)            |
 
 ### 4.2 `start_processing` — Status transition
 
@@ -310,6 +378,28 @@ String fields use realistic (not worst-case) lengths.
 
 > Ranges reflect typical run-to-run variation across the test environment.
 > See the `[bench]` lines in `cargo test -- --nocapture` for exact numbers.
+
+### 9.2.1 Lazy construction audit (#118)
+
+Audit of every `EventEmitter` call site in `src/lib.rs` (21 sites):
+
+* Every emitter builds its event struct inside the emitter, immediately
+  before `env.events().publish()`. No call site builds event data before a
+  guard that can return early, so no rejected path (paused, auth failure,
+  validation, duplicate) pays for event construction.
+* The one structural change: `transaction_registered` used to take a whole
+  `&Transaction`, so emitting `reg` meant having a full record in hand. It
+  now takes only the five fields in its payload. Fields outside the event
+  are never touched. The event bytes are unchanged: the struct, field order
+  and values are identical, and the existing payload and conformance tests
+  pass unmodified.
+* `old_status = tx.status.clone()` in the three status transitions is now a
+  plain copy (`TransactionStatus: Copy`).
+
+`bench_event_reg` measures the `reg` emitter at 7 916 CPU / 783 B
+(native). It reports the same numbers with either signature, because the
+emitter clones the same five fields either way. The saving is on the
+caller side and is part of the §4.1.1 figures.
 
 ### 9.3 Lifecycle event cost
 

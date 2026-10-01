@@ -14,7 +14,7 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address) {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &relay);
+    client.initialize(&admin, &relay, &BytesN::from_array(&env, &[0x01u8; 32]));
     (env, client, admin)
 }
 

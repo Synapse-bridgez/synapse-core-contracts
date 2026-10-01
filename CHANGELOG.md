@@ -34,6 +34,10 @@ separately from general code changes. Full topic/field contracts live in
   `EventUpgradeSelfCheckFailed` (topic `chk_fail`), emitted by `upgrade`
   around the post-upgrade storage-integrity self-check. Additive new
   events — Minor bump.
+- Added `EventValidationRejected` (topic `val_rej`, fields
+  `idempotency_key`, `reason_code`, `anchor`, `ledger`), emitted by
+  `register_callback` when an otherwise-valid payload exceeds its anchor's
+  amount ceiling (#115). Additive new event — Minor bump.
 
 ### Added
 
@@ -53,6 +57,24 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Changed
 
+- `register_callback` over-ceiling payloads are now a **soft failure**
+  (#115): nothing is written, `val_rej` is emitted, and the call returns
+  `Ok(idempotency_key)` instead of `Err(AmountCeilingExceeded)`, because
+  Soroban drops events from failed invocations. Relays must confirm
+  registration via the `reg` event or `get_transaction`. All other
+  validation failures remain hard errors.
+- `register_callback` hot path (#116): the idempotency check now runs
+  before payload validation (replays −13.6% CPU), and the ceiling storage
+  read is the last validation step. A malformed payload that is also over
+  ceiling now returns the malformed-field error. Before/after numbers are in
+  COST_MODEL.md §4.1.1, with a CI gate in `bench_register_callback_paths`.
+- `Transaction` records are stored as `StoredTransaction` with a
+  bit-packed `status_flags: u32` (#117), saving 16–20 B per record.
+  `get_transaction()` still returns the unpacked shape. **Storage-format
+  change:** records written by earlier builds won't decode. No network has a
+  deployment (`contract-ids.json`).
+- `EventEmitter::transaction_registered` takes the five payload fields
+  instead of `&Transaction` (#118). Event bytes are unchanged.
 - THREAT_MODEL.md §8 **R-05** status updated from accepted (no timelock) to
   **mitigated** via the propose/finalize flow.
 - `upgrade()` schema guard now checks the configured `[min, max]` range
