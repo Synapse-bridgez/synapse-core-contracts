@@ -233,7 +233,9 @@ trust model.
 **When to deploy fresh:**
 - Breaking changes to `Transaction` struct layout or `StorageKey` variants
 - Fundamental access-control model changes
-- WASM size exceeds Soroban deployment constraints
+- WASM size exceeds Soroban deployment constraints (`contract_max_size_bytes`,
+  currently 131 072 bytes on mainnet/testnet). CI fails well before that: see
+  `wasm_size.toml` and [`COST_MODEL.md` §13](./COST_MODEL.md#13-release-wasm-size-gate-122).
 
 ### Event schema as a stable public API
 
@@ -266,3 +268,6 @@ wired.
 - #102: [High] Add a cold-storage export entry point for pre-eviction off-chain archival
 <!-- handsoff-issue-109 -->
 - #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
+
+<!-- handsoff-issue-156 -->
+- #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling

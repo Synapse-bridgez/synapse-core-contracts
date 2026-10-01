@@ -61,6 +61,74 @@ const VERSION_ED25519_PUBLIC_KEY: u8 = 6 << 3;
 /// CRC16-XModem polynomial \(x^{16} + x^{12} + x^{5} + 1\).
 const CRC16_XMODEM_POLY: u16 = 0x1021;
 
+/// Structured verdict returned by [`Validator::simulate_register_callback`].
+///
+/// Mirrors the structured-verdict approach of the sibling `simulate_upgrade`
+/// query: instead of a bare `Result`, it names *which* specific check would
+/// fail so off-chain relay tooling can react precisely without spending a real
+/// transaction to discover the rejection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidationResult {
+    /// Every check `register_callback` would run passed; the real call would
+    /// succeed against the same inputs and state.
+    Valid,
+    /// The payload's `stellar_account` is not a valid SEP-23 G-address.
+    InvalidStellarAccount,
+    /// The payload's `amount` is not strictly positive.
+    InvalidAmount,
+    /// The payload's `amount` exceeds the per-anchor ceiling.
+    AmountCeilingExceeded,
+    /// The payload's `asset_code` is not 1–12 ASCII uppercase characters.
+    InvalidAssetCode,
+    /// The payload's `asset_issuer` is not a valid SEP-23 G-address.
+    InvalidAssetIssuer,
+    /// The payload's `idempotency_key` is empty or malformed.
+    InvalidIdempotencyKey,
+    /// The payload's `transaction_id` exceeds its length cap.
+    TransactionIdTooLong,
+    /// The payload's `anchor_transaction_id` exceeds its length cap.
+    AnchorTransactionIdTooLong,
+    /// The payload's `callback_status` exceeds its length cap.
+    CallbackStatusTooLong,
+    /// A `String` field exceeds its maximum length cap.
+    StringTooLong,
+    /// The caller is not authorized to register callbacks.
+    Unauthorized,
+    /// The payload's `idempotency_key` was already used (replay).
+    DuplicateIdempotencyKey,
+    /// The per-anchor outstanding-callback quota would be exceeded.
+    QuotaExceeded,
+    /// The anchor is not on the allowlist.
+    AnchorNotAllowed,
+    /// Any other contract error surfaced by the real call's pipeline.
+    Other(ContractError),
+}
+
+impl ValidationResult {
+    /// `true` iff the simulated payload would be accepted by the real call.
+    pub fn is_valid(&self) -> bool {
+        matches!(self, ValidationResult::Valid)
+    }
+
+    /// Map a [`ContractError`] from the real pipeline to the matching verdict.
+    fn from_error(err: ContractError) -> Self {
+        match err {
+            ContractError::InvalidStellarAccount => ValidationResult::InvalidStellarAccount,
+            ContractError::InvalidAmount => ValidationResult::InvalidAmount,
+            ContractError::AmountCeilingExceeded => ValidationResult::AmountCeilingExceeded,
+            ContractError::InvalidAssetCode => ValidationResult::InvalidAssetCode,
+            ContractError::InvalidAssetIssuer => ValidationResult::InvalidAssetIssuer,
+            ContractError::InvalidIdempotencyKey => ValidationResult::InvalidIdempotencyKey,
+            ContractError::StringTooLong => ValidationResult::StringTooLong,
+            ContractError::Unauthorized => ValidationResult::Unauthorized,
+            ContractError::DuplicateIdempotencyKey => ValidationResult::DuplicateIdempotencyKey,
+            ContractError::QuotaExceeded => ValidationResult::QuotaExceeded,
+            ContractError::AnchorNotAllowed => ValidationResult::AnchorNotAllowed,
+            other => ValidationResult::Other(other),
+        }
+    }
+}
+
 /// Generic helper: reject a `String` if its byte length exceeds `max`.
 fn enforce_max_length(field: &String, max: u32) -> Result<(), ContractError> {
     if field.len() > max {
@@ -160,12 +228,57 @@ impl Validator {
         Ok(())
     }
 
+    /// Read-only, side-effect-free dry-run of `register_callback`'s full
+    /// validation pipeline.
+    ///
+    /// Runs every check the real call would run — amount ceilings, allowlists,
+    /// per-anchor quotas, idempotency/replay, authorization, and string-length
+    /// caps — against `payload` and `caller` **without committing any state**.
+    /// Off-chain relay tooling can pre-flight a candidate payload here and only
+    /// spend a real transaction on payloads that would be accepted.
+    ///
+    /// Returns a structured [`ValidationResult`] naming the specific check that
+    /// would fail (or [`ValidationResult::Valid`] when the real call would
+    /// succeed), mirroring the structured-verdict approach of `simulate_upgrade`.
+    pub fn simulate_register_callback(
+        env: &Env,
+        payload: &CallbackPayload,
+        caller: &Address,
+    ) -> ValidationResult {
+        // Pure, stateless checks first (no storage reads, no writes).
+        if let Err(err) = Self::validate_payload(env, payload) {
+            return ValidationResult::from_error(err);
+        }
+
+        // State-dependent checks: authorization, allowlist, replay, and quota.
+        // These only *read* storage; nothing is written by this query.
+        if let Err(err) = crate::storage::StorageClient::check_register_callback_preconditions(
+            env, payload, caller,
+        ) {
+            return ValidationResult::from_error(err);
+        }
+
+        ValidationResult::Valid
+    }
+
     /// Reject amounts above the effective transaction ceiling for `anchor`.
     ///
     /// The effective ceiling is the stricter (lower) of the contract-wide
     /// `global_max_amount` backstop and the per-anchor ceiling (anchors without
     /// an explicit entry use the contract-wide default).  Exactly-at-ceiling is
     /// allowed; one unit above is rejected.
+    pub fn validate_amount_ceiling(
+        env: &Env,
+        anchor: &String,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        let per_anchor = crate::storage::StorageClient::get_amount_ceiling(env, anchor);
+        let global = crate::storage::StorageClient::get_global_max_amount(env);
+        let effective = if global < per_anchor { global } else { per_anchor };
+        if amount > effective {
+            return Err(ContractError::AmountCeilingExceeded);
+        }
+        
     pub fn validate_amount_ceiling(
         env: &Env,
         anchor: &String,
@@ -217,12 +330,13 @@ impl Validator {
         Ok(())
     }
 
-    /// Asset issuer: a valid Stellar G-address (SEP-23 strkey).
+    /// Asset issuer: SEP-23 ed25519 public-key strkey (same rules as account).
     pub fn validate_asset_issuer(env: &Env, issuer: &String) -> Result<(), ContractError> {
         Self::validate_stellar_account(env, issuer)
+            .map_err(|_| ContractError::InvalidAssetIssuer)
     }
 
-    /// Idempotency key: non-empty, ≤ [`MAX_TX_ID_LEN`] bytes.
+    /// Idempotency key: non-empty and within its length cap.
     pub fn validate_idempotency_key(_env: &Env, key: &String) -> Result<(), ContractError> {
         if key.len() == 0 {
             return Err(ContractError::InvalidIdempotencyKey);
@@ -240,13 +354,34 @@ impl Validator {
 
     /// Anchor transaction id: non-empty, ≤ [`MAX_ANCHOR_TX_ID_LEN`] bytes.
     pub fn validate_anchor_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() 
+    pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
+        enforce_max_length(id, MAX_TX_ID_LEN)
+    }
+
+    }
+
+    /// Transaction id: non-empty, ≤ [`MAX_TX_ID_LEN`] bytes.
+    pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
+        enforce_max_length(id, MAX_TX_ID_LEN)
+    }
+
+
+    pub fn validate_anchor_transaction_id(id: &String) -> Result<(), ContractError> {
         if id.len() == 0 {
             return Err(ContractError::InvalidAnchorTransactionId);
         }
         enforce_max_length(id, MAX_ANCHOR_TX_ID_LEN)
     }
 
-    /// Callback status: non-empty, ≤ [`MAX_CALLBACK_STATUS_LEN`] bytes.
+    /// Anchor transaction id: non-empty, ≤ [`MAX_ANCHOR_TX_ID_LEN`] bytes.
+    /// `anchor_transaction_id` length cap.
     pub fn validate_callback_status(status: &String) -> Result<(), ContractError> {
         if status.len() == 0 {
             return Err(ContractError::InvalidCallbackStatus);
@@ -254,7 +389,8 @@ impl Validator {
         enforce_max_length(status, MAX_CALLBACK_STATUS_LEN)
     }
 
-    /// Stellar tx hash: non-empty, ≤ [`MAX_STELLAR_TX_HASH_LEN`] bytes.
+    /// Callback status: non-empty, ≤ [`MAX_CALLBACK_STATUS_LEN`] bytes.
+
     pub fn validate_stellar_tx_hash(hash: &String) -> Result<(), ContractError> {
         if hash.len() == 0 {
             return Err(ContractError::InvalidStellarTxHash);
@@ -262,7 +398,8 @@ impl Validator {
         enforce_max_length(hash, MAX_STELLAR_TX_HASH_LEN)
     }
 
-    /// Failure reason: non-empty, ≤ [`MAX_FAILURE_REASON_LEN`] bytes.
+    /// Stellar tx hash: non-empty, ≤ [`MAX_STELLAR_TX_HASH_LEN`] bytes.
+    /// `stellar_tx_hash` length cap.
     pub fn validate_failure_reason(reason: &String) -> Result<(), ContractError> {
         if reason.len() == 0 {
             return Err(ContractError::InvalidFailureReason);
