@@ -33,6 +33,10 @@
 
 #![cfg(test)]
 
+extern crate std;
+
+use std::{borrow::ToOwned, format, string::String, vec::Vec};
+
 // ─── Manifest types ──────────────────────────────────────────────────────────
 
 /// One field in a `#[contracttype]` struct, as declared in the manifest.
@@ -67,9 +71,6 @@ struct ManifestEvent {
 // This avoids adding a TOML dev-dependency to the crate.
 
 fn parse_manifest(src: &str) -> (u32, Vec<ManifestEvent>) {
-    let mut schema_version: u32 = 0;
-    let mut events: Vec<ManifestEvent> = Vec::new();
-
     // Tracks whether the last `[[…]]` header was `[[event]]` or
     // `[[event.fields]]` so we know where to attach key=value pairs.
     enum Context {
@@ -77,6 +78,9 @@ fn parse_manifest(src: &str) -> (u32, Vec<ManifestEvent>) {
         Event,
         Field,
     }
+
+    let mut schema_version: u32 = 0;
+    let mut events: Vec<ManifestEvent> = Vec::new();
     let mut ctx = Context::TopLevel;
 
     for raw_line in src.lines() {
@@ -115,9 +119,8 @@ fn parse_manifest(src: &str) -> (u32, Vec<ManifestEvent>) {
             match ctx {
                 Context::TopLevel => {
                     if k == "schema_version" {
-                        schema_version = v
-                            .parse::<u32>()
-                            .expect("schema_version must be an integer");
+                        schema_version =
+                            v.parse::<u32>().expect("schema_version must be an integer");
                     }
                 }
                 Context::Event => {
@@ -130,12 +133,7 @@ fn parse_manifest(src: &str) -> (u32, Vec<ManifestEvent>) {
                     }
                 }
                 Context::Field => {
-                    let field = events
-                        .last_mut()
-                        .unwrap()
-                        .fields
-                        .last_mut()
-                        .unwrap();
+                    let field = events.last_mut().unwrap().fields.last_mut().unwrap();
                     match k {
                         "name" => field.name = v.to_owned(),
                         "type" => field.field_type = v.to_owned(),
@@ -271,11 +269,9 @@ fn extract_field(line: &str) -> Option<(&str, &str)> {
     let fname = rest[..colon].trim();
     let raw_type = rest[colon + 1..].trim();
     // Strip inline comment if present.
-    let without_comment = if let Some(comment_pos) = raw_type.find("//") {
-        raw_type[..comment_pos].trim()
-    } else {
-        raw_type
-    };
+    let without_comment = raw_type
+        .find("//")
+        .map_or(raw_type, |comment_pos| raw_type[..comment_pos].trim());
     // Strip trailing comma.
     let ftype = without_comment.trim_end_matches(',').trim();
     if fname.is_empty() || ftype.is_empty() {
@@ -289,10 +285,7 @@ fn extract_field(line: &str) -> Option<(&str, &str)> {
 /// whitespace-insensitive (e.g. `BytesN < 32 >` == `BytesN<32>`).
 fn normalise_type(t: &str) -> String {
     // 1. Collapse internal whitespace.
-    let collapsed: String = t
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
     // 2. Remove spaces around `<` and `>` for generic types.
     collapsed
         .replace("< ", "<")
@@ -309,7 +302,7 @@ fn normalise_type(t: &str) -> String {
 
 fn extract_topic_for_emitter(src: &str, emitter_fn: &str) -> Option<String> {
     // Find the function definition: `pub fn <emitter_fn>(`
-    let fn_sig = format!("pub fn {}(", emitter_fn);
+    let fn_sig = format!("pub fn {emitter_fn}(");
     let fn_start = src.find(fn_sig.as_str())?;
 
     // Walk forward from fn_start to find the first `symbol_short!("…")` call
@@ -535,12 +528,16 @@ fn test_events_md_conforms_to_manifest() {
 }
 
 /// Verify the manifest itself is self-consistent: every event has a non-empty
-/// struct_name, topic, emitter_fn, and at least one field.
+/// `struct_name`, topic, `emitter_fn`, and at least one field.
 #[test]
 fn test_manifest_is_well_formed() {
     let (schema_version, events) = parse_manifest(MANIFEST_SRC);
     assert!(schema_version > 0, "schema_version must be ≥ 1");
-    assert_eq!(events.len(), 10, "Expected exactly 10 events in the manifest");
+    assert_eq!(
+        events.len(),
+        11,
+        "Expected exactly 11 events in the manifest"
+    );
 
     for ev in &events {
         assert!(
@@ -583,6 +580,7 @@ fn test_manifest_is_well_formed() {
 fn test_manifest_contains_all_expected_topics() {
     let expected_topics = [
         "init", "reg", "status", "done", "fail", "propose", "admin", "relay", "upgrade", "pause",
+        "batch",
     ];
     let (_schema_version, events) = parse_manifest(MANIFEST_SRC);
     let manifest_topics: Vec<&str> = events.iter().map(|e| e.topic.as_str()).collect();
@@ -611,14 +609,14 @@ fn test_manifest_contains_all_expected_topics() {
 /// catch the name mismatch.
 #[test]
 fn test_drift_detection_catches_renamed_field() {
-    let fake_events_rs = r#"
+    let fake_events_rs = r"
         #[contracttype]
         pub struct EventInitialised {
             pub admin: soroban_sdk::Address,
             pub relay_signer_renamed: soroban_sdk::Address,  // <-- wrong name
             pub ledger: u32,
         }
-    "#;
+    ";
 
     // Build a minimal manifest with just EventInitialised.
     let partial_manifest = r#"
@@ -657,14 +655,14 @@ type = "u32"
 /// A synthetic `events.rs` with a changed field type — the checker must catch it.
 #[test]
 fn test_drift_detection_catches_wrong_field_type() {
-    let fake_events_rs = r#"
+    let fake_events_rs = r"
         #[contracttype]
         pub struct EventTransactionCompleted {
             pub tx_id: String,
             pub stellar_tx_hash: u64,  // <-- should be String
             pub ledger: u32,
         }
-    "#;
+    ";
 
     let partial_manifest = r#"
 schema_version = 1
@@ -703,13 +701,13 @@ type = "u32"
 #[test]
 fn test_drift_detection_catches_missing_struct() {
     // events.rs has no EventPauseToggled at all.
-    let fake_events_rs = r#"
+    let fake_events_rs = r"
         pub struct EventAdminTransferred {
             pub old_admin: soroban_sdk::Address,
             pub new_admin: soroban_sdk::Address,
             pub ledger: u32,
         }
-    "#;
+    ";
 
     let partial_manifest = r#"
 schema_version = 1
@@ -748,7 +746,7 @@ type = "u32"
 /// checker must catch the field-order violation.
 #[test]
 fn test_drift_detection_catches_extra_field() {
-    let fake_events_rs = r#"
+    let fake_events_rs = r"
         #[contracttype]
         pub struct EventTransactionFailed {
             pub tx_id: String,
@@ -756,7 +754,7 @@ fn test_drift_detection_catches_extra_field() {
             pub extra_field: String,  // <-- not in manifest
             pub ledger: u32,
         }
-    "#;
+    ";
 
     let partial_manifest = r#"
 schema_version = 1
@@ -834,7 +832,9 @@ type = "u32"
         "Drift detection failed: wrong topic symbol should have produced failures"
     );
     assert!(
-        failures.iter().any(|f| f.contains("wrongtopic") || f.contains("init")),
+        failures
+            .iter()
+            .any(|f| f.contains("wrongtopic") || f.contains("init")),
         "Expected failure to mention mismatched topic, got: {failures:?}"
     );
 }

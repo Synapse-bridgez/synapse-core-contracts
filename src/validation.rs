@@ -31,26 +31,57 @@
 //! | Fee impact | negligible vs ~0.01 XLM `register_callback` write cost |
 //!
 //! Implementation is hand-rolled (no external crate) to stay within the
-//! no_std / wasm-size budget.  See fixtures in the unit tests below.
+//! `no_std` / wasm-size budget.  See fixtures in the unit tests below.
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::types::{CallbackPayload, ContractError};
 
-/// Maximum length (in bytes) for a `transaction_id` field (UUIDv4 is 36 chars).
+/// Maximum length (in bytes) for a `transaction_id` field (`UUIDv4` is 36 chars).
 const MAX_TX_ID_LEN: u32 = 64;
 /// Maximum length for `anchor_transaction_id` (opaque AP ID, typically ≤ 36).
 const MAX_ANCHOR_TX_ID_LEN: u32 = 64;
-/// Maximum length for `callback_status` (short code, e.g. "pending_external").
+/// Maximum length for `callback_status` (short code, e.g. `"pending_external"`).
 const MAX_CALLBACK_STATUS_LEN: u32 = 32;
 /// Maximum length for `stellar_tx_hash` (SHA-256 hex is 64 chars).
 const MAX_STELLAR_TX_HASH_LEN: u32 = 72;
 /// Maximum length for `failure_reason` (short human-readable code).
 const MAX_FAILURE_REASON_LEN: u32 = 64;
-/// Maximum length of a single transaction tag.
-pub const MAX_TAG_LEN: u32 = 32;
-/// Maximum number of tags per transaction.
-pub const MAX_TAGS_PER_TX: u32 = 8;
+
+// ─── Batch resource budget (#173) ─────────────────────────────────────────────
+//
+// `MAX_BATCH_SIZE` bounds how many items a batch holds, not how expensive
+// they are. The estimate below is a deliberately conservative, O(n) upper
+// bound on the bytes a batch writes to the ledger and emits as events,
+// computed from `String::len()` alone. It is not a simulator: it may
+// over-count and reject a batch that would have fit, never the reverse.
+// See COST_MODEL.md §11.1.
+
+/// Fixed per-item write overhead (bytes): XDR framing of the `Transaction`
+/// record and its key, the fixed-width fields (amount, ledgers, enums), and
+/// the idempotency-key temporary entry.
+pub const BATCH_ITEM_WRITE_OVERHEAD: u32 = 256;
+/// Fixed per-item event overhead (bytes): topics plus XDR framing and the
+/// fixed-width fields of `EventTransactionRegistered`.
+pub const BATCH_ITEM_EVENT_OVERHEAD: u32 = 128;
+/// Fixed per-batch event overhead (bytes) for the `EventBatchProcessed`
+/// summary, excluding its two tx-id strings.
+pub const BATCH_SUMMARY_EVENT_OVERHEAD: u32 = 128;
+/// Write-bytes safety budget per batch: half of Soroban's 65 536-byte
+/// per-transaction write limit (the lowest value it has had on mainnet).
+pub const BATCH_WRITE_BUDGET_BYTES: u32 = 32_768;
+/// Event-bytes safety budget per batch: half of Soroban's 16 384-byte
+/// per-transaction contract-events limit.
+pub const BATCH_EVENT_BUDGET_BYTES: u32 = 8_192;
+
+/// Conservative worst-case resource estimate for a batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchCostEstimate {
+    /// Estimated ledger write bytes.
+    pub write_bytes: u32,
+    /// Estimated contract-event bytes.
+    pub event_bytes: u32,
+}
 
 /// Encoded ed25519 public-key strkey length (SEP-23).
 const STRKEY_ENCODED_LEN: u32 = 56;
@@ -71,7 +102,7 @@ fn enforce_max_length(field: &String, max: u32) -> Result<(), ContractError> {
 
 /// Map a single RFC 4648 base32 alphabet character to its 5-bit value.
 #[inline]
-fn base32_value(c: u8) -> Result<u8, ()> {
+const fn base32_value(c: u8) -> Result<u8, ()> {
     match c {
         b'A'..=b'Z' => Ok(c - b'A'),
         b'2'..=b'7' => Ok(c - b'2' + 26),
@@ -89,7 +120,7 @@ fn base32_decode_strkey(
     let mut out_idx = 0usize;
 
     for &c in encoded {
-        let val = base32_value(c)? as u32;
+        let val = u32::from(base32_value(c)?);
         bit_buffer = (bit_buffer << 5) | val;
         bits_in_buffer += 5;
         if bits_in_buffer >= 8 {
@@ -110,7 +141,7 @@ fn base32_decode_strkey(
 fn crc16_xmodem(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for &byte in data {
-        crc ^= (byte as u16) << 8;
+        crc ^= u16::from(byte) << 8;
         for _ in 0..8 {
             if crc & 0x8000 != 0 {
                 crc = (crc << 1) ^ CRC16_XMODEM_POLY;
@@ -160,9 +191,10 @@ impl Validator {
         Ok(())
     }
 
-    /// Reject amounts above the per-anchor ceiling (anchor = `asset_issuer`);
-    /// anchors without an explicit entry use the contract-wide default.
-    /// Exactly-at-ceiling is allowed.
+    /// Reject amounts above the effective ceiling for the anchor
+    /// (anchor = `asset_issuer`): the stricter of its per-anchor ceiling, if
+    /// set, and the always-on global ceiling (#169). Exactly-at-ceiling is
+    /// allowed.
     pub fn validate_amount_ceiling(
         env: &Env,
         anchor: &String,
@@ -184,11 +216,11 @@ impl Validator {
         }
         let mut buf = [0u8; STRKEY_ENCODED_LEN as usize];
         account.copy_into_slice(&mut buf);
-        verify_ed25519_public_key_strkey(&buf).map_err(|_| ContractError::InvalidStellarAccount)
+        verify_ed25519_public_key_strkey(&buf).map_err(|()| ContractError::InvalidStellarAccount)
     }
 
     /// Amount must be strictly positive (> 0 stroops).
-    pub fn validate_amount(amount: i128) -> Result<(), ContractError> {
+    pub const fn validate_amount(amount: i128) -> Result<(), ContractError> {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
@@ -211,7 +243,7 @@ impl Validator {
         Ok(())
     }
 
-    /// Issuer: must be a valid G-address (same rule as stellar_account).
+    /// Issuer: must be a valid G-address (same rule as `stellar_account`).
     pub fn validate_asset_issuer(env: &Env, issuer: &String) -> Result<(), ContractError> {
         Self::validate_stellar_account(env, issuer).map_err(|_| ContractError::InvalidAssetIssuer)
     }
@@ -250,25 +282,54 @@ impl Validator {
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
     }
 
-    /// Tag: non-empty, length-capped, and the tx must have room for one more.
-    pub fn validate_tag(tag: &String, existing_count: u32) -> Result<(), ContractError> {
-        if tag.len() == 0 {
-            return Err(ContractError::EmptyTag);
+    /// Conservative worst-case resource estimate for `payloads`; see
+    /// [`BatchCostEstimate`]. Saturates instead of overflowing, so an absurd
+    /// batch estimates as `u32::MAX` and is always rejected.
+    ///
+    /// Each string is weighted by how many times it is written:
+    /// `transaction_id` appears in the storage key, the record, and the
+    /// event; `stellar_account`, `asset_code` and `anchor_transaction_id` in
+    /// the record and the event; the rest once.
+    pub fn estimate_batch_cost(payloads: &Vec<CallbackPayload>) -> BatchCostEstimate {
+        let mut write: u32 = 0;
+        let mut event: u32 = BATCH_SUMMARY_EVENT_OVERHEAD;
+        for (i, p) in payloads.iter().enumerate() {
+            let tx_id = p.transaction_id.len();
+            let shared = p
+                .stellar_account
+                .len()
+                .saturating_add(p.asset_code.len())
+                .saturating_add(p.anchor_transaction_id.len());
+            write = write
+                .saturating_add(BATCH_ITEM_WRITE_OVERHEAD)
+                .saturating_add(tx_id.saturating_mul(2))
+                .saturating_add(shared)
+                .saturating_add(p.asset_issuer.len())
+                .saturating_add(p.callback_status.len())
+                .saturating_add(p.idempotency_key.len());
+            event = event
+                .saturating_add(BATCH_ITEM_EVENT_OVERHEAD)
+                .saturating_add(tx_id)
+                .saturating_add(shared);
+            // First and last tx ids are repeated in the summary event.
+            if i == 0 || i + 1 == payloads.len() as usize {
+                event = event.saturating_add(tx_id);
+            }
         }
-        enforce_max_length(tag, MAX_TAG_LEN)?;
-        if existing_count >= MAX_TAGS_PER_TX {
-            return Err(ContractError::TooManyTags);
+        BatchCostEstimate {
+            write_bytes: write,
+            event_bytes: event,
         }
-        Ok(())
     }
 
-    /// Partial settlement: require `0 < settled < original`.
-    ///
-    /// Equal amounts must use `complete_transaction`; greater amounts are a
-    /// different bug class and are rejected too.
-    pub fn validate_settled_amount(settled: i128, original: i128) -> Result<(), ContractError> {
-        if settled <= 0 || settled >= original {
-            return Err(ContractError::InvalidSettledAmount);
+    /// Reject a batch whose [`Self::estimate_batch_cost`] exceeds either
+    /// safety budget. Exactly-at-budget is allowed.
+    pub fn validate_batch_budget(payloads: &Vec<CallbackPayload>) -> Result<(), ContractError> {
+        let cost = Self::estimate_batch_cost(payloads);
+        if cost.write_bytes > BATCH_WRITE_BUDGET_BYTES
+            || cost.event_bytes > BATCH_EVENT_BUDGET_BYTES
+        {
+            return Err(ContractError::BatchBudgetExceeded);
         }
         Ok(())
     }
@@ -281,7 +342,7 @@ impl Validator {
     /// against here. What *is* checkable is the contract's own address: it
     /// cannot practically sign a transaction to call `accept_admin`, so
     /// nominating it would permanently brick every admin-gated operation
-    /// (THREAT_MODEL.md finding F-02).
+    /// (`THREAT_MODEL.md` finding F-02).
     pub fn validate_admin_nominee(env: &Env, nominee: &Address) -> Result<(), ContractError> {
         if *nominee == env.current_contract_address() {
             return Err(ContractError::InvalidAdminNominee);

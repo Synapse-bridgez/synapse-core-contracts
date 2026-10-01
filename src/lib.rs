@@ -33,6 +33,16 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod bench_events;
+#[cfg(test)]
+mod schema_ci;
+#[cfg(test)]
+mod test_amount_ceiling;
+#[cfg(test)]
+mod test_batch_budget;
+#[cfg(test)]
+mod test_dispute_queue;
+#[cfg(test)]
 mod test_events_conformance;
 #[cfg(test)]
 mod test_pause;
@@ -47,14 +57,15 @@ mod tests_invariants;
 #[cfg(test)]
 mod tests_state_machine;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
-use crate::storage::StorageClient;
+use crate::storage::{StorageClient, PARAM_GLOBAL_MAX_AMOUNT};
 use crate::types::{
-    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, ParamEntry, SlashEvidence,
-    Transaction, TransactionStatus, UnbondRequest, SCHEMA_VERSION,
+    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, DisputeRecord, ParamEntry,
+    SlashEvidence, Transaction, TransactionStatus, UnbondRequest, MAX_BATCH_SIZE,
+    MAX_OPEN_DISPUTES, MAX_PAGE_LIMIT, SCHEMA_VERSION,
 };
 use crate::validation::Validator;
 
@@ -62,7 +73,7 @@ use crate::validation::Validator;
 /// Used when the `unbond_delay_ledgers` param has not been set by the admin.
 const DEFAULT_UNBOND_DELAY_LEDGERS: i128 = 17_280;
 
-/// Default slash percentage in basis points (10_000 = 100 %).
+/// Default slash percentage in basis points (`10_000` = 100 %).
 /// Used when the `slash_bps` param has not been set by the admin.
 const DEFAULT_SLASH_BPS: i128 = 10_000;
 
@@ -70,7 +81,7 @@ const DEFAULT_SLASH_BPS: i128 = 10_000;
 /// Operators may also store arbitrary application-level params under other names.
 const PARAM_UNBOND_DELAY: &str = "unbond_delay_ledgers";
 const PARAM_SLASH_BPS: &str = "slash_bps";
-#[allow(dead_code)]
+#[allow(dead_code)] // documented well-known name; read off-chain until fee accrual lands (#141)
 const PARAM_BASE_FEE_BPS: &str = "base_fee_bps";
 
 /// Maximum length (bytes) for a param name string.
@@ -84,6 +95,7 @@ const MAX_TIER_LABEL_LEN: u32 = 16;
 pub struct SynapseCoreContract;
 
 #[contractimpl]
+#[allow(clippy::needless_pass_by_value)] // the Soroban contract ABI requires by-value arguments
 impl SynapseCoreContract {
     // ── Initialisation ────────────────────────────────────────────────────────
 
@@ -92,6 +104,9 @@ impl SynapseCoreContract {
     /// * `admin`        — Address that may call privileged methods.
     /// * `relay_signer` — Address of the trusted off-chain relay that forwards
     ///                    Anchor Platform callbacks on-chain.
+    ///
+    /// # Errors
+    /// - [`ContractError::AlreadyInitialised`] if called a second time.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -129,10 +144,17 @@ impl SynapseCoreContract {
     /// the check above and reach the write below. To prevent that write from
     /// silently overwriting an existing (possibly `Completed`/`Failed`)
     /// record, `transaction_id` reuse is also rejected independently of
-    /// idempotency-key state (THREAT_MODEL.md finding F-07).
+    /// idempotency-key state (`THREAT_MODEL.md` finding F-07).
     ///
     /// # Events
     /// Emits [`events::TransactionRegistered`] on first write.
+    ///
+    /// # Errors
+    /// - [`ContractError::ContractPaused`] while the emergency pause is engaged.
+    /// - [`ContractError::NotInitialised`] before `initialize`.
+    /// - Any payload-validation error from [`Validator::validate_payload`], including
+    ///   [`ContractError::AmountCeilingExceeded`].
+    /// - [`ContractError::DuplicateRequest`] if `transaction_id` already exists.
     pub fn register_callback(env: Env, payload: CallbackPayload) -> Result<String, ContractError> {
         // Circuit breaker: while the emergency pause is engaged we fail closed
         // and reject all new callback ingestion outright. This check is first so
@@ -152,7 +174,7 @@ impl SynapseCoreContract {
         // Idempotency: a replayed key returns the original tx id without a
         // second write, mirroring the off-chain Redis idempotency behaviour.
         if StorageClient::get_idempotency_key(&env, &payload.idempotency_key).is_some() {
-            return Ok(payload.transaction_id.clone());
+            return Ok(payload.transaction_id);
         }
 
         // Second-line guard (F-07): the idempotency key's TTL is much shorter
@@ -163,28 +185,77 @@ impl SynapseCoreContract {
             return Err(ContractError::DuplicateRequest);
         }
 
-        let ledger = env.ledger().sequence();
-        let tx = Transaction {
-            id: payload.transaction_id.clone(),
-            stellar_account: payload.stellar_account.clone(),
-            amount: payload.amount,
-            asset_code: payload.asset_code.clone(),
-            asset_issuer: payload.asset_issuer.clone(),
-            status: TransactionStatus::Pending,
-            created_at_ledger: ledger,
-            updated_at_ledger: ledger,
-            anchor_transaction_id: payload.anchor_transaction_id.clone(),
-            callback_type: payload.callback_type.clone(),
-            callback_status: payload.callback_status.clone(),
-            stellar_tx_hash: String::from_str(&env, ""),
-            failure_reason: String::from_str(&env, ""),
-        };
+        Ok(write_pending(&env, &payload))
+    }
 
-        StorageClient::save_transaction(&env, &tx);
-        StorageClient::set_idempotency_key(&env, &payload.idempotency_key);
-        EventEmitter::transaction_registered(&env, &tx);
+    /// Register up to [`MAX_BATCH_SIZE`] callbacks atomically.
+    ///
+    /// Relay signer only. Every check below runs before any storage write,
+    /// so any failure aborts the whole call with no partial writes. Unlike
+    /// [`Self::register_callback`], a replayed idempotency key is not a
+    /// silent success here: every item must be new.
+    ///
+    /// # Events
+    /// Emits [`events::EventTransactionRegistered`] per payload followed by
+    /// one [`events::EventBatchProcessed`].
+    ///
+    /// # Errors
+    /// - [`ContractError::ContractPaused`] while the emergency pause is engaged.
+    /// - [`ContractError::NotRelaySigner`] if `caller` is not the relay signer.
+    /// - [`ContractError::InvalidBatchSize`] for an empty batch or one larger
+    ///   than [`MAX_BATCH_SIZE`].
+    /// - [`ContractError::BatchBudgetExceeded`] if the batch's conservative
+    ///   worst-case write/event byte estimate exceeds the safety budget,
+    ///   regardless of item count (see [`Validator::estimate_batch_cost`] and
+    ///   `COST_MODEL.md` §11.1).
+    /// - Any payload-validation error from [`Validator::validate_payload`].
+    /// - [`ContractError::DuplicateRequest`] if a `transaction_id` or
+    ///   idempotency key already exists on-chain or repeats within the batch.
+    pub fn batch_register_callback(
+        env: Env,
+        payloads: Vec<CallbackPayload>,
+        caller: Address,
+    ) -> Result<u32, ContractError> {
+        if StorageClient::is_paused(&env) {
+            return Err(ContractError::ContractPaused);
+        }
+        AdminClient::require_relay_signer(&env, &caller)?;
 
-        Ok(tx.id)
+        let n = payloads.len();
+        if n == 0 || n > MAX_BATCH_SIZE {
+            return Err(ContractError::InvalidBatchSize);
+        }
+        Validator::validate_batch_budget(&payloads)?;
+
+        // Pass 1: validate everything; no writes.
+        for i in 0..n {
+            let p = payloads.get_unchecked(i);
+            Validator::validate_payload(&env, &p)?;
+            if StorageClient::get_idempotency_key(&env, &p.idempotency_key).is_some()
+                || StorageClient::transaction_exists(&env, &p.transaction_id)
+            {
+                return Err(ContractError::DuplicateRequest);
+            }
+            for j in 0..i {
+                let q = payloads.get_unchecked(j);
+                if q.transaction_id == p.transaction_id || q.idempotency_key == p.idempotency_key {
+                    return Err(ContractError::DuplicateRequest);
+                }
+            }
+        }
+
+        // Pass 2: write.
+        for p in payloads.iter() {
+            write_pending(&env, &p);
+        }
+        EventEmitter::batch_processed(
+            &env,
+            &caller,
+            n,
+            &payloads.get_unchecked(0).transaction_id,
+            &payloads.get_unchecked(n - 1).transaction_id,
+        );
+        Ok(n)
     }
 
     // ── Status transitions ────────────────────────────────────────────────────
@@ -193,6 +264,11 @@ impl SynapseCoreContract {
     ///
     /// Called by the relay when the off-chain processor picks up the job.
     /// Enforces the state machine: only `Pending → Processing` is valid here.
+    ///
+    /// # Errors
+    /// - [`ContractError::Unauthorised`] if `caller` is neither admin nor relay.
+    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
+    /// - [`ContractError::InvalidStatusTransition`] unless the transaction is `Pending`.
     pub fn start_processing(env: Env, tx_id: String, caller: Address) -> Result<(), ContractError> {
         AdminClient::assert_is_relay_or_admin(&env, &caller)?;
 
@@ -214,6 +290,12 @@ impl SynapseCoreContract {
     ///
     /// `stellar_tx_hash` — the Stellar transaction hash confirming the deposit
     ///                     was settled on Horizon. Stored for auditability.
+    ///
+    /// # Errors
+    /// - [`ContractError::Unauthorised`] if `caller` is neither admin nor relay.
+    /// - [`ContractError::StringTooLong`] if `stellar_tx_hash` exceeds its cap.
+    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
+    /// - [`ContractError::InvalidStatusTransition`] unless the transaction is `Processing`.
     pub fn complete_transaction(
         env: Env,
         tx_id: String,
@@ -241,8 +323,14 @@ impl SynapseCoreContract {
 
     /// Mark a `Pending` or `Processing` transaction as `Failed`.
     ///
-    /// `reason` — short human-readable failure code (e.g. "horizon_timeout",
-    ///            "invalid_account", "circuit_open").
+    /// `reason` — short human-readable failure code (e.g. `"horizon_timeout"`,
+    ///            `"invalid_account"`, `"circuit_open"`).
+    ///
+    /// # Errors
+    /// - [`ContractError::Unauthorised`] if `caller` is neither admin nor relay.
+    /// - [`ContractError::StringTooLong`] if `reason` exceeds its cap.
+    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
+    /// - [`ContractError::InvalidStatusTransition`] unless `Pending` or `Processing`.
     pub fn fail_transaction(
         env: Env,
         tx_id: String,
@@ -268,10 +356,145 @@ impl SynapseCoreContract {
         Ok(())
     }
 
+    // ── Disputes (#166) ───────────────────────────────────────────────────────
+
+    /// Open a dispute against a `Completed` transaction, adding it to the
+    /// tail of the dispute queue.
+    ///
+    /// The stored status stays `Completed` while disputed; the dispute is an
+    /// overlay record. Callable by the relay signer or admin. `reason` is a
+    /// short code, length-capped like `fail_transaction`'s reason.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStatusTransition`] if not `Completed`.
+    /// - [`ContractError::AlreadyDisputed`] if already under dispute.
+    /// - [`ContractError::DisputeQueueFull`] if [`MAX_OPEN_DISPUTES`] are open.
+    ///
+    /// # Events
+    /// Emits [`events::EventDisputeRaised`].
+    pub fn dispute_transaction(
+        env: Env,
+        tx_id: String,
+        reason: String,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
+        Validator::validate_failure_reason(&reason)?;
+
+        let tx = StorageClient::get_transaction(&env, &tx_id)?;
+        if tx.status != TransactionStatus::Completed {
+            return Err(ContractError::InvalidStatusTransition);
+        }
+        if StorageClient::get_dispute(&env, &tx_id).is_some() {
+            return Err(ContractError::AlreadyDisputed);
+        }
+        if StorageClient::get_dispute_queue(&env).len() >= MAX_OPEN_DISPUTES {
+            return Err(ContractError::DisputeQueueFull);
+        }
+
+        let record = DisputeRecord {
+            seq: StorageClient::next_dispute_seq(&env),
+            reason: reason.clone(),
+            raised_by: caller.clone(),
+            raised_at_ledger: env.ledger().sequence(),
+            raised_at_timestamp: env.ledger().timestamp(),
+        };
+        StorageClient::open_dispute(&env, &tx_id, &record);
+        EventEmitter::dispute_raised(&env, &tx_id, &reason, &caller);
+        Ok(())
+    }
+
+    /// Resolve an open dispute and remove it from the queue. **Admin only.**
+    ///
+    /// If `upheld`, the transaction moves `Completed → Failed` with reason
+    /// `dispute_upheld`; otherwise it stays `Completed`, unchanged.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotDisputed`] if `tx_id` is not under dispute.
+    ///
+    /// # Events
+    /// Emits [`events::EventStatusChanged`] (upheld only) then
+    /// [`events::EventDisputeResolved`].
+    pub fn resolve_dispute(env: Env, tx_id: String, upheld: bool) -> Result<(), ContractError> {
+        let admin = AdminClient::require_admin(&env)?;
+        let record = StorageClient::get_dispute(&env, &tx_id).ok_or(ContractError::NotDisputed)?;
+        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
+
+        StorageClient::close_dispute(&env, &tx_id, record.seq);
+        if upheld {
+            let old_status = tx.status.clone();
+            tx.status = TransactionStatus::Failed;
+            tx.failure_reason = String::from_str(&env, "dispute_upheld");
+            tx.updated_at_ledger = env.ledger().sequence();
+            StorageClient::save_transaction(&env, &tx);
+            EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
+        }
+        EventEmitter::dispute_resolved(&env, &tx_id, upheld, &admin);
+        Ok(())
+    }
+
     // ── Read-only queries ─────────────────────────────────────────────────────
+
+    /// Whether `tx_id` is currently under dispute.
+    pub fn is_disputed(env: Env, tx_id: String) -> bool {
+        StorageClient::get_dispute(&env, &tx_id).is_some()
+    }
+
+    /// Return the open [`DisputeRecord`] for `tx_id`, or `None`.
+    pub fn get_dispute(env: Env, tx_id: String) -> Option<DisputeRecord> {
+        StorageClient::get_dispute(&env, &tx_id)
+    }
+
+    /// Page through open disputes, oldest raised first.
+    ///
+    /// Returns up to `limit` transaction ids whose dispute sequence is
+    /// `>= cursor`, plus the cursor for the next page (`None` when there are
+    /// no more). Start with `cursor = 0`. Cursors are dispute sequence
+    /// numbers, so resolving a dispute between pages never skips or repeats
+    /// another entry. Resolved disputes leave the queue immediately.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidPageLimit`] if `limit` is `0` or exceeds
+    ///   [`MAX_PAGE_LIMIT`].
+    pub fn get_dispute_queue(
+        env: Env,
+        cursor: u64,
+        limit: u32,
+    ) -> Result<(Vec<String>, Option<u64>), ContractError> {
+        if limit == 0 || limit > MAX_PAGE_LIMIT {
+            return Err(ContractError::InvalidPageLimit);
+        }
+        let mut page = Vec::new(&env);
+        for entry in StorageClient::get_dispute_queue(&env).iter() {
+            if entry.seq < cursor {
+                continue;
+            }
+            if page.len() == limit {
+                return Ok((page, Some(entry.seq)));
+            }
+            page.push_back(entry.tx_id);
+        }
+        Ok((page, None))
+    }
+
+    /// Return the effective amount ceiling for `anchor` (an `asset_issuer`):
+    /// the stricter of its per-anchor ceiling, if set, and the global
+    /// `global_max_amount` ceiling.
+    pub fn get_amount_ceiling(env: Env, anchor: String) -> i128 {
+        StorageClient::get_amount_ceiling(&env, &anchor)
+    }
+
+    /// Return the contract-wide `global_max_amount` ceiling: the param value
+    /// if set, else [`types::DEFAULT_GLOBAL_MAX_AMOUNT`].
+    pub fn get_global_max_amount(env: Env) -> i128 {
+        StorageClient::get_global_max_amount(&env)
+    }
 
     /// Return the [`Transaction`] for the given `tx_id`, or
     /// [`ContractError::TransactionNotFound`].
+    ///
+    /// # Errors
+    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
     pub fn get_transaction(env: Env, tx_id: String) -> Result<Transaction, ContractError> {
         // Read-only: intentionally NOT gated by the pause flag — pausing must
         // never brick reads.
@@ -279,6 +502,9 @@ impl SynapseCoreContract {
     }
 
     /// Return the current [`TransactionStatus`] without fetching the full record.
+    ///
+    /// # Errors
+    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
     pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
         StorageClient::get_transaction(&env, &tx_id).map(|tx| tx.status)
     }
@@ -293,12 +519,18 @@ impl SynapseCoreContract {
     /// Read-only: lets off-chain monitoring and deployment tooling verify the
     /// on-chain admin against the value recorded in `contract-ids.json`
     /// without needing to trust that record alone.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
     pub fn admin(env: Env) -> Result<Address, ContractError> {
         StorageClient::get_admin(&env)
     }
 
     /// Return the current trusted relay signer address, or
     /// [`ContractError::NotInitialised`].
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
     pub fn relay_signer(env: Env) -> Result<Address, ContractError> {
         StorageClient::get_relay_signer(&env)
     }
@@ -306,6 +538,9 @@ impl SynapseCoreContract {
     /// Return the current on-chain storage schema version, or
     /// [`ContractError::NotInitialised`]. The value `upgrade()` requires
     /// callers to pass as `expected_schema_version`.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
     pub fn schema_version(env: Env) -> Result<u32, ContractError> {
         StorageClient::get_schema_version(&env)
     }
@@ -323,7 +558,7 @@ impl SynapseCoreContract {
     /// The transfer does not take effect here — it only completes once
     /// `new_admin` itself calls [`Self::accept_admin`], proving it controls
     /// the corresponding key. A single call from the current admin can no
-    /// longer finalise a transfer on its own (THREAT_MODEL.md finding F-03),
+    /// longer finalise a transfer on its own (`THREAT_MODEL.md` finding F-03),
     /// which also rules out the classic mis-typed-address failure mode: a
     /// wrong address can never accept, so the current admin simply stays in
     /// control and can propose again.
@@ -334,6 +569,10 @@ impl SynapseCoreContract {
     ///
     /// # Events
     /// Emits [`events::EventAdminTransferProposed`].
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
+    /// - [`ContractError::InvalidAdminNominee`] if `new_admin` is this contract.
     pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
         let current_admin = AdminClient::require_admin(&env)?;
         Validator::validate_admin_nominee(&env, &new_admin)?;
@@ -373,6 +612,9 @@ impl SynapseCoreContract {
     /// # Events
     /// Emits [`events::EventRelaySignerRotated`] so off-chain monitoring can
     /// observe the rotation the same way it does [`Self::accept_admin`].
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
     pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), ContractError> {
         AdminClient::require_admin(&env)?;
         let old_signer = StorageClient::get_relay_signer(&env)?;
@@ -387,12 +629,12 @@ impl SynapseCoreContract {
     ///
     /// Only the current admin may call this.  The new WASM **must** be compatible
     /// with the existing storage schema (`StorageKey` variants, `Transaction`
-    /// struct layout).  Persistent storage (admin, relay_signer, transactions)
+    /// struct layout).  Persistent storage (admin, `relay_signer`, transactions)
     /// and instance storage (init flag, pause flag) survive intact; temporary
     /// storage (idempotency keys) is evicted.
     ///
     /// `expected_schema_version` must match the on-chain `SchemaVersion`
-    /// (THREAT_MODEL.md finding F-04). This cannot validate that the *new*
+    /// (`THREAT_MODEL.md` finding F-04). This cannot validate that the *new*
     /// WASM is actually compatible — Soroban gives the running code no way to
     /// introspect an uploaded-but-not-yet-installed WASM blob — but it does
     /// guard against invoking `upgrade()` against a contract instance whose
@@ -405,6 +647,10 @@ impl SynapseCoreContract {
     /// Because this entry point allows the admin to deploy arbitrary WASM, the
     /// admin key **MUST** be held by a multisig or DAO.  See `DECISIONS.md` for
     /// the full rationale and `README.md` for operational requirements.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
+    /// - [`ContractError::SchemaVersionMismatch`] if `expected_schema_version` differs.
     pub fn upgrade(
         env: Env,
         new_wasm_hash: BytesN<32>,
@@ -431,6 +677,9 @@ impl SynapseCoreContract {
     /// **deliberately left running** so already-registered work can drain during
     /// an incident, and all read-only queries stay available. Idempotent: pausing
     /// an already-paused contract is a no-op success.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
     pub fn pause(env: Env) -> Result<(), ContractError> {
         let admin = AdminClient::require_admin(&env)?;
         StorageClient::set_paused(&env, true);
@@ -440,6 +689,9 @@ impl SynapseCoreContract {
 
     /// Release the emergency circuit breaker, resuming normal callback
     /// ingestion.  Admin-gated. Idempotent.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         let admin = AdminClient::require_admin(&env)?;
         StorageClient::set_paused(&env, false);
@@ -464,6 +716,26 @@ impl SynapseCoreContract {
         String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 
+    // ── Amount ceilings (#169) ────────────────────────────────────────────────
+
+    /// Set the maximum registrable amount for `anchor` (identified by the
+    /// payload's `asset_issuer`). Admin-gated. Applies to future
+    /// registrations only. The global `global_max_amount` ceiling still
+    /// applies on top: whichever is lower wins.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidAmount`] if `ceiling <= 0`.
+    pub fn set_anchor_amount_ceiling(
+        env: Env,
+        anchor: String,
+        ceiling: i128,
+    ) -> Result<(), ContractError> {
+        AdminClient::require_admin(&env)?;
+        Validator::validate_amount(ceiling)?;
+        StorageClient::set_anchor_ceiling(&env, &anchor, ceiling);
+        Ok(())
+    }
+
     // ── Wave 2: Param Registry (#146) ─────────────────────────────────────────
 
     /// Set (or update) a named parameter in the on-chain registry.
@@ -475,8 +747,13 @@ impl SynapseCoreContract {
     /// | Name                    | Semantics                                     |
     /// |-------------------------|-----------------------------------------------|
     /// | `unbond_delay_ledgers`  | Ledgers before an unbond request is claimable |
-    /// | `slash_bps`             | Slash percentage in basis points (0–10_000)   |
+    /// | `slash_bps`             | Slash percentage in basis points (`0–10_000`)   |
     /// | `base_fee_bps`          | Base fee rate in basis points                 |
+    /// | `global_max_amount`     | Contract-wide max registrable amount (> 0)    |
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidParamName`] — empty or over-long name.
+    /// - [`ContractError::InvalidParamValue`] — `global_max_amount <= 0`.
     ///
     /// # Events
     /// Emits [`events::EventParamSet`].
@@ -485,6 +762,9 @@ impl SynapseCoreContract {
 
         if name.is_empty() || name.len() > MAX_PARAM_NAME_LEN {
             return Err(ContractError::InvalidParamName);
+        }
+        if value <= 0 && name == String::from_str(&env, PARAM_GLOBAL_MAX_AMOUNT) {
+            return Err(ContractError::InvalidParamValue);
         }
 
         let entry = ParamEntry {
@@ -522,6 +802,9 @@ impl SynapseCoreContract {
     ///
     /// # Events
     /// Emits [`events::EventBonded`].
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidBondAmount`] if `amount <= 0`.
     pub fn bond_collateral(env: Env, signer: Address, amount: i128) -> Result<(), ContractError> {
         signer.require_auth();
 
@@ -590,12 +873,14 @@ impl SynapseCoreContract {
 
         // Read the delay from the param registry, falling back to the default.
         let delay = StorageClient::get_param(&env, &String::from_str(&env, PARAM_UNBOND_DELAY))
-            .map(|e| e.value)
-            .unwrap_or(DEFAULT_UNBOND_DELAY_LEDGERS);
+            .map_or(DEFAULT_UNBOND_DELAY_LEDGERS, |e| e.value);
 
         let now = env.ledger().sequence();
-        // Saturating cast: delay is always positive and fits a u32 in practice.
-        let claimable_at = now.saturating_add(delay as u32);
+        // Fail closed: a negative or > u32::MAX delay (the param registry
+        // accepts any i128) saturates to "never claimable" rather than
+        // truncating to an arbitrary short delay.
+        let delay = u32::try_from(delay).unwrap_or(u32::MAX);
+        let claimable_at = now.saturating_add(delay);
 
         let request = UnbondRequest {
             amount,
@@ -675,8 +960,8 @@ impl SynapseCoreContract {
     ///    `asset_issuer`, `anchor_transaction_id`, `callback_status` differs
     ///    between `payload_a` and `payload_b`.
     ///
-    /// The slash percentage is read from the `slash_bps` param (0–10_000),
-    /// defaulting to 10_000 (100 %) if not set.
+    /// The slash percentage is read from the `slash_bps` param (`0–10_000`),
+    /// defaulting to `10_000` (100 %) if not set.
     ///
     /// # Auth
     /// Admin-gated. A future wave may add guardian-quorum multi-sig here.
@@ -725,8 +1010,7 @@ impl SynapseCoreContract {
 
         // 4. Compute the slash amount.
         let slash_bps = StorageClient::get_param(&env, &String::from_str(&env, PARAM_SLASH_BPS))
-            .map(|e| e.value)
-            .unwrap_or(DEFAULT_SLASH_BPS)
+            .map_or(DEFAULT_SLASH_BPS, |e| e.value)
             .clamp(0, 10_000);
 
         let slashed_amount = (record.amount * slash_bps) / 10_000;
@@ -765,6 +1049,11 @@ impl SynapseCoreContract {
     ///
     /// # Events
     /// Emits [`events::EventAnchorTierSet`].
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
+    /// - [`ContractError::InvalidRebateBps`] if `rebate_bps > 10_000`.
+    /// - [`ContractError::InvalidTierLabel`] if `label` exceeds 16 bytes.
     pub fn set_anchor_tier(
         env: Env,
         anchor: Address,
@@ -809,6 +1098,9 @@ impl SynapseCoreContract {
     /// The `base_fee` parameter is denominated in the same unit as the
     /// `base_fee_bps` param (basis points of the transaction amount). Callers
     /// should read `base_fee_bps` via `get_param` and pass the result here.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidAmount`] if `base_fee < 0`.
     pub fn compute_effective_fee(
         env: Env,
         anchor: Address,
@@ -821,7 +1113,7 @@ impl SynapseCoreContract {
         let (rebate_bps, effective_fee) = match StorageClient::get_anchor_tier(&env, &anchor) {
             Some(config) => {
                 let rebate = config.rebate_bps;
-                let fee = base_fee * (10_000 - rebate as i128) / 10_000;
+                let fee = base_fee * (10_000 - i128::from(rebate)) / 10_000;
                 (rebate, fee)
             }
             None => (0u32, base_fee),
@@ -830,4 +1122,30 @@ impl SynapseCoreContract {
         EventEmitter::rebate_applied(&env, &anchor, base_fee, effective_fee, rebate_bps);
         Ok(effective_fee)
     }
+}
+
+/// Persist a validated, not-yet-seen payload as a new `Pending` transaction,
+/// record its idempotency key, and emit [`events::EventTransactionRegistered`].
+fn write_pending(env: &Env, payload: &CallbackPayload) -> String {
+    let ledger = env.ledger().sequence();
+    let tx = Transaction {
+        id: payload.transaction_id.clone(),
+        stellar_account: payload.stellar_account.clone(),
+        amount: payload.amount,
+        asset_code: payload.asset_code.clone(),
+        asset_issuer: payload.asset_issuer.clone(),
+        status: TransactionStatus::Pending,
+        created_at_ledger: ledger,
+        updated_at_ledger: ledger,
+        anchor_transaction_id: payload.anchor_transaction_id.clone(),
+        callback_type: payload.callback_type.clone(),
+        callback_status: payload.callback_status.clone(),
+        stellar_tx_hash: String::from_str(env, ""),
+        failure_reason: String::from_str(env, ""),
+    };
+
+    StorageClient::save_transaction(env, &tx);
+    StorageClient::set_idempotency_key(env, &payload.idempotency_key);
+    EventEmitter::transaction_registered(env, &tx);
+    tx.id
 }

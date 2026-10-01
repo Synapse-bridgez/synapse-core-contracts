@@ -5,6 +5,10 @@ edition = "2021"
 rust-version = "1.81"
 license = "MIT"
 description = "Synapse Core – on-chain transaction registry and phase router for the Synapse Bridge ecosystem"
+repository = "https://github.com/Synapse-bridgez/synapse-core-contracts"
+readme = "README.md"
+keywords = ["soroban", "stellar", "smart-contract", "bridge"]
+categories = ["cryptography::cryptocurrencies"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -28,3 +32,25 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
+
+[lints.rust]
+# `cfg(quarantine)` gates tests for entry points removed by #197 until they
+# are restored; never set in CI. See QUARANTINE.md.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quarantine)"] }
+
+# ── Clippy (#175) ─────────────────────────────────────────────────────────────
+# `make clippy` / CI run with `-D warnings`, so every lint enabled here is a
+# hard gate. Groups are enabled wholesale at low priority; each exception
+# below is an individual, justified opt-out (never a group-level allow).
+# Narrower exceptions live as scoped `#[allow]`s next to the code, each with a
+# one-line justification. See CONTRIBUTING.md § Lints.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Duplicate versions all come from soroban-sdk's transitive dependency tree,
+# which this crate cannot unify.
+multiple_crate_versions = "allow"
+# `#[contractimpl]` fns are invoked by the Soroban host through the contract
+# ABI, where `#[must_use]` has no effect; on internal helpers it is noise.
+must_use_candidate = "allow"

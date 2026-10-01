@@ -5,7 +5,7 @@
 //! replay attempts. One section per entry point, so coverage gaps are visually
 //! obvious in code review.
 //!
-//! ## THREAT_MODEL.md cross-references
+//! ## `THREAT_MODEL.md` cross-references
 //!
 //! | Section in THREAT_MODEL.md          | Tests here                                     |
 //! |--------------------------------------|------------------------------------------------|
@@ -23,7 +23,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     Address, BytesN, Env, IntoVal, String,
 };
 
@@ -39,8 +39,6 @@ fn g_address(env: &Env) -> String {
         "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
     )
 }
-
-
 
 /// Build a clean contract environment with `mock_all_auths` for setup convenience.
 fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
@@ -126,7 +124,7 @@ fn register_via_relay(
 // THREAT_MODEL.md §4.1
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.1] Double-initialisation must be rejected regardless of
+/// [`THREAT_MODEL` §4.1] Double-initialisation must be rejected regardless of
 /// caller, preventing an attacker from re-setting admin/relay after deployment.
 #[test]
 fn auth_initialize_rejects_double_init_from_original_admin() {
@@ -135,7 +133,7 @@ fn auth_initialize_rejects_double_init_from_original_admin() {
     assert_eq!(result, Err(Ok(ContractError::AlreadyInitialised)));
 }
 
-/// [THREAT_MODEL §4.1] Double-initialisation by a completely unrelated attacker
+/// [`THREAT_MODEL` §4.1] Double-initialisation by a completely unrelated attacker
 /// must also be rejected (the guard is unconditional, not role-gated).
 #[test]
 fn auth_initialize_rejects_double_init_from_attacker() {
@@ -152,7 +150,7 @@ fn auth_initialize_rejects_double_init_from_attacker() {
 // THREAT_MODEL.md §4.2
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.2] Only the trusted relay signer may register callbacks.
+/// [`THREAT_MODEL` §4.2] Only the trusted relay signer may register callbacks.
 /// An unrelated attacker supplying its own auth must be rejected at the auth layer.
 #[test]
 fn auth_register_callback_attacker_auth_rejected() {
@@ -176,7 +174,7 @@ fn auth_register_callback_attacker_auth_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.2 / §2] The admin address cannot register callbacks — admin
+/// [`THREAT_MODEL` §4.2 / §2] The admin address cannot register callbacks — admin
 /// is not in the relay role; this covers cross-role confusion.
 #[test]
 fn auth_register_callback_admin_auth_rejected() {
@@ -198,12 +196,12 @@ fn auth_register_callback_admin_auth_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.2] A forged/mismatched relay signer — a caller claiming to
+/// [`THREAT_MODEL` §4.2] A forged/mismatched relay signer — a caller claiming to
 /// be the relay in the payload metadata but supplying a different key's auth —
 /// must be rejected.
 #[test]
 fn auth_register_callback_forged_relay_address_rejected() {
-    let (env, client, _admin, relay, contract_id) = setup_strict();
+    let (env, client, _admin, _relay, contract_id) = setup_strict();
     let forged_relay = Address::generate(&env);
     let payload = valid_payload(&env);
 
@@ -225,7 +223,7 @@ fn auth_register_callback_forged_relay_address_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.2] No auth at all — bare call with no MockAuth entries must
+/// [`THREAT_MODEL` §4.2] No auth at all — bare call with no `MockAuth` entries must
 /// fail at the host level.
 #[test]
 fn auth_register_callback_no_auth_rejected() {
@@ -241,11 +239,11 @@ fn auth_register_callback_no_auth_rejected() {
 // THREAT_MODEL.md §4.3
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.3] Unrelated bystander passed as `caller` must be rejected
+/// [`THREAT_MODEL` §4.3] Unrelated bystander passed as `caller` must be rejected
 /// because it is not in the admin/relay set — checks role membership check.
 #[test]
 fn auth_start_processing_bystander_as_caller_rejected() {
-    let (env, client, _admin, relay) = setup();
+    let (env, client, _admin, _relay) = setup();
     let payload = valid_payload(&env);
     let tx_id = client.register_callback(&payload);
 
@@ -254,7 +252,7 @@ fn auth_start_processing_bystander_as_caller_rejected() {
     assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
 }
 
-/// [THREAT_MODEL §4.3] Passing the relay address as `caller` with only the
+/// [`THREAT_MODEL` §4.3] Passing the relay address as `caller` with only the
 /// admin's auth supplied must fail — `caller.require_auth()` requires the
 /// relay's own signature, not a different role's.
 #[test]
@@ -279,9 +277,9 @@ fn auth_start_processing_caller_relay_but_admin_auth_supplied_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.3] Cross-role confusion — the relay passes admin's address
+/// [`THREAT_MODEL` §4.3] Cross-role confusion — the relay passes admin's address
 /// as `caller` but supplies the relay's own auth. The membership check rejects
-/// because `caller` (admin) ≠ relay, yet admin.require_auth() is not called here.
+/// because `caller` (admin) ≠ relay, yet `admin.require_auth()` is not called here.
 /// Actually, admin IS in the admin/relay set — so this variant tests that
 /// `caller.require_auth()` is called for the actual `caller` arg.
 #[test]
@@ -307,7 +305,7 @@ fn auth_start_processing_caller_admin_with_relay_auth_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.3] Correct relay auth, correct caller — must succeed.
+/// [`THREAT_MODEL` §4.3] Correct relay auth, correct caller — must succeed.
 #[test]
 fn auth_start_processing_correct_relay_auth_succeeds() {
     let (env, client, _admin, relay, contract_id) = setup_strict();
@@ -329,7 +327,7 @@ fn auth_start_processing_correct_relay_auth_succeeds() {
     assert_eq!(client.get_status(&tx_id), TransactionStatus::Processing);
 }
 
-/// [THREAT_MODEL §4.3] Admin as caller with admin auth — also valid (admin can
+/// [`THREAT_MODEL` §4.3] Admin as caller with admin auth — also valid (admin can
 /// drive transitions). This is the dual of the relay test above.
 #[test]
 fn auth_start_processing_admin_caller_with_admin_auth_succeeds() {
@@ -357,7 +355,7 @@ fn auth_start_processing_admin_caller_with_admin_auth_succeeds() {
 // THREAT_MODEL.md §4.3
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.3] Bystander as caller must be rejected before any state write.
+/// [`THREAT_MODEL` §4.3] Bystander as caller must be rejected before any state write.
 #[test]
 fn auth_complete_transaction_bystander_rejected() {
     let (env, client, _admin, relay) = setup();
@@ -371,7 +369,7 @@ fn auth_complete_transaction_bystander_rejected() {
     assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
 }
 
-/// [THREAT_MODEL §4.3] `caller` = relay but only admin auth present — must fail.
+/// [`THREAT_MODEL` §4.3] `caller` = relay but only admin auth present — must fail.
 #[test]
 fn auth_complete_transaction_caller_relay_admin_auth_rejected() {
     let (env, client, admin, relay, contract_id) = setup_strict();
@@ -406,7 +404,7 @@ fn auth_complete_transaction_caller_relay_admin_auth_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.3] Correct relay caller + relay auth — full success path.
+/// [`THREAT_MODEL` §4.3] Correct relay caller + relay auth — full success path.
 #[test]
 fn auth_complete_transaction_relay_auth_succeeds() {
     let (env, client, _admin, relay, contract_id) = setup_strict();
@@ -446,7 +444,7 @@ fn auth_complete_transaction_relay_auth_succeeds() {
 // THREAT_MODEL.md §4.3
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.3] Bystander cannot fail a transaction.
+/// [`THREAT_MODEL` §4.3] Bystander cannot fail a transaction.
 #[test]
 fn auth_fail_transaction_bystander_rejected() {
     let (env, client, _admin, _relay) = setup();
@@ -459,8 +457,8 @@ fn auth_fail_transaction_bystander_rejected() {
     assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
 }
 
-/// [THREAT_MODEL §4.3] `caller` = relay, auth = admin — must fail (same mismatched
-/// auth pattern as start_processing tests — validates no handler-specific gap).
+/// [`THREAT_MODEL` §4.3] `caller` = relay, auth = admin — must fail (same mismatched
+/// auth pattern as `start_processing` tests — validates no handler-specific gap).
 #[test]
 fn auth_fail_transaction_caller_relay_admin_auth_rejected() {
     let (env, client, admin, relay, contract_id) = setup_strict();
@@ -483,7 +481,7 @@ fn auth_fail_transaction_caller_relay_admin_auth_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.3] Relay caller with relay auth on `fail_transaction` succeeds.
+/// [`THREAT_MODEL` §4.3] Relay caller with relay auth on `fail_transaction` succeeds.
 #[test]
 fn auth_fail_transaction_relay_auth_succeeds() {
     let (env, client, _admin, relay, contract_id) = setup_strict();
@@ -511,7 +509,7 @@ fn auth_fail_transaction_relay_auth_succeeds() {
 // THREAT_MODEL.md §4.4
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.4] Relay signer cannot propose an admin transfer.
+/// [`THREAT_MODEL` §4.4] Relay signer cannot propose an admin transfer.
 /// Cross-role confusion: relay is in the system but not in the admin role.
 #[test]
 fn auth_propose_admin_relay_role_rejected() {
@@ -533,7 +531,7 @@ fn auth_propose_admin_relay_role_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.4] A completely unknown attacker cannot propose an admin transfer.
+/// [`THREAT_MODEL` §4.4] A completely unknown attacker cannot propose an admin transfer.
 #[test]
 fn auth_propose_admin_attacker_rejected() {
     let (env, client, _admin, _relay, contract_id) = setup_strict();
@@ -555,7 +553,7 @@ fn auth_propose_admin_attacker_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.4 / F-02] Nominating the contract address itself is rejected.
+/// [`THREAT_MODEL` §4.4 / F-02] Nominating the contract address itself is rejected.
 #[test]
 fn auth_propose_admin_contract_self_nomination_rejected() {
     let (_env, client, _admin, _relay) = setup();
@@ -568,7 +566,7 @@ fn auth_propose_admin_contract_self_nomination_rejected() {
 // THREAT_MODEL.md §4.4
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.4] A bystander cannot accept a pending admin transfer even if
+/// [`THREAT_MODEL` §4.4] A bystander cannot accept a pending admin transfer even if
 /// they forge a valid-looking `caller` argument.
 #[test]
 fn auth_accept_admin_bystander_as_caller_rejected() {
@@ -582,7 +580,7 @@ fn auth_accept_admin_bystander_as_caller_rejected() {
     assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
 }
 
-/// [THREAT_MODEL §4.4] The current admin cannot unilaterally finalise a transfer
+/// [`THREAT_MODEL` §4.4] The current admin cannot unilaterally finalise a transfer
 /// by passing itself as `caller` to `accept_admin` — must be rejected.
 /// This covers the "single-step admin transfer" finding F-03.
 #[test]
@@ -622,7 +620,7 @@ fn auth_accept_admin_old_admin_cannot_self_finalize() {
     assert_eq!(client.admin(), admin);
 }
 
-/// [THREAT_MODEL §4.4] The relay signer cannot accept a pending admin transfer
+/// [`THREAT_MODEL` §4.4] The relay signer cannot accept a pending admin transfer
 /// even if there happens to be one in progress.
 #[test]
 fn auth_accept_admin_relay_cannot_accept() {
@@ -639,7 +637,7 @@ fn auth_accept_admin_relay_cannot_accept() {
     assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
 }
 
-/// [THREAT_MODEL §4.4] When no transfer is pending, accept_admin must return
+/// [`THREAT_MODEL` §4.4] When no transfer is pending, `accept_admin` must return
 /// `NoPendingAdminTransfer` for any caller.
 #[test]
 fn auth_accept_admin_no_pending_transfer_rejected() {
@@ -648,7 +646,7 @@ fn auth_accept_admin_no_pending_transfer_rejected() {
     assert_eq!(result, Err(Ok(ContractError::NoPendingAdminTransfer)));
 }
 
-/// [THREAT_MODEL §4.4] A superseded (overwritten) pending nominee can no longer
+/// [`THREAT_MODEL` §4.4] A superseded (overwritten) pending nominee can no longer
 /// accept the transfer.
 #[test]
 fn auth_accept_admin_superseded_nominee_rejected() {
@@ -668,7 +666,7 @@ fn auth_accept_admin_superseded_nominee_rejected() {
 // THREAT_MODEL.md §4.4
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.4] The relay signer cannot rotate itself — admin-only.
+/// [`THREAT_MODEL` §4.4] The relay signer cannot rotate itself — admin-only.
 #[test]
 fn auth_set_relay_signer_relay_cannot_rotate_itself() {
     let (env, client, _admin, relay, contract_id) = setup_strict();
@@ -689,7 +687,7 @@ fn auth_set_relay_signer_relay_cannot_rotate_itself() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.4] An unknown attacker cannot rotate the relay signer.
+/// [`THREAT_MODEL` §4.4] An unknown attacker cannot rotate the relay signer.
 #[test]
 fn auth_set_relay_signer_attacker_rejected() {
     let (env, client, _admin, _relay, contract_id) = setup_strict();
@@ -711,8 +709,8 @@ fn auth_set_relay_signer_attacker_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.4] After relay rotation, the OLD relay can no longer call
-/// privileged operations (e.g. start_processing). This is the hardest "forged
+/// [`THREAT_MODEL` §4.4] After relay rotation, the OLD relay can no longer call
+/// privileged operations (e.g. `start_processing`). This is the hardest "forged
 /// signer" case — an old key that *was* valid but no longer is.
 #[test]
 fn auth_set_relay_signer_old_relay_locked_out_after_rotation() {
@@ -750,7 +748,7 @@ fn auth_set_relay_signer_old_relay_locked_out_after_rotation() {
     assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
 }
 
-/// [THREAT_MODEL §4.4] After relay rotation, the NEW relay can perform
+/// [`THREAT_MODEL` §4.4] After relay rotation, the NEW relay can perform
 /// privileged operations — confirms rotation is effective.
 #[test]
 fn auth_set_relay_signer_new_relay_active_after_rotation() {
@@ -791,7 +789,7 @@ fn auth_set_relay_signer_new_relay_active_after_rotation() {
 // THREAT_MODEL.md §4.5
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.5] Relay signer cannot upgrade the contract — admin-only.
+/// [`THREAT_MODEL` §4.5] Relay signer cannot upgrade the contract — admin-only.
 #[test]
 fn auth_upgrade_relay_role_rejected() {
     let (env, client, _admin, relay, contract_id) = setup_strict();
@@ -812,7 +810,7 @@ fn auth_upgrade_relay_role_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.5] An unrelated attacker cannot trigger an upgrade.
+/// [`THREAT_MODEL` §4.5] An unrelated attacker cannot trigger an upgrade.
 #[test]
 fn auth_upgrade_attacker_rejected() {
     let (env, client, _admin, _relay, contract_id) = setup_strict();
@@ -834,7 +832,7 @@ fn auth_upgrade_attacker_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.5 / F-04] Admin with correct schema version still rejected
+/// [`THREAT_MODEL` §4.5 / F-04] Admin with correct schema version still rejected
 /// when WASM hash does not exist in ledger — auth passes but deployer-side check
 /// fails. We verify the schema check fires first (wrong version) before WASM lookup.
 #[test]
@@ -852,7 +850,7 @@ fn auth_upgrade_schema_version_mismatch_rejected_before_wasm_lookup() {
 // THREAT_MODEL.md §4.6
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.6] The relay signer cannot pause the contract — admin-only.
+/// [`THREAT_MODEL` §4.6] The relay signer cannot pause the contract — admin-only.
 #[test]
 fn auth_pause_relay_role_rejected() {
     let (env, client, _admin, relay, contract_id) = setup_strict();
@@ -873,7 +871,7 @@ fn auth_pause_relay_role_rejected() {
     assert!(!client.is_paused());
 }
 
-/// [THREAT_MODEL §4.6] An unknown attacker cannot pause the contract.
+/// [`THREAT_MODEL` §4.6] An unknown attacker cannot pause the contract.
 #[test]
 fn auth_pause_attacker_rejected() {
     let (env, client, _admin, _relay, contract_id) = setup_strict();
@@ -894,7 +892,7 @@ fn auth_pause_attacker_rejected() {
     assert!(result.is_err());
 }
 
-/// [THREAT_MODEL §4.6] The relay signer cannot unpause the contract.
+/// [`THREAT_MODEL` §4.6] The relay signer cannot unpause the contract.
 #[test]
 fn auth_unpause_relay_role_rejected() {
     let (env, client, _admin, relay, contract_id) = setup_strict();
@@ -923,7 +921,7 @@ fn auth_unpause_relay_role_rejected() {
 // THREAT_MODEL.md §2 actor model / §3 trust boundaries
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §2 / §3] A valid relay signer must not be able to call any
+/// [`THREAT_MODEL` §2 / §3] A valid relay signer must not be able to call any
 /// admin-only entry point. Runs every admin-only function with relay auth.
 #[test]
 fn cross_role_relay_cannot_call_any_admin_only_function() {
@@ -932,7 +930,7 @@ fn cross_role_relay_cannot_call_any_admin_only_function() {
     let dummy_hash = BytesN::from_array(&env, &[0u8; 32]);
 
     macro_rules! assert_relay_cannot {
-        ($fn_name:expr, $args:expr, $call:expr) => {{
+        ($fn_name:expr, $args:expr, $($call:tt)+) => {{
             let result = client
                 .mock_auths(&[MockAuth {
                     address: &relay,
@@ -943,7 +941,7 @@ fn cross_role_relay_cannot_call_any_admin_only_function() {
                         sub_invokes: &[],
                     },
                 }])
-                .$call;
+                .$($call)+;
             assert!(result.is_err(), "relay must not succeed on {}", $fn_name);
         }};
     }
@@ -967,7 +965,7 @@ fn cross_role_relay_cannot_call_any_admin_only_function() {
     assert_relay_cannot!("unpause", ().into_val(&env), try_unpause());
 }
 
-/// [THREAT_MODEL §2 / §3] After an admin transfer, the old admin loses all
+/// [`THREAT_MODEL` §2 / §3] After an admin transfer, the old admin loses all
 /// admin-only capabilities. Tests `propose_admin` specifically.
 #[test]
 fn cross_role_old_admin_loses_privileges_after_transfer() {
@@ -1023,8 +1021,8 @@ fn cross_role_old_admin_loses_privileges_after_transfer() {
 // THREAT_MODEL.md §4.2 (idempotency / F-07)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.2] Replaying the exact same payload twice must be deduplicated;
-/// the second call must not emit a registration event and must return the same tx_id.
+/// [`THREAT_MODEL` §4.2] Replaying the exact same payload twice must be deduplicated;
+/// the second call must not emit a registration event and must return the same `tx_id`.
 #[test]
 fn replay_same_idempotency_key_deduped_silently() {
     let (env, client, _admin, _relay) = setup();
@@ -1043,9 +1041,9 @@ fn replay_same_idempotency_key_deduped_silently() {
     );
 }
 
-/// [THREAT_MODEL §4.2 / F-07] After the idempotency TTL, a replay with a *fresh*
-/// idempotency key but the same transaction_id must still be rejected via the
-/// persistent transaction_id guard.
+/// [`THREAT_MODEL` §4.2 / F-07] After the idempotency TTL, a replay with a *fresh*
+/// idempotency key but the same `transaction_id` must still be rejected via the
+/// persistent `transaction_id` guard.
 #[test]
 fn replay_fresh_idem_key_same_tx_id_rejected_after_ttl() {
     use crate::types::StorageKey;
@@ -1073,7 +1071,7 @@ fn replay_fresh_idem_key_same_tx_id_rejected_after_ttl() {
     // Jump past the idempotency TTL (~18 000 ledgers).
     env.ledger().with_mut(|li| li.sequence_number += 18_001);
 
-    let mut replay_payload = payload.clone();
+    let mut replay_payload = payload;
     replay_payload.idempotency_key = String::from_str(&env, "idem-replay-fresh");
 
     let result = client.try_register_callback(&replay_payload);
@@ -1082,13 +1080,10 @@ fn replay_fresh_idem_key_same_tx_id_rejected_after_ttl() {
     // Original record must be untouched.
     let tx = client.get_transaction(&tx_id);
     assert_eq!(tx.status, TransactionStatus::Completed);
-    assert_eq!(
-        tx.stellar_tx_hash,
-        String::from_str(&env, "hash-replay")
-    );
+    assert_eq!(tx.stellar_tx_hash, String::from_str(&env, "hash-replay"));
 }
 
-/// [THREAT_MODEL §4.3] Attempting to complete a transaction twice (once it has
+/// [`THREAT_MODEL` §4.3] Attempting to complete a transaction twice (once it has
 /// already reached Completed) must be rejected — Completed is terminal.
 #[test]
 fn replay_complete_twice_rejected() {
@@ -1104,7 +1099,7 @@ fn replay_complete_twice_rejected() {
     assert_eq!(result, Err(Ok(ContractError::InvalidStatusTransition)));
 }
 
-/// [THREAT_MODEL §4.3] Attempting to fail a Completed transaction must be
+/// [`THREAT_MODEL` §4.3] Attempting to fail a Completed transaction must be
 /// rejected — `complete_transaction` reaching `Completed` is terminal.
 #[test]
 fn replay_fail_after_complete_rejected() {
@@ -1114,12 +1109,11 @@ fn replay_fail_after_complete_rejected() {
     client.start_processing(&tx_id, &relay);
     client.complete_transaction(&tx_id, &String::from_str(&env, "hash-fin"), &relay);
 
-    let result =
-        client.try_fail_transaction(&tx_id, &String::from_str(&env, "too_late"), &relay);
+    let result = client.try_fail_transaction(&tx_id, &String::from_str(&env, "too_late"), &relay);
     assert_eq!(result, Err(Ok(ContractError::InvalidStatusTransition)));
 }
 
-/// [THREAT_MODEL §4.3] Attempting to start_processing a Failed transaction must
+/// [`THREAT_MODEL` §4.3] Attempting to `start_processing` a Failed transaction must
 /// be rejected — `Failed` is terminal.
 #[test]
 fn replay_start_processing_after_fail_rejected() {
@@ -1137,7 +1131,7 @@ fn replay_start_processing_after_fail_rejected() {
 // THREAT_MODEL.md §4.1 / I-08
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// [THREAT_MODEL §4.1 / I-08] All state-mutating calls on a freshly-deployed,
+/// [`THREAT_MODEL` §4.1 / I-08] All state-mutating calls on a freshly-deployed,
 /// uninitialised contract must fail. Covers the implicit initialisation guard.
 #[test]
 fn auth_uninitialised_contract_all_mutating_calls_rejected() {
@@ -1162,19 +1156,11 @@ fn auth_uninitialised_contract_all_mutating_calls_rejected() {
         Err(Ok(ContractError::NotInitialised))
     );
     assert_eq!(
-        client.try_complete_transaction(
-            &dummy_tx_id,
-            &String::from_str(&env, "h"),
-            &some_addr
-        ),
+        client.try_complete_transaction(&dummy_tx_id, &String::from_str(&env, "h"), &some_addr),
         Err(Ok(ContractError::NotInitialised))
     );
     assert_eq!(
-        client.try_fail_transaction(
-            &dummy_tx_id,
-            &String::from_str(&env, "r"),
-            &some_addr
-        ),
+        client.try_fail_transaction(&dummy_tx_id, &String::from_str(&env, "r"), &some_addr),
         Err(Ok(ContractError::NotInitialised))
     );
     // Admin-only calls.
@@ -1190,14 +1176,6 @@ fn auth_uninitialised_contract_all_mutating_calls_rejected() {
         client.try_upgrade(&dummy_hash, &1),
         Err(Ok(ContractError::NotInitialised))
     );
-    assert_eq!(
-        client.try_pause(),
-        Err(Ok(ContractError::NotInitialised))
-    );
-    assert_eq!(
-        client.try_unpause(),
-        Err(Ok(ContractError::NotInitialised))
-    );
+    assert_eq!(client.try_pause(), Err(Ok(ContractError::NotInitialised)));
+    assert_eq!(client.try_unpause(), Err(Ok(ContractError::NotInitialised)));
 }
-
-
