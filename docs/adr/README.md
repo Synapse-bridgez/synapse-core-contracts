@@ -21,6 +21,7 @@ to the old one; the old file is never modified or deleted.
 | [0005](./0005-upgrade-and-migrate.md) | Bounded upgrade_and_migrate + migration registry | Accepted | 2026-Q3 |
 | [0006](./0006-schema-compat-range.md) | Schema-version compatibility ranges (amends 0003) | Accepted | 2026-Q3 |
 | [0007](./0007-guardian-emergency-admin-revocation.md) | Guardian-quorum emergency admin revocation | Proposed | 2026-Q3 |
+| [0008](./0008-fee-accrual-and-treasury-withdrawal.md) | Fee accrual and two-party treasury withdrawal | Proposed | 2026-09-29 |
 
 ---
 
