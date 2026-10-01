@@ -220,7 +220,7 @@ struct Lcg(u64);
 
 impl Lcg {
     fn new(seed: u64) -> Self {
-        Lcg(seed)
+        Self(seed)
     }
 
     fn next(&mut self) -> u64 {
@@ -232,12 +232,17 @@ impl Lcg {
     }
 
     fn next_usize_below(&mut self, n: usize) -> usize {
-        (self.next() as usize) % n
+        usize::try_from(self.next() % n as u64).unwrap()
     }
 
     fn next_bool(&mut self) -> bool {
         self.next() & 1 == 0
     }
+}
+
+/// Checked `usize` → `u32` conversion for Soroban `Vec` indices.
+fn idx(i: usize) -> u32 {
+    u32::try_from(i).unwrap()
 }
 
 // ─── Core property scenarios ──────────────────────────────────────────────────
@@ -480,7 +485,6 @@ fn invariant_pseudorandom_operation_sequences() {
             };
             let id = client.register_callback(&payload);
             ids.push_back(id);
-            statuses[i] = TransactionStatus::Pending;
         }
 
         assert_conservation(&client, &ids, num_txs, "rng:after_register");
@@ -488,7 +492,7 @@ fn invariant_pseudorandom_operation_sequences() {
         // Phase 2: apply 30 random valid transitions.
         for _ in 0..30usize {
             let i = rng.next_usize_below(num_txs);
-            let id = ids.get(i as u32).unwrap();
+            let id = ids.get(idx(i)).unwrap();
 
             match &statuses[i] {
                 TransactionStatus::Pending => {
@@ -522,11 +526,11 @@ fn invariant_pseudorandom_operation_sequences() {
         }
 
         // Final: in-memory model must match on-chain state.
-        for i in 0..num_txs {
-            let id = ids.get(i as u32).unwrap();
+        for (i, expected) in statuses.iter().enumerate() {
+            let id = ids.get(idx(i)).unwrap();
             assert_eq!(
-                client.get_status(&id),
-                statuses[i],
+                &client.get_status(&id),
+                expected,
                 "seed={seed:#x}: in-memory model diverged from on-chain state at idx={i}"
             );
         }
@@ -578,7 +582,7 @@ fn invariant_no_double_counting() {
 
     // Drive half to Completed.
     for i in 0..(n / 2) {
-        let id = ids.get(i as u32).unwrap();
+        let id = ids.get(idx(i)).unwrap();
         client.start_processing(&id, &relay);
         client.complete_transaction(&id, &String::from_str(&env, "h"), &relay);
     }
@@ -587,8 +591,8 @@ fn invariant_no_double_counting() {
     for i in 0..n {
         for j in (i + 1)..n {
             assert_ne!(
-                ids.get(i as u32).unwrap(),
-                ids.get(j as u32).unwrap(),
+                ids.get(idx(i)).unwrap(),
+                ids.get(idx(j)).unwrap(),
                 "duplicate tx_id at indices {i} and {j}"
             );
         }

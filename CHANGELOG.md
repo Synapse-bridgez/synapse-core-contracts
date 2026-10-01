@@ -17,6 +17,13 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Event schema
 
+- Restored `EventBatchProcessed` (topic `batch`) to `src/events.rs`; it was
+  catalogued as Live in `EVENTS.md` but its struct and emitter were lost in
+  #197. Now also covered by the conformance manifest.
+- `EventDisputeRaised` / `EventDisputeResolved` are now **Live**, emitted by
+  `dispute_transaction` / `resolve_dispute`. An upheld `resolve_dispute`
+  emits `status` (`Completed → Failed`) before `dsprslvd`.
+
 - Added `EventDisputeRaised` (topic `dispute`), emitted by the future
   `dispute_transaction` entry-point (sibling issue). Schema locked in
   `src/events.rs` and catalogued in `EVENTS.md`. Additive new event per
@@ -37,6 +44,34 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Added
 
+- `get_dispute_queue(cursor, limit)` (#166): paginated, oldest-first list of
+  open disputes, with stable sequence-number cursors. Backed by the restored
+  `dispute_transaction` / `resolve_dispute` / `is_disputed` entry points and
+  the new `get_dispute` query. At most `MAX_OPEN_DISPUTES` (100) may be open.
+- Global `global_max_amount` ceiling (#169), set via the param registry and
+  on by default (`DEFAULT_GLOBAL_MAX_AMOUNT` = 10^15). Enforced on single and
+  batch registration alongside the restored per-anchor ceiling
+  (`set_anchor_amount_ceiling`); the lower of the two wins. New queries
+  `get_amount_ceiling(anchor)` and `get_global_max_amount()`.
+- Resource-budget check in `batch_register_callback` (#173): a conservative
+  write/event byte estimate rejects over-budget batches with
+  `BatchBudgetExceeded` before any write. See `COST_MODEL.md` §11.1.
+- Stricter Clippy configuration (#175): `pedantic`, `nursery` and `cargo`
+  enabled in `Cargo.toml`, with individually justified exceptions.
+  See `CONTRIBUTING.md` § Lints.
+
+### Fixed
+
+- `main` compiles again: repaired merge damage in `src/events.rs` from #197
+  and restored the batch-registration, dispute and per-anchor-ceiling code that
+  `src/validation.rs` and the test suite still depended on. Tests for other
+  entry points removed in #197 are quarantined; see `QUARANTINE.md`.
+- `unbond_collateral` no longer truncates an out-of-range
+  `unbond_delay_ledgers` param (e.g. `2^32 + 5` became a 5-ledger delay). A
+  negative or oversized delay now fails closed (never claimable).
+- `batch_register_callback` now rejects replayed or in-batch duplicate
+  idempotency keys with `DuplicateRequest`.
+
 - Timelocked upgrade flow (#81 / ADR-0004): `propose_upgrade`,
   `finalize_upgrade`, `cancel_upgrade`, `get_pending_upgrade`,
   `set_upgrade_delay` / `upgrade_delay`. Second propose **replaces** and
@@ -56,6 +91,16 @@ separately from general code changes. Full topic/field contracts live in
 - Release WASM size gate (#122): CI fails if `make wasm`'s output grows >5%
   over `wasm_size.toml`'s baseline or exceeds a 96 KiB ceiling (75% of
   Soroban's 131 072-byte `contract_max_size_bytes`). See COST_MODEL.md §13.
+
+### Changed
+
+- `register_callback` validation runs cheapest-first (#120); with several
+  invalid fields the *first* error reported can differ (e.g. `InvalidAmount`
+  before `InvalidStellarAccount`). Accept/reject outcomes are unchanged.
+  Worst-case rejection −28% CPU; cheap rejections −45…−66%.
+- Hot entry points allocate fewer host objects (#121): `start_processing`,
+  `complete_transaction`, `fail_transaction` ≈ −18% CPU / −7% memory;
+  `register_callback` −9% / −3%. No storage-layout or AB
 
 ### Changed
 

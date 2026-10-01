@@ -79,8 +79,8 @@ supported.
 | [`EventGuardianSet`](#eventguardianset) | `guardian` | `EventEmitter::guardian_set` | `set_guardian` | **Live** |
 | [`EventAutoPaused`](#eventautopaused) | `apause` | `EventEmitter::auto_paused` | `trip_auto_pause` | **Live** |
 | [`EventAutoUnpaused`](#eventautounpaused) | `aunpause` | `EventEmitter::auto_unpaused` | `unpause_auto` (quorum met) | **Live** |
-| [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` (sibling issue) | **Schema locked** |
-| [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` (sibling issue) | **Schema locked** |
+| [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` | **Live** |
+| [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -544,7 +544,7 @@ Verified by `test_pause::test_self_check_events_topics`.
 |--|--|
 | **Topics** | `synapse`, `dispute` |
 | **Struct** | `EventDisputeRaised` |
-| **Emitted by** | `dispute_transaction` (sibling issue) |
+| **Emitted by** | `dispute_transaction` |
 | **When** | A dispute is opened against a transaction |
 | **Status** | Schema locked |
 
@@ -555,13 +555,13 @@ Verified by `test_pause::test_self_check_events_topics`.
 | `caller` | `Address` | Address that raised the dispute (relay signer or admin) |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-**Re-dispute cardinality:** a given `tx_id` may produce more than one
-`dispute` / `dsprslvd` event pair over its lifetime if the dispute
-state machine permits re-disputing after a prior resolution. Subscribers
-MUST correlate pairs by `tx_id` and emission order rather than assuming
-at-most-one per transaction. Once the sibling dispute state-machine issue
-finalises the cardinality policy, this note will be updated to reflect the
-exact rule (once-only or repeatable).
+**Re-dispute cardinality:** repeatable. A transaction whose dispute was
+rejected (`upheld = false`) stays `Completed` and may be disputed again, so a
+given `tx_id` may produce more than one `dispute` / `dsprslvd` pair over its
+lifetime. An upheld dispute moves it to `Failed`, which cannot be disputed.
+Subscribers MUST correlate pairs by `tx_id` and emission order rather than
+assuming at-most-one per transaction. Open disputes can be listed oldest-first
+with `get_dispute_queue`.
 
 Verified by snapshot-style test `tests::test_dispute_raised_event_payload_snapshot`
 (topics `synapse` / `dispute`).
@@ -572,7 +572,7 @@ Verified by snapshot-style test `tests::test_dispute_raised_event_payload_snapsh
 |--|--|
 | **Topics** | `synapse`, `dsprslvd` |
 | **Struct** | `EventDisputeResolved` |
-| **Emitted by** | `resolve_dispute` (sibling issue) |
+| **Emitted by** | `resolve_dispute` |
 | **When** | A raised dispute is resolved by the admin |
 | **Status** | Schema locked |
 
@@ -671,12 +671,12 @@ compatibility test in `src/events.rs`
 (`test_additive_field_old_decoder_compatibility`), which decodes a new-shape
 payload using old-shape decoding logic and asserts graceful handling.
 
-Future entry-points wiring the dispute events (sibling issue):
+Dispute entry-points:
 
 | Entry-point | Order (first → last) |
 |-------------|----------------------|
 | `dispute_transaction` | 1. `dispute` |
-| `resolve_dispute` | 1. `dsprslvd` |
+| `resolve_dispute` | 1. `status` (`Completed → Failed`, only when `upheld = true`) 2. `dsprslvd` |
 
 **Rationale for `complete_transaction`:** Phase 2 indexers that listen only to
 `done` still see completion; those that key off `status` with

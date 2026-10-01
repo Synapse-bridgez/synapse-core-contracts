@@ -396,6 +396,46 @@ including an O(n^2) in-batch duplicate check (at most 190 comparisons). The
 cap is deliberately conservative to stay well under the per-transaction
 resource limits; raise it only after benchmarking.
 
+### 11.1 Resource-budget check (#173)
+
+The count cap alone does not bound cost: 20 items with long strings (the
+idempotency key is uncapped) can still approach Soroban's per-transaction
+limits. Before any write, `batch_register_callback` computes a conservative,
+O(n) byte estimate from `String::len()` alone
+(`Validator::estimate_batch_cost`) and rejects the whole batch with
+`BatchBudgetExceeded` if either figure exceeds its budget:
+
+| Estimate | Per item | Per batch | Budget |
+|----------|----------|-----------|--------|
+| Write bytes | 256 + 2×`transaction_id` + `stellar_account` + `asset_code` + `anchor_transaction_id` + `asset_issuer` + `callback_status` + `idempotency_key` | — | 32 768 (½ of the lowest mainnet per-tx write limit, 65 536) |
+| Event bytes | 128 + `transaction_id` + `stellar_account` + `asset_code` + `anchor_transaction_id` | 128 + first and last `transaction_id` | 8 192 (½ of the 16 384-byte per-tx events limit) |
+
+Strings are weighted by how many times they are written: `transaction_id` is
+in the storage key, the record, and the `reg` event; account, asset code and
+anchor id are in the record and the event. The fixed overheads over-count XDR
+framing on purpose. A false reject is acceptable; a mid-execution resource
+failure is not.
+
+With every capped field at its maximum, a full 20-item batch estimates at
+16 000 + Σ`idempotency_key` write bytes and 6 736 event bytes, so every
+legitimate batch fits. The budget only rejects batches with unusually large
+idempotency keys (or over-long fields, which it catches before per-item
+validation runs). Tests in `src/test_batch_budget.rs` pin the exact boundary:
+a batch at exactly 32 768 estimated write bytes succeeds, and one byte more
+is rejected with no storage write and no events.
+
+## 12. Resource-usage regression gate (#119)
+
+`.github/workflows/resource-gate.yml` builds the release WASM and runs
+`scripts/check_resource_budget.sh`, which meters every hot entry point
+(`src/bench_resources.rs`) and compares against the committed
+[`resource_baseline.toml`](./resource_baseline.toml). The build fails if any
+scenario's `cpu_insns` or `mem_bytes` exceeds its baseline by more than
+`threshold_pct` (initially **15%**).
+
+### 12.1 What is measured
+
+* **Release WASM, not native Rust.
 
 ## 12. Resource-usage regression gate (#119)
 
