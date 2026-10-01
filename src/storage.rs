@@ -12,11 +12,11 @@
 //! | Idempotency keys      | `temporary`  | 24-hour TTL; evicted by the ledger       |
 //! | Initialised flag      | `instance`   | Lives with the contract instance         |
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::types::{
-    AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey, Transaction,
-    TransactionStatus, UnbondRequest,
+    AdminTransitionRecord, AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey,
+    Transaction, TransactionStatus, UnbondRequest,
 };
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
@@ -113,6 +113,39 @@ impl StorageClient {
         env.storage().persistent().remove(&StorageKey::PendingAdmin);
     }
 
+    // ── Admin transition history (#157) ───────────────────────────────────────
+
+    /// Append a single [`AdminTransitionRecord`] to the append-only admin
+    /// transition log.
+    ///
+    /// The log is stored under [`StorageKey::AdminHistory`] and is never
+    /// rewritten or pruned, so it forms a complete on-chain provenance chain
+    /// for the contract's most powerful role.  Callers are responsible for
+    /// populating `record` with the correct transition mechanism so routine
+    /// transfers and break-glass revocations remain distinguishable.
+    pub fn append_admin_transition(env: &Env, record: &AdminTransitionRecord) {
+        let key = StorageKey::AdminHistory;
+        let mut history: Vec<AdminTransitionRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        history.push_back(record.clone());
+        env.storage().persistent().set(&key, &history);
+    }
+
+    /// Read the full append-only admin transition history.
+    ///
+    /// Returns an empty vector when no transition has been recorded yet (e.g.
+    /// immediately after `initialize()`), so callers never need to special-case
+    /// a missing key.
+    pub fn get_admin_history(env: &Env) -> Vec<AdminTransitionRecord> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::AdminHistory)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
     // ── Schema version ────────────────────────────────────────────────────────
 
     /// Read the on-chain storage schema version.
@@ -163,6 +196,11 @@ impl StorageClient {
     }
 
     /// Persist (insert or update) a [`Transaction`].
+    ///
+    /// Also records the current ledger sequence as the transaction's
+    /// "last modified" marker in the incremental-sync index (see
+    /// [`Self::get_transactions_since`]), so every state transition — new
+    /// registrations and updates alike — is observable by off-chain consumers.
     pub fn save_transaction(env: &Env, tx: &Transaction) {
         let key = StorageKey::Transaction(tx.id.clone());
         env.storage().persistent().set(&key, tx);
@@ -171,6 +209,81 @@ impl StorageClient {
             TRANSACTION_MIN_TTL_LEDGERS,
             TRANSACTION_MIN_TTL_LEDGERS,
         );
+        Self::record_transaction_modified(env, &tx.id);
+    }
+
+    // ── Incremental sync index (#158) ─────────────────────────────────────────
+
+    /// Record `tx_id` as modified at the current ledger sequence.
+    ///
+    /// Maintains a monotonically growing, append-only log of
+    /// `(ledger_seq, tx_id)` entries under [`StorageKey::TransactionSyncIndex`].
+    /// A transaction modified multiple times appears multiple times in the log;
+    /// [`Self::get_transactions_since`] de-duplicates so each transaction is
+    /// returned at most once per query.
+    pub fn record_transaction_modified(env: &Env, tx_id: &String) {
+        let key = StorageKey::TransactionSyncIndex;
+        let mut index: Vec<(u32, String)> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        index.push_back((env.ledger().sequence(), tx_id.clone()));
+        env.storage().persistent().set(&key, &index);
+    }
+
+    /// Return the IDs of every transaction registered or modified strictly
+    /// after `ledger_seq`, in ascending last-modified order, de-duplicated so
+    /// each transaction appears exactly once.
+    ///
+    /// `cursor` is an opaque offset into the de-duplicated result set (pass
+    /// `None` for the first page).  `limit` caps the page size.  The returned
+    /// `Option<u64>` is the cursor to pass on the next call, or `None` when the
+    /// result set has been exhausted.
+    ///
+    /// This is the on-chain primitive for incremental off-chain sync (e.g.
+    /// `synapse-core`'s backend): a consumer stores the highest ledger sequence
+    /// it has processed and re-queries with that value on each cycle instead of
+    /// replaying the full event history.
+    pub fn get_transactions_since(
+        env: &Env,
+        ledger_seq: u32,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> (Vec<String>, Option<u64>) {
+        let index: Vec<(u32, String)> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::TransactionSyncIndex)
+            .unwrap_or_else(|| Vec::new(env));
+
+        // Collect the de-duplicated set of tx IDs modified after `ledger_seq`,
+        // preserving first-seen (ascending ledger) order.
+        let mut seen: Vec<String> = Vec::new();
+        let mut matched: Vec<String> = Vec::new();
+        for entry in index.iter() {
+            let (seq, tx_id) = entry;
+            if seq <= ledger_seq {
+                continue;
+            }
+            if seen.contains(&tx_id) {
+                continue;
+            }
+            seen.push_back(tx_id.clone());
+            matched.push_back(tx_id);
+        }
+
+        let start = cursor.unwrap_or(0) as u32;
+        let total = matched.len();
+        let mut page: Vec<String> = Vec::new();
+        let mut i = start;
+        while i < total && page.len() < limit {
+            page.push_back(matched.get(i).unwrap());
+            i += 1;
+        }
+
+        let next = if i < total { Some(i as u64) } else { None };
+        (page, next)
     }
 
     // ── Per-status transaction counters (#154) ────────────────────────────────
@@ -226,13 +339,7 @@ impl StorageClient {
 
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
-    /// Return the ledger sequence at which an idempotency key was first stored,
-    /// or `None` if the key is unknown / expired.
-    pub fn get_idempotency_key(env: &Env, key: &String) -> Option<u32> {
-        env.storage()
-            .temporary()
-            .get::<StorageKey, u32>(&StorageKey::IdempotencyKey(key.clone()))
-    }
+    /// 
 
     /// Record an idempotency key with a ~24-hour TTL.
     pub fn set_idempotency_key(env: &Env, key: &String) {

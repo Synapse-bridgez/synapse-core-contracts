@@ -233,7 +233,9 @@ trust model.
 **When to deploy fresh:**
 - Breaking changes to `Transaction` struct layout or `StorageKey` variants
 - Fundamental access-control model changes
-- WASM size exceeds Soroban deployment constraints
+- WASM size exceeds Soroban deployment constraints (`contract_max_size_bytes`,
+  currently 131 072 bytes on mainnet/testnet). CI fails well before that: see
+  `wasm_size.toml` and [`COST_MODEL.md` §13](./COST_MODEL.md#13-release-wasm-size-gate-122).
 
 ### Event schema as a stable public API
 
@@ -266,3 +268,24 @@ wired.
 - #102: [High] Add a cold-storage export entry point for pre-eviction off-chain archival
 <!-- handsoff-issue-109 -->
 - #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
+
+<!-- handsoff-issue-170 -->
+- #170: [High] Add a `get_contract_invariants_report()` self-verifying audit query
+
+<!-- handsoff-issue-160 -->
+- #160: [High] Add rate-limited guards on unbounded-pagination read-only queries
+
+<!-- handsoff-issue-162 -->
+- #162: [High] Implement `verify_transaction_proof()` producing a Merkle-style inclusion proof
+
+<!-- handsoff-issue-164 -->
+- #164: [High] Add `get_fee_schedule()`/`get_parameter_registry()` read-only queries
+
+<!-- handsoff-issue-165 -->
+- #165: [High] Add cross-contract read-only interface stubs for a future Swap Engine
+
+<!-- handsoff-issue-166 -->
+- #166: [High] Add a `get_dispute_queue()` query listing transactions pending review
+
+<!-- handsoff-issue-156 -->
+- #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling

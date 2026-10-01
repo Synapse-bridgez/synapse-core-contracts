@@ -17,6 +17,16 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Build/commit-hash identifier baked in at compile time.
+///
+/// CI sets the `SYNAPSE_BUILD_COMMIT` environment variable to the real git
+/// commit hash before invoking `cargo build`; the `build.rs` build script
+/// forwards it to the compiler via `cargo:rustc-env`, so the value is
+/// embedded directly into the deployed WASM. Local dev builds that do not set
+/// the variable fall back to `"unknown"` — a genuine CI-built artifact will
+/// always carry the real deployed commit hash.
+pub const BUILD_COMMIT: &str = env!("SYNAPSE_BUILD_COMMIT");
+
 /// Current on-chain events schema version.
 ///
 /// Mirrors the locked event schema documented in `EVENTS.md`. Surfaced by
@@ -24,6 +34,45 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// drift between the deployed contract and the version they were built
 /// against without issuing a separate query.
 pub const EVENTS_VERSION: u32 = 1;
+
+// ─── Structured error diagnostics (#167) ──────────────────────────────────────
+
+/// Off-chain handling guidance for a [`ContractError`] variant.
+///
+/// Consumed by the `synapse-core` relay service's error-handling and alerting
+/// logic to decide how to react to a failed call without string-matching.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ErrorHandling {
+    /// Transient condition — the caller may safely retry the same call.
+    RetrySafe,
+    /// Permanent condition — retrying will not help; drop the call.
+    NotRetryable,
+    /// Requires operator attention; raise an alert.
+    AlertWorthy,
+    /// Expected/routine rejection; log only, no alert.
+    Routine,
+}
+
+/// Structured, machine-parseable diagnostic for a [`ContractError`] variant.
+///
+/// Every `ContractError` variant maps to exactly one `ErrorDiagnostic` via
+/// [`ContractError::diagnostic`]. The shape is deliberately fixed — a stable
+/// numeric `code` plus a small set of well-typed context fields — so the
+/// off-chain relay service can parse it without pattern-matching on free-text
+/// strings. See `docs/ERRORS.md` for the full reference table.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ErrorDiagnostic {
+    /// Stable numeric error code. Never reused or renumbered once published.
+    pub code: u32,
+    /// Whether the caller may retry, must drop, or should alert.
+    pub handling: ErrorHandling,
+    /// Whether this failure warrants an operator alert.
+    pub alert: bool,
+    /// Whether the failed call may be safely retried as-is.
+    pub retry_safe: bool,
+}
 
 // ─── Transaction status ───────────────────────────────────────────────────────
 
@@ -149,6 +198,47 @@ pub struct CallbackPayload {
     pub callback_status: String,
 }
 
+// ─── Bundled deployment metadata (#159) ───────────────────────────────────────
+
+/// Bundled deployment identity returned by
+/// [`crate::SynapseCoreContract::contract_metadata`].
+///
+/// Convenience aggregate of the individual read-only queries so support
+/// tooling and dashboards can fetch the full "what exactly is deployed right
+/// now" picture in a single round-trip, avoiding inconsistent reads from
+/// separate calls made at slightly different times. Each field mirrors the
+/// value returned by its corresponding individual query exactly.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractMetadata {
+    /// Contract crate version — mirrors `version()`.
+    pub version: String,
+    /// On-chain storage schema version — mirrors `schema_version()`.
+    pub schema_version: u32,
+    /// Locked event schema version — mirrors `events_version()`.
+    pub events_version: u32,
+    /// Git commit hash baked in at compile time — see [`BUILD_COMMIT`].
+    pub build_commit: String,
+}
+
+// ─── Relay signer set (#161) ──────────────────────────────────────────────────
+
+/// Current relay-signer roster and quorum threshold returned by
+/// [`crate::SynapseCoreContract::get_relay_signer_set`].
+///
+/// Roster/threshold only — deliberately carries no per-signer state (liveness,
+/// quarantine, etc.); that belongs to the separate heartbeat query. The
+/// `signers` vector is the authoritative current membership and `threshold` is
+/// the number of signers that must agree to authorize a relay action.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySignerSet {
+    /// Current relay-signer roster.
+    pub signers: soroban_sdk::Vec<soroban_sdk::Address>,
+    /// Number of signers required to authorize a relay action.
+    pub threshold: u32,
+}
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Discriminants used as ledger storage keys.
@@ -185,12 +275,7 @@ pub enum StorageKey {
     /// Per-parameter record keyed by param name string.
     Param(String),
 
-    // ── Wave 2: Collateral Bonding (#143) ────────────────────────────────────
-    /// Per-signer bond record keyed by the signer address.
-    BondRecord(soroban_sdk::Address),
-    /// Per-signer unbond request keyed by the signer address.
-    /// Absent when no unbond is pending.
-    UnbondRequest(soroban_sdk::Address),
+    // ── Wave 2: Collateral Bonding (#143) ────
 
     // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
     /// Per-anchor tier config keyed by the anchor address.
@@ -210,6 +295,11 @@ pub enum StorageKey {
     /// when called with `None`. Absent means zero (no bonding has occurred
     /// yet), never an error.
     TotalBondedCollateral,
+
+    // ── Timelocked Upgrade (#163) ────────────────────────────────────────────
+    /// Singleton: in-flight timelocked upgrade proposal. Absent when no
+    /// upgrade is pending. See [`PendingUpgrade`].
+    PendingUpgrade,
 }
 
 // ─── Wave 2: Diagnostic Queries (#153) ────────────────────────────────────────
@@ -281,4 +371,64 @@ pub struct StorageFootprint {
 #[contracttype]
 #[derive(Clone, Debug
 
-/* … truncated 789 chars — edit only what you need near the top … */
+// ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
+
+/// In-flight timelocked upgrade proposal.
+///
+/// Stored in persistent ledger storage keyed by [`StorageKey::PendingUpgrade`].
+/// Absent when no upgrade is pending. See `SynapseCoreContract::propose_upgrade`
+/// and `SynapseCoreContract::execute_upgrade`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingUpgrade {
+    /// Hash of the new WASM blob to install once the timelock elapses.
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    /// Ledger sequence at which the proposal was created.
+    pub proposed_at_ledger: u32,
+    /// Ledger sequence at which the proposal becomes executable.
+    pub executable_at_ledger: u32,
+}
+
+// ─── Storage tier report (#168) ───────────────────────────────────────────────
+
+/// Per-tier storage breakdown row, mirroring a single row of the storage-tier
+/// table in `COST_MODEL.md`.
+///
+/// Units match the document exactly: `entries` is a raw count of ledger
+/// entries, `bytes` is the serialized byte footprint of those entries, and
+/// `rent_stroops` is the projected rent in stroops for the tier's entries.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageTierRow {
+    /// Tier name, matching the `COST_MODEL.md` tier labels
+    /// (e.g. "instance", "persistent", "temporary").
+    pub tier: String,
+    /// Number of live ledger entries in this tier.
+    pub entries: u32,
+    /// Serialized byte footprint of this tier's entries.
+    pub bytes: u32,
+    /// Projected rent for this tier's entries, in stroops.
+    pub rent_stroops: i128,
+}
+
+/// `COST_MODEL.md`-aligned storage cost-model report returned by
+/// `SynapseCoreContract::get_storage_tier_report()`.
+///
+/// Structured to mirror the document's existing cost-projection tables
+/// directly — same units, same breakdown categories — so operators can compare
+/// live on-chain reality against the document's stated projections without any
+/// off-chain translation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CostModelReport {
+    /// Ledger sequence at which the report was generated.
+    pub generated_at_ledger: u32,
+    /// Per-tier breakdown rows, one per storage tier, in `COST_MODEL.md` order.
+    pub tiers: soroban_sdk::Vec<StorageTierRow>,
+    /// Total live ledger entries across all tiers.
+    pub total_entries: u32,
+    /// Total serialized byte footprint across all tiers.
+    pub total_bytes: u32,
+    /// Total projected rent across all tiers, in stroops.
+    pub total_rent_stroops: i128,
+}
