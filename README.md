@@ -269,5 +269,14 @@ wired.
 <!-- handsoff-issue-109 -->
 - #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
 
+<!-- handsoff-issue-164 -->
+- #164: [High] Add `get_fee_schedule()`/`get_parameter_registry()` read-only queries
+
+<!-- handsoff-issue-165 -->
+- #165: [High] Add cross-contract read-only interface stubs for a future Swap Engine
+
+<!-- handsoff-issue-166 -->
+- #166: [High] Add a `get_dispute_queue()` query listing transactions pending review
+
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling

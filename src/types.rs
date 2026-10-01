@@ -17,6 +17,45 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+// ─── Structured error diagnostics (#167) ──────────────────────────────────────
+
+/// Off-chain handling guidance for a [`ContractError`] variant.
+///
+/// Consumed by the `synapse-core` relay service's error-handling and alerting
+/// logic to decide how to react to a failed call without string-matching.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ErrorHandling {
+    /// Transient condition — the caller may safely retry the same call.
+    RetrySafe,
+    /// Permanent condition — retrying will not help; drop the call.
+    NotRetryable,
+    /// Requires operator attention; raise an alert.
+    AlertWorthy,
+    /// Expected/routine rejection; log only, no alert.
+    Routine,
+}
+
+/// Structured, machine-parseable diagnostic for a [`ContractError`] variant.
+///
+/// Every `ContractError` variant maps to exactly one `ErrorDiagnostic` via
+/// [`ContractError::diagnostic`]. The shape is deliberately fixed — a stable
+/// numeric `code` plus a small set of well-typed context fields — so the
+/// off-chain relay service can parse it without pattern-matching on free-text
+/// strings. See `docs/ERRORS.md` for the full reference table.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ErrorDiagnostic {
+    /// Stable numeric error code. Never reused or renumbered once published.
+    pub code: u32,
+    /// Whether the caller may retry, must drop, or should alert.
+    pub handling: ErrorHandling,
+    /// Whether this failure warrants an operator alert.
+    pub alert: bool,
+    /// Whether the failed call may be safely retried as-is.
+    pub retry_safe: bool,
+}
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -212,6 +251,16 @@ pub struct ParamEntry {
     /// Address that last set this param (always the admin).
     pub updated_by: soroban_sdk::Address,
 }
+
+// ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
+
+/// In-flight timelocked upgrade proposal.
+///
+/// Stored in persistent ledger storage keyed by [`StorageKey::BondRecord`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BondRecord {
+    /// The signer whose collateral is bonde
 
 // ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
 
