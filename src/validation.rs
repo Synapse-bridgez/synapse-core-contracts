@@ -261,15 +261,33 @@ impl Validator {
         ValidationResult::Valid
     }
 
-    /// Reject amounts above the per-anchor ceiling (anchor = `asset_issuer`);
-    /// anchors without an explicit entry use the contract-wide default.
-    /// Exactly-at-ceiling is allowed.
+    /// Reject amounts above the effective transaction ceiling for `anchor`.
+    ///
+    /// The effective ceiling is the stricter (lower) of the contract-wide
+    /// `global_max_amount` backstop and the per-anchor ceiling (anchors without
+    /// an explicit entry use the contract-wide default).  Exactly-at-ceiling is
+    /// allowed; one unit above is rejected.
     pub fn validate_amount_ceiling(
         env: &Env,
         anchor: &String,
         amount: i128,
     ) -> Result<(), ContractError> {
-        if amount > crate::storage::StorageClient::get_amount_ceiling(env, anchor) {
+        let per_anchor = crate::storage::StorageClient::get_amount_ceiling(env, anchor);
+        let global = crate::storage::StorageClient::get_global_max_amount(env);
+        let effective = if global < per_anchor { global } else { per_anchor };
+        if amount > effective {
+            return Err(ContractError::AmountCeilingExceeded);
+        }
+        
+    pub fn validate_amount_ceiling(
+        env: &Env,
+        anchor: &String,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        let per_anchor = crate::storage::StorageClient::get_amount_ceiling(env, anchor);
+        let global = crate::storage::StorageClient::get_global_max_amount(env);
+        let effective = if global < per_anchor { global } else { per_anchor };
+        if amount > effective {
             return Err(ContractError::AmountCeilingExceeded);
         }
         Ok(())
@@ -324,31 +342,81 @@ impl Validator {
             return Err(ContractError::InvalidIdempotencyKey);
         }
         enforce_max_length(key, MAX_TX_ID_LEN)
-            .map_err(|_| ContractError::InvalidIdempotencyKey)
     }
 
-    /// `transaction_id` length cap.
+    /// Transaction id: non-empty, ≤ [`MAX_TX_ID_LEN`] bytes.
     pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
         enforce_max_length(id, MAX_TX_ID_LEN)
     }
 
-    /// `anchor_transaction_id` length cap.
+    /// Anchor transaction id: non-empty, ≤ [`MAX_ANCHOR_TX_ID_LEN`] bytes.
     pub fn validate_anchor_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() 
+    pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
+        enforce_max_length(id, MAX_TX_ID_LEN)
+    }
+
+    }
+
+    /// Transaction id: non-empty, ≤ [`MAX_TX_ID_LEN`] bytes.
+    pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
+        enforce_max_length(id, MAX_TX_ID_LEN)
+    }
+
+
+    pub fn validate_anchor_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidAnchorTransactionId);
+        }
         enforce_max_length(id, MAX_ANCHOR_TX_ID_LEN)
     }
 
-    /// `callback_status` length cap.
+    /// Anchor transaction id: non-empty, ≤ [`MAX_ANCHOR_TX_ID_LEN`] bytes.
+    /// `anchor_transaction_id` length cap.
     pub fn validate_callback_status(status: &String) -> Result<(), ContractError> {
+        if status.len() == 0 {
+            return Err(ContractError::InvalidCallbackStatus);
+        }
         enforce_max_length(status, MAX_CALLBACK_STATUS_LEN)
     }
 
-    /// `stellar_tx_hash` length cap.
+    /// Callback status: non-empty, ≤ [`MAX_CALLBACK_STATUS_LEN`] bytes.
+
     pub fn validate_stellar_tx_hash(hash: &String) -> Result<(), ContractError> {
+        if hash.len() == 0 {
+            return Err(ContractError::InvalidStellarTxHash);
+        }
         enforce_max_length(hash, MAX_STELLAR_TX_HASH_LEN)
     }
 
-    /// `failure_reason` length cap.
+    /// Stellar tx hash: non-empty, ≤ [`MAX_STELLAR_TX_HASH_LEN`] bytes.
+    /// `stellar_tx_hash` length cap.
     pub fn validate_failure_reason(reason: &String) -> Result<(), ContractError> {
+        if reason.len() == 0 {
+            return Err(ContractError::InvalidFailureReason);
+        }
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
+    }
+
+    /// Tags: at most [`MAX_TAGS_PER_TX`] entries, each ≤ [`MAX_TAG_LEN`] bytes.
+    pub fn validate_tags(tags: &soroban_sdk::Vec<String>) -> Result<(), ContractError> {
+        if tags.len() > MAX_TAGS_PER_TX {
+            return Err(ContractError::TooManyTags);
+        }
+        for tag in tags.iter() {
+            if tag.len() == 0 || tag.len() > MAX_TAG_LEN {
+                return Err(ContractError::InvalidTag);
+            }
+        }
+        Ok(())
     }
 }
