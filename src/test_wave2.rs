@@ -328,7 +328,7 @@ fn test_claim_unbond_rejects_with_no_pending_request() {
 
 use crate::types::SlashEvidence;
 
-/// Build two conflicting payloads (same tx_id, different amounts).
+/// Build two conflicting payloads (same `tx_id`, different amounts).
 fn conflicting_evidence(env: &Env, tx_id: &str) -> SlashEvidence {
     let account = g_addr(env);
     let account2 = g_addr2(env);
@@ -337,7 +337,7 @@ fn conflicting_evidence(env: &Env, tx_id: &str) -> SlashEvidence {
         stellar_account: account.clone(),
         amount: 1_000,
         asset_code: String::from_str(env, "USDC"),
-        asset_issuer: account.clone(),
+        asset_issuer: account,
         idempotency_key: String::from_str(env, "key-a"),
         anchor_transaction_id: String::from_str(env, "anc-1"),
         callback_type: CallbackType::Deposit,
@@ -423,7 +423,7 @@ fn test_slash_signer_rejects_tx_id_mismatch_in_payload_a() {
         stellar_account: account.clone(),
         amount: 1_000,
         asset_code: String::from_str(&env, "USDC"),
-        asset_issuer: account.clone(),
+        asset_issuer: account,
         idempotency_key: String::from_str(&env, "key-a"),
         anchor_transaction_id: String::from_str(&env, "anc-1"),
         callback_type: CallbackType::Deposit,
@@ -460,7 +460,7 @@ fn test_slash_signer_rejects_identical_payloads() {
         stellar_account: account.clone(),
         amount: 1_000,
         asset_code: String::from_str(&env, "USDC"),
-        asset_issuer: account.clone(),
+        asset_issuer: account,
         idempotency_key: String::from_str(&env, "key-a"),
         anchor_transaction_id: String::from_str(&env, "anc-1"),
         callback_type: CallbackType::Deposit,
@@ -488,7 +488,7 @@ fn test_slash_signer_idempotency_key_difference_alone_is_not_conflicting() {
         stellar_account: account.clone(),
         amount: 1_000,
         asset_code: String::from_str(&env, "USDC"),
-        asset_issuer: account.clone(),
+        asset_issuer: account,
         idempotency_key: String::from_str(&env, "key-a"),
         anchor_transaction_id: String::from_str(&env, "anc-1"),
         callback_type: CallbackType::Deposit,

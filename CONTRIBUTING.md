@@ -84,7 +84,7 @@ make check
 | Target       | What it runs                                                    |
 |--------------|-----------------------------------------------------------------|
 | `make fmt`   | `cargo fmt --all -- --check`                                    |
-| `make clippy`| `cargo clippy --all-targets -- -D warnings`                     |
+| `make clippy`| `cargo clippy --all-targets --all-features -- -D warnings`      |
 | `make test`  | `cargo test --verbose`                                          |
 | `make wasm`  | `cargo build --target wasm32-unknown-unknown --release`         |
 | `make build` | `cargo build --verbose` (quick debug build)                     |
@@ -103,13 +103,33 @@ Run this before committing if `make fmt` fails.
 ## Code style
 
 - Follow `rustfmt.toml` settings; `make fmt` is the arbiter.
-- No `clippy` warnings — `-D warnings` is enforced, with no exceptions.
+- No `clippy` warnings — `-D warnings` is enforced. See [Lints](#lints).
 - Prefer `?` for error propagation over explicit `match` on `Result`.
 - Keep `lib.rs` entry-points thin — delegate to the relevant module
   (`storage.rs`, `validation.rs`, `admin.rs`, `events.rs`).
 - Write tests in `tests.rs` (or a dedicated `test_*.rs` file for a focused
   concern). One test per entry-point as a minimum; edge cases go in the same
   module.
+
+### Lints
+
+`Cargo.toml`'s `[lints.clippy]` table enables `clippy::pedantic`,
+`clippy::nursery` and `clippy::cargo` in addition to the default set, and
+`make clippy` / CI deny every warning. Rules for exceptions:
+
+- Never allow a whole group. Opt out one lint at a time.
+- Every `allow` carries a one-line justification on the same line or the line
+  above it.
+- Prefer the narrowest scope: a single item (`#[allow(clippy::x)] // why`)
+  over a module, and a module over the crate-wide table in `Cargo.toml`.
+- Fix the code rather than allowing the lint whenever the fix is reasonable.
+
+Current crate-wide exceptions (in `Cargo.toml`): `multiple_crate_versions`
+(transitive soroban-sdk dependencies) and `must_use_candidate` (no effect on
+`#[contractimpl]` ABI methods). Scoped exceptions:
+`needless_pass_by_value` on the `#[contractimpl]` block (the contract ABI
+requires by-value arguments), and a handful of individually commented
+`#[allow]`s next to the code they cover.
 
 ---
 
