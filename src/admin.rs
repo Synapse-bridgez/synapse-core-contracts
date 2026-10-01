@@ -9,10 +9,10 @@
 //!
 //! Both roles are initialised once and can be rotated by the admin.
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, Vec};
 
 use crate::storage::StorageClient;
-use crate::types::ContractError;
+use crate::types::{AdminTransitionKind, AdminTransitionRecord, ContractError};
 
 pub struct AdminClient;
 
@@ -52,5 +52,41 @@ impl AdminClient {
         }
         caller.require_auth();
         Ok(())
+    }
+
+    /// Append a record of an admin transition to the append-only history log.
+    ///
+    /// Called by every admin-transition mechanism (routine two-step transfer
+    /// and break-glass guardian-quorum revocation) so that the full provenance
+    /// chain of the admin role is preserved on-chain.  `previous_admin` is the
+    /// admin being replaced, `new_admin` is the incoming admin, and `kind`
+    /// distinguishes *how* the transition happened so routine transfers and
+    /// emergency revocations remain forensically distinguishable.
+    pub fn record_transition(
+        env: &Env,
+        previous_admin: &Address,
+        new_admin: &Address,
+        kind: AdminTransitionKind,
+    ) {
+        let record = AdminTransitionRecord {
+            previous_admin: previous_admin.clone(),
+            new_admin: new_admin.clone(),
+            kind,
+            timestamp: env.ledger().timestamp(),
+        };
+        StorageClient::append_admin_transition(env, &record);
+    }
+
+    /// Return the complete, append-only history of admin transitions since
+    /// `initialize()`.
+    ///
+    /// Each [`AdminTransitionRecord`] captures the prior admin, the incoming
+    /// admin, the transition mechanism used (routine two-step transfer vs.
+    /// break-glass guardian-quorum revocation), and the ledger timestamp at
+    /// which the transition occurred.  Records are returned in chronological
+    /// order (oldest first).  Pre-feature transitions are not backfilled; see
+    /// `CHANGELOG.md`.
+    pub fn get_admin_history(env: &Env) -> Vec<AdminTransitionRecord> {
+        StorageClient::get_admin_history(env)
     }
 }
