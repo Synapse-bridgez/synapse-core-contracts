@@ -27,6 +27,45 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// always carry the real deployed commit hash.
 pub const BUILD_COMMIT: &str = env!("SYNAPSE_BUILD_COMMIT");
 
+// ─── Structured error diagnostics (#167) ──────────────────────────────────────
+
+/// Off-chain handling guidance for a [`ContractError`] variant.
+///
+/// Consumed by the `synapse-core` relay service's error-handling and alerting
+/// logic to decide how to react to a failed call without string-matching.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ErrorHandling {
+    /// Transient condition — the caller may safely retry the same call.
+    RetrySafe,
+    /// Permanent condition — retrying will not help; drop the call.
+    NotRetryable,
+    /// Requires operator attention; raise an alert.
+    AlertWorthy,
+    /// Expected/routine rejection; log only, no alert.
+    Routine,
+}
+
+/// Structured, machine-parseable diagnostic for a [`ContractError`] variant.
+///
+/// Every `ContractError` variant maps to exactly one `ErrorDiagnostic` via
+/// [`ContractError::diagnostic`]. The shape is deliberately fixed — a stable
+/// numeric `code` plus a small set of well-typed context fields — so the
+/// off-chain relay service can parse it without pattern-matching on free-text
+/// strings. See `docs/ERRORS.md` for the full reference table.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ErrorDiagnostic {
+    /// Stable numeric error code. Never reused or renumbered once published.
+    pub code: u32,
+    /// Whether the caller may retry, must drop, or should alert.
+    pub handling: ErrorHandling,
+    /// Whether this failure warrants an operator alert.
+    pub alert: bool,
+    /// Whether the failed call may be safely retried as-is.
+    pub retry_safe: bool,
+}
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -230,4 +269,93 @@ pub enum StorageKey {
 
     // ── Wave 2: Collateral Bonding (#143) ────
 
-/* … truncated 1640 chars — edit only what you need near the top … */
+    // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
+    /// Per-anchor tier config keyed by the anchor address.
+    AnchorTier(soroban_sdk::Address),
+
+    // ── Timelocked Upgrade (#163) ────────────────────────────────────────────
+    /// Singleton: in-flight timelocked upgrade proposal. Absent when no
+    /// upgrade is pending. See [`PendingUpgrade`].
+    PendingUpgrade,
+}
+
+// ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
+
+/// A single on-chain parameter entry.
+///
+/// Stored in persistent ledger storage keyed by [`StorageKey::Param`].
+/// All tunable values (fee rate, unbond delay, slash percentage, fee ceiling,
+/// etc.) live here rather than as independent ad-hoc admin-settable fields.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParamEntry {
+    /// Param value. Represented as `i128` to accommodate both integer counts
+    /// and scaled basis-point rates (e.g. 9_500 = 95.00 %).
+    pub value: i128,
+    /// Ledger sequence at which this param was last updated.
+    pub updated_at_ledger: u32,
+    /// Address that last set this param (always the admin).
+    pub updated_by: soroban_sdk::Address,
+}
+
+// ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
+
+/// In-flight timelocked upgrade proposal.
+///
+/// Stored in persistent ledger storage keyed by [`StorageKey::PendingUpgrade`].
+/// Absent when no upgrade is pending. See `SynapseCoreContract::propose_upgrade`
+/// and `SynapseCoreContract::execute_upgrade`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingUpgrade {
+    /// Hash of the new WASM blob to install once the timelock elapses.
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    /// Ledger sequence at which the proposal was created.
+    pub proposed_at_ledger: u32,
+    /// Ledger sequence at which the proposal becomes executable.
+    pub executable_at_ledger: u32,
+}
+
+// ─── Storage tier report (#168) ───────────────────────────────────────────────
+
+/// Per-tier storage breakdown row, mirroring a single row of the storage-tier
+/// table in `COST_MODEL.md`.
+///
+/// Units match the document exactly: `entries` is a raw count of ledger
+/// entries, `bytes` is the serialized byte footprint of those entries, and
+/// `rent_stroops` is the projected rent in stroops for the tier's entries.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageTierRow {
+    /// Tier name, matching the `COST_MODEL.md` tier labels
+    /// (e.g. "instance", "persistent", "temporary").
+    pub tier: String,
+    /// Number of live ledger entries in this tier.
+    pub entries: u32,
+    /// Serialized byte footprint of this tier's entries.
+    pub bytes: u32,
+    /// Projected rent for this tier's entries, in stroops.
+    pub rent_stroops: i128,
+}
+
+/// `COST_MODEL.md`-aligned storage cost-model report returned by
+/// `SynapseCoreContract::get_storage_tier_report()`.
+///
+/// Structured to mirror the document's existing cost-projection tables
+/// directly — same units, same breakdown categories — so operators can compare
+/// live on-chain reality against the document's stated projections without any
+/// off-chain translation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CostModelReport {
+    /// Ledger sequence at which the report was generated.
+    pub generated_at_ledger: u32,
+    /// Per-tier breakdown rows, one per storage tier, in `COST_MODEL.md` order.
+    pub tiers: soroban_sdk::Vec<StorageTierRow>,
+    /// Total live ledger entries across all tiers.
+    pub total_entries: u32,
+    /// Total serialized byte footprint across all tiers.
+    pub total_bytes: u32,
+    /// Total projected rent across all tiers, in stroops.
+    pub total_rent_stroops: i128,
+}

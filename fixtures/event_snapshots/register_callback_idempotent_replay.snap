@@ -1,0 +1,4 @@
+# event snapshot: register_callback_idempotent_replay
+# entry point:    register_callback
+# regenerate:     SYNAPSE_UPDATE_EVENT_SNAPSHOTS=1 cargo test event_snapshot
+(no events)
