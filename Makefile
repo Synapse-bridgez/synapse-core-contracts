@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build bench setup mutants
+.PHONY: check fmt clippy test wasm build bench setup mutants profile-diff
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
@@ -19,8 +19,16 @@ test:
 	cargo test --verbose
 
 ## Build the release wasm artefact (confirms the cdylib target compiles).
+##
+## The git commit hash is injected at compile time so that the on-chain
+## `contract_metadata()` query reports the exact deployed revision. The build
+## script (build.rs) reads `GIT_COMMIT_HASH` first, falling back to
+## `git rev-parse HEAD`, and finally to "unknown" for non-git source trees.
+## CI sets `GIT_COMMIT_HASH` explicitly (see .github/workflows/) so the value
+## baked into a released artefact always reflects the real deployed commit.
 wasm:
-	cargo build --target wasm32-unknown-unknown --release
+	GIT_COMMIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo unknown) \
+		cargo build --target wasm32-unknown-unknown --release
 
 ## Plain debug build (quick sanity check).
 build:
@@ -32,6 +40,13 @@ build:
 ## Grep-friendly: all cost lines are prefixed with "[bench]".
 bench:
 	cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
+
+## Differential test: run the behaviour trace under `release` and
+## `release-with-logs` and fail on any divergence (issue #131). Slow: builds
+## the test binary twice with LTO. `--self-test` proves detection works.
+profile-diff:
+	scripts/diff_profiles.sh --self-test
+	scripts/diff_profiles.sh
 
 ## One-time contributor setup: install the pre-commit hook.
 setup:
@@ -50,3 +65,4 @@ setup:
 ## CI uses a minimum-kill-rate budget (see .github/workflows/rust.yml).
 mutants:
 	cargo mutants --in-place
+

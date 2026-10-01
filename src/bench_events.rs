@@ -49,6 +49,7 @@
 #![cfg(test)]
 
 extern crate std;
+
 use std::eprintln;
 
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
@@ -163,10 +164,23 @@ fn bench_event_reg() {
     let contract_id = env.register(SynapseCoreContract, ());
     env.cost_estimate().budget().reset_default();
 
-    let tx_id = String::from_str(&env, TX_ID_STR);
-    let stellar_account = String::from_str(&env, G_ADDRESS_STR);
-    let asset_code = String::from_str(&env, "USDC");
-    let anchor_tx_id = String::from_str(&env, "anchor-tx-abc123");
+    let tx = crate::types::Transaction {
+        id: String::from_str(&env, TX_ID_STR),
+        stellar_account: String::from_str(&env, G_ADDRESS_STR),
+        amount: 10_000_000,
+        asset_code: String::from_str(&env, "USDC"),
+        asset_issuer: String::from_str(&env, G_ADDRESS_STR),
+        status: TransactionStatus::Pending,
+        created_at_ledger: 1,
+        updated_at_ledger: 1,
+        anchor_transaction_id: String::from_str(&env, "anchor-tx-abc123"),
+        callback_type: crate::types::CallbackType::Deposit,
+        callback_status: String::from_str(&env, "pending_external"),
+        stellar_tx_hash: String::from_str(&env, ""),
+        failure_reason: String::from_str(&env, ""),
+        retry_count: 0,
+        settled_amount: None,
+    };
 
     let result = measure_event(&env, &contract_id, || {
         EventEmitter::transaction_registered(
@@ -478,7 +492,16 @@ fn bench_event_upgrade() {
 ///
 /// Administrative events (one-time, amortised across many transactions):
 /// `init`, `propose`, `admin`, `relay`, `pause`, `upgrade`.
+// ── Regression gate ───────────────────────────────────────────────────────────
+// Update these constants AND add a row to COST_MODEL.md §9 when changing.
+//
+// Ceiling history:
+//   2026-Q3: CPU=5_000_000  MEM=1_000_000  (initial measurement, Wave 7)
+const CUMULATIVE_CPU_CEILING: u64 = 5_000_000;
+const CUMULATIVE_MEM_CEILING: u64 = 1_000_000;
+
 #[test]
+#[allow(clippy::too_many_lines)] // one straight-line measurement per event; splitting hides the sum
 fn bench_wave7_cumulative_cost() {
     let env = Env::default();
     let contract_id = env.register(SynapseCoreContract, ());
@@ -491,9 +514,23 @@ fn bench_wave7_cumulative_cost() {
     let hash = String::from_str(&env, STELLAR_HASH_STR);
     let reason = String::from_str(&env, "horizon_timeout");
     let wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
-    let stellar_account = String::from_str(&env, G_ADDRESS_STR);
-    let asset_code = String::from_str(&env, "USDC");
-    let anchor_tx_id = String::from_str(&env, "anchor-tx-abc123");
+    let tx = crate::types::Transaction {
+        id: tx_id.clone(),
+        stellar_account: String::from_str(&env, G_ADDRESS_STR),
+        amount: 10_000_000,
+        asset_code: String::from_str(&env, "USDC"),
+        asset_issuer: String::from_str(&env, G_ADDRESS_STR),
+        status: TransactionStatus::Pending,
+        created_at_ledger: 1,
+        updated_at_ledger: 1,
+        anchor_transaction_id: String::from_str(&env, "anchor-tx-abc123"),
+        callback_type: crate::types::CallbackType::Deposit,
+        callback_status: String::from_str(&env, "pending_external"),
+        stellar_tx_hash: String::from_str(&env, ""),
+        failure_reason: String::from_str(&env, ""),
+        retry_count: 0,
+        settled_amount: None,
+    };
 
     // ── Measure ───────────────────────────────────────────────────────────
     let r_init = measure_event(&env, &contract_id, || {
@@ -609,22 +646,11 @@ fn bench_wave7_cumulative_cost() {
     );
     eprintln!("[bench] ─── lifecycle totals ──────────────────────────────────");
     eprintln!(
-        "[bench] lifecycle (reg+2xstatus+done)  cpu={:<8}  mem={:<8}",
-        lifecycle_cpu, lifecycle_mem
+        "[bench] lifecycle (reg+2xstatus+done)  cpu={lifecycle_cpu:<8}  mem={lifecycle_mem:<8}"
     );
-    eprintln!(
-        "[bench] all 10 events                  cpu={:<8}  mem={:<8}",
-        total_cpu, total_mem
-    );
+    eprintln!("[bench] all 10 events                  cpu={total_cpu:<8}  mem={total_mem:<8}");
 
-    // ── Regression gate ───────────────────────────────────────────────────
-    // Update these constants AND add a row to COST_MODEL.md §9 when changing.
-    //
-    // Ceiling history:
-    //   2026-Q3: CPU=5_000_000  MEM=1_000_000  (initial measurement, Wave 7)
-    const CUMULATIVE_CPU_CEILING: u64 = 5_000_000;
-    const CUMULATIVE_MEM_CEILING: u64 = 1_000_000;
-
+    // ── Regression gate (see CUMULATIVE_*_CEILING above) ─────────────────
     assert!(
         total_cpu <= CUMULATIVE_CPU_CEILING,
         "cumulative event CPU {total_cpu} exceeds ceiling {CUMULATIVE_CPU_CEILING}; \

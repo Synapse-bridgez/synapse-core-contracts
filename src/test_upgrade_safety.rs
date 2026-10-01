@@ -76,7 +76,7 @@ fn test_finalize_before_delay_fails() {
     client.propose_upgrade(&hash(&env, 0x33), &SCHEMA_VERSION);
     assert_eq!(
         client.try_finalize_upgrade(),
-        Err(Ok(ContractError::UpgradeTimelockNotElapsed))
+        Err(Ok(ContractError::TimelockNotElapsed))
     );
 }
 
@@ -89,7 +89,7 @@ fn test_propose_cancel_finalize_fails() {
     assert!(client.get_pending_upgrade().is_none());
     assert_eq!(
         client.try_finalize_upgrade(),
-        Err(Ok(ContractError::NoPendingUpgrade))
+        Err(Ok(ContractError::NoPendingChange))
     );
 }
 
@@ -106,10 +106,10 @@ fn test_propose_wait_finalize_past_timelock() {
     let result = client.try_finalize_upgrade();
     assert_ne!(
         result,
-        Err(Ok(ContractError::UpgradeTimelockNotElapsed)),
+        Err(Ok(ContractError::TimelockNotElapsed)),
         "delay elapsed — must not fail the timelock gate"
     );
-    assert_ne!(result, Err(Ok(ContractError::NoPendingUpgrade)));
+    assert_ne!(result, Err(Ok(ContractError::NoPendingChange)));
 }
 
 #[test]

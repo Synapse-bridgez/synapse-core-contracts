@@ -9,7 +9,7 @@
 //!   WASM. Unknown IDs fail closed with [`ContractError::UnknownMigration`].
 //! * A single call may touch at most [`MAX_MIGRATION_STORAGE_TOUCHES`]
 //!   storage entries. Exceeding the cap fails with
-//!   [`ContractError::MigrationBoundExceeded`] before any further work —
+//!   [`ContractError::MigrationFailed`] before any further work —
 //!   so simulation/dry-run surfaces the failure rather than partial
 //!   mainnet execution.
 //! * Migrations larger than one call require a resumable multi-call state
@@ -67,7 +67,7 @@ impl MigrationRegistry {
 
     fn assert_within_bound(planned_touches: u32) -> Result<(), ContractError> {
         if planned_touches > MAX_MIGRATION_STORAGE_TOUCHES {
-            return Err(ContractError::MigrationBoundExceeded);
+            return Err(ContractError::MigrationFailed);
         }
         Ok(())
     }

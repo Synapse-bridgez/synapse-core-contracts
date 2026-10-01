@@ -254,8 +254,11 @@ attack vector.
 
 `stellar_account` / `asset_issuer` are validated with a hand-rolled SEP-23
 base32 decode + CRC16-XModem check (see [`DECISIONS.md`](./DECISIONS.md)
-§ Strkey CRC16).  Per-call CPU is low thousands of instructions — negligible
-beside the ~0.01 XLM storage write for `register_callback`.  Release WASM grew
+§ Strkey CRC16).  Metered on the release WASM (§12) each strkey check costs
+~30k instructions after #120's nibble-table CRC (~55k with the original
+bitwise loop) — still negligible beside the ~0.01 XLM storage write for
+`register_callback`, but the largest guest-side cost in validation, which is
+why `validate_payload` runs it last (§12.5).  Release WASM grew
 by **418 bytes** (19 820 → 20 238) under `opt-level = "z"`; fee impact is
 dominated by ledger writes, not validation.
 
@@ -474,12 +477,215 @@ read fees per upgrade — negligible next to the WASM-swap host cost itself.
 
 ## 11. Batch registration (`batch_register_callback`)
 
-Batch size is capped at `MAX_BATCH_SIZE` (20). Worst case is 20 payloads with
-max-length string fields: each payload costs one persistent write for the
-transaction (~512 B fee-rounded, see section 2), one temporary write for the
-idempotency key, one status-index update, and one event, plus a single
-`EventBatchProcessed`. Validation runs over the whole batch before any write,
-including an O(n^2) in-batch duplicate check (at most 190 comparisons). The
-cap is deliberately conservative to stay well under the per-transaction
-resource limits; raise it only after benchmarking.
+Two limits apply, both checked before any storage write (#173):
 
+### 11.1 Resource-budget check (#173)
+
+The count cap alone does not bound cost: 20 items with long strings (the
+idempotency key is uncapped) can still approach Soroban's per-transaction
+limits. Before any write, `batch_register_callback` computes a conservative,
+O(n) byte estimate from `String::len()` alone
+(`Validator::estimate_batch_cost`) and rejects the whole batch with
+`BatchBudgetExceeded` if either figure exceeds its budget:
+
+| Estimate | Per item | Per batch | Budget |
+|----------|----------|-----------|--------|
+| Write bytes | 256 + 2×`transaction_id` + `stellar_account` + `asset_code` + `anchor_transaction_id` + `asset_issuer` + `callback_status` + `idempotency_key` | — | 32 768 (½ of the lowest mainnet per-tx write limit, 65 536) |
+| Event bytes | 128 + `transaction_id` + `stellar_account` + `asset_code` + `anchor_transaction_id` | 128 + first and last `transaction_id` | 8 192 (½ of the 16 384-byte per-tx events limit) |
+
+Strings are weighted by how many times they are written: `transaction_id` is
+in the storage key, the record, and the `reg` event; account, asset code and
+anchor id are in the record and the event. The fixed overheads over-count XDR
+framing on purpose. A false reject is acceptable; a mid-execution resource
+failure is not.
+
+With every capped field at its maximum, a full 20-item batch estimates at
+16 000 + Σ`idempotency_key` write bytes and 6 736 event bytes, so every
+legitimate batch fits. The budget only rejects batches with unusually large
+idempotency keys (or over-long fields, which it catches before per-item
+validation runs). Tests in `src/test_batch_budget.rs` pin the exact boundary:
+a batch at exactly 32 768 estimated write bytes succeeds, and one byte more
+is rejected with no storage write and no events.
+
+## 12. Resource-usage regression gate (#119)
+
+`.github/workflows/resource-gate.yml` builds the release WASM and runs
+`scripts/check_resource_budget.sh`, which meters every hot entry point
+(`src/bench_resources.rs`) and compares against the committed
+[`resource_baseline.toml`](./resource_baseline.toml). The build fails if any
+scenario's `cpu_insns` or `mem_bytes` exceeds its baseline by more than
+`threshold_pct` (initially **15%**).
+
+### 12.1 What is measured
+
+* **Release WASM, not native Rust.** Native tests run contract code as plain
+  Rust, so the budget sees only host calls; strkey decoding, CRC16 and any
+  other guest-side loop cost nothing there. Registering the built `.wasm`
+  meters every executed instruction, as validators do.
+* **Net of invocation overhead.** Every call pays a fixed ~3.0M-instruction /
+  ~1.77 MB cost to instantiate the VM for the ~53 KB module. That is recorded
+  once as `invocation_overhead` (a trivial `health()` call — catches WASM-size
+  bloat), and every other scenario is stored net of it, so a 15% threshold
+  applies to the entry point's own work.
+* **One fresh env per scenario** — preconditions (register, start processing,
+  propose admin, …) are set up unmetered; only the call under test is metered.
+* **Rejection paths.** `register_callback_reject_*` meter each validation
+  failure so the cost of turning away malformed input is tracked (#120).
+
+### 12.2 Variance and the threshold
+
+Soroban metering is a deterministic cost model, not wall-clock timing:
+repeated local runs and CI runs of the same WASM produce identical numbers
+(0.0% delta), so runner noise does not apply. What *does* move the numbers is
+a different WASM — including one built by a different `rustc`. The workflow
+therefore pins `RUST_TOOLCHAIN` to the version the baseline was generated
+with, and the script prints the WASM's size and SHA-256 prefix so a mismatch
+is easy to spot. The 15% threshold is deliberately loose for a first rollout;
+given zero measured variance it can be tightened (e.g. to 5%) once the team
+is comfortable with the update workflow below.
+
+### 12.3 Gate self-test
+
+The workflow proves the gate is not vacuous: `--inject register_callback:25`
+inflates one measurement by 25% and **must** fail (`--expect-fail`), while
+`--inject register_callback:10` stays under the threshold and must pass. The
+comparison logic itself (at/above threshold, missing/stale entries, baseline
+round-trip) is unit-tested in every `cargo test`.
+
+### 12.4 Updating the baseline
+
+When a change legitimately needs more (or now needs less) budget:
+
+1. Build with the pinned toolchain:
+   `rustup run <RUST_TOOLCHAIN> cargo build --target wasm32-unknown-unknown --release`
+2. Regenerate: `scripts/check_resource_budget.sh --update`
+3. Commit `resource_baseline.toml` in the same PR, and state in the PR
+   description which scenarios moved, by how much, and why.
+4. Adding a new scenario to `src/bench_resources.rs` requires the same step —
+   the gate reports `MISSING` for scenarios without a baseline entry and
+   `STALE` for baseline entries without a scenario.
+
+When bumping `RUST_TOOLCHAIN` in the workflow, regenerate the baseline with
+the new toolchain in the same PR.
+
+A failure looks like:
+
+```text
+Resource-usage gate failed (#119): 1 finding(s) against resource_baseline.toml
+
+  REGRESSION  register_callback: cpu_insns 442300 vs baseline 353840 (+25.0%; threshold +15%)
+```
+
+### 12.5 Validation short-circuit (#120)
+
+`Validator::validate_payload` now runs checks cheapest-first — `amount`, then
+the four host-`len()` checks, then `asset_code`, and the two strkey
+verifications last — and strkey verification rejects a non-`G` prefix before
+the base32 decode. CRC16 uses a 16-entry nibble table (+49 B WASM) instead of
+eight shift/branch rounds per byte. Accept/reject outcomes are unchanged for
+every combination of invalid fields (exhaustively tested); only the error
+reported first changes when several fields are invalid.
+
+Net `cpu_insns` per call, release WASM (`resource_baseline.toml`):
+
+| Scenario | Before | After | Δ |
+|----------|-------:|------:|--:|
+| reject: `amount = 0` | 110 115 | 56 662 | −48.5% |
+| reject: empty `idempotency_key` | 166 174 | 57 094 | −65.6% |
+| reject: `callback_status` too long | 168 406 | 59 326 | −64.7% |
+| reject: lowercase `asset_code` | 111 889 | 61 100 | −45.3% |
+| reject: `stellar_account` CRC mismatch | 110 115 | 90 397 | −17.9% |
+| reject: `asset_issuer` CRC mismatch (worst case) | 165 742 | 119 294 | −28.0% |
+| `register_callback` (accepted) | 353 840 | 304 728 | −13.8% |
+| `register_callback` (idempotent replay) | 190 807 | 141 695 | −25.7% |
+
+### 12.6 Hot-path allocation audit (#121)
+
+**Guest heap.** The release WASM is byte-identical with and without
+`soroban-sdk`'s `alloc` feature: no contract code path allocates on the guest
+heap, so the allocator is never linked. The existing fixed-capacity buffers
+(`[u8; 56]` strkey, `[u8; 12]` asset code, `[u8; 35]` decode output) already
+live on the stack and match their validation caps exactly; boundary tests at
+cap−1 / cap / cap+1 are in `src/tests_hot_path.rs`. `alloc` stays enabled
+(out of scope to remove).
+
+**Host objects.** On Soroban the real allocation cost of these entry points
+is host-side: every `String`, `Vec` and `Map` the contract creates, including
+each `StorageKey` passed to a storage call (encoded to a new host
+`Vec [Symbol, payload]` every time).
+
+| Site | Verdict | Change |
+|------|---------|--------|
+| `StorageKey` re-encoded for `get`/`set` then `extend_ttl` (transaction, idempotency key) | Avoidable | Encode once (`storage::encode_key`), reuse the `Val` — identical ledger key |
+| Two `String::from_str(&env, "")` in `register_callback` | Avoidable | One object, second use clones the handle |
+| `assert_is_relay_or_admin` always reads admin **and** relay | Avoidable for relay callers | Check relay first; admin is read only if needed |
+| `Transaction` → host `Map` on save, event structs → host `Map` on publish | Necessary | — (ledger / event encoding) |
+| Handle `clone()`s of `String`/`Address` | Free | — (copies a 64-bit handle, no allocation) |
+| Wave 2 bond/unbond/param storage | Not hot | Left as is |
+
+Net cost per call, release WASM:
+
+| Scenario | cpu_insns before → after | mem_bytes before → after |
+|----------|-------------------------:|-------------------------:|
+| `start_processing` | 255 476 → 208 035 (−18.5%) | 19 032 → 17 689 (−7.0%) |
+| `complete_transaction` | 273 247 → 225 806 (−17.3%) | 20 057 → 18 714 (−6.6%) |
+| `fail_transaction` | 268 135 → 220 694 (−17.6%) | 19 410 → 18 067 (−6.9%) |
+| `get_transaction` | 100 746 → 88 161 (−12.4%) | 5 682 → 5 447 (−4.1%) |
+| `register_callback` | 304 728 → 277 268 (−9.0%) | 18 463 → 17 886 (−3.1%) |
+| `invocation_overhead` | 3 023 843 → 2 997 803 (−0.9%) | 1 770 917 → 1 768 066 (−0.2%) |
+
+The release WASM also shrank from 53 475 to 53 432 bytes.
+
+## 13. Release WASM size gate (#122)
+
+`scripts/check_wasm_size.sh` (CI: `.github/workflows/resource-gate.yml`;
+local: `make wasm-size`) measures `make wasm`'s output — the same release
+profile (`opt-level = "z"`, `lto = true`, `strip = "symbols"`,
+`panic = "abort"`) that `DEPLOYMENT.md` uploads — against
+[`wasm_size.toml`](./wasm_size.toml).
+
+### 13.1 Network limit
+
+Read from the live network config via RPC `getLedgerEntries` on 2026-09-29;
+mainnet and testnet are identical:
+
+| Setting | Value | Relevance |
+|---------|------:|-----------|
+| `contract_max_size_bytes` (ConfigSettingID 0) | **131 072** | Hard cap on an uploaded WASM — the binding limit |
+| `txMaxSizeBytes` (bandwidth, ID 5) | 132 096 | Upload tx envelope must also fit |
+| `txMaxWriteBytes` (ledger cost, ID 2) | 132 096 | Upload writes the code entry |
+
+Re-check after protocol upgrades (`stellar network settings`, or the same RPC
+query) and update `network_limit_bytes` / `ceiling_bytes` if they change.
+
+### 13.2 Checks
+
+| Check | Setting | Fails when |
+|-------|---------|-----------|
+| Regression | `baseline_bytes`, `max_growth_pct = 5` | size > baseline × 1.05 |
+| Ceiling | `ceiling_bytes = 98 304` | size > 96 KiB (75% of the network limit, leaving 32 KiB headroom for future in-place upgrades) |
+
+At introduction the WASM is **53 432 bytes** — 54% of the ceiling, 41% of
+the network limit — so no size-reduction follow-up is needed.
+
+Failure output names the delta, e.g.:
+
+```text
+REGRESSION: release WASM grew 16429 bytes (+30.7%),
+  53432 -> 69861 bytes; allowed growth is +5% (max 56103 bytes).
+```
+
+### 13.3 Self-test fixtures
+
+CI builds the contract with `--features size-gate-fixture`, which links a
+deliberately bloated dummy export (`src/size_gate_fixture.rs`, a 16 KiB
+pseudo-random table) and asserts the gate **fails** on it; it also asserts
+the real WASM fails an artificially low `--ceiling 50000`. The feature is
+wasm-only and never part of a deployable build.
+
+### 13.4 Accepting intended growth
+
+Run `scripts/check_wasm_size.sh --update` (with the workflow's pinned
+toolchain — size depends on `rustc`), commit `wasm_size.toml`, and state the
+growth and its reason in the PR. Raising `ceiling_bytes` itself needs a
+separate, explicit decision since it eats into upgrade headroom.

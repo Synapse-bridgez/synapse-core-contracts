@@ -138,7 +138,10 @@ fn quorum_met_allowed_one_short_rejected() {
     client.add_relay_signer(&s2);
     client.set_relay_threshold(&2);
     assert_eq!(
-        client.try_start_processing(&a, &primary).unwrap_err().unwrap(),
+        client
+            .try_start_processing(&a, &primary)
+            .unwrap_err()
+            .unwrap(),
         ContractError::QuorumNotMet
     );
     client.approve_relay_call(&s2);
@@ -160,7 +163,10 @@ fn threshold_bounds_enforced() {
     );
     let primary = client.relay_signer();
     assert_eq!(
-        client.try_remove_relay_signer(&primary).unwrap_err().unwrap(),
+        client
+            .try_remove_relay_signer(&primary)
+            .unwrap_err()
+            .unwrap(),
         ContractError::InvalidThreshold
     );
     let _ = env;
@@ -190,7 +196,7 @@ fn timelock_boundary_and_cancel() {
     client.cancel_relay_signer_change();
     assert_eq!(
         client.try_finalize_relay_signer().unwrap_err().unwrap(),
-        ContractError::NoPendingRelaySigner
+        ContractError::NoPendingChange
     );
 }
 

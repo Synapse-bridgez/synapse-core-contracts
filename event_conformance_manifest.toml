@@ -263,24 +263,101 @@ type = "soroban_sdk::Address"
 name = "ledger"
 type = "u32"
 
-# ── Soft-failure validation rejection (#115) ─────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 [[event]]
-struct_name = "EventValidationRejected"
-topic       = "val_rej"
-emitter_fn  = "validation_rejected"
+struct_name = "EventFeeAccrued"
+topic       = "fee"
+emitter_fn  = "fee_accrued"
 
 [[event.fields]]
-name = "idempotency_key"
+name = "tx_id"
 type = "String"
 
 [[event.fields]]
-name = "reason_code"
+name = "fee_amount"
+type = "i128"
+
+[[event.fields]]
+name = "treasury_balance"
+type = "i128"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventWithdrawalProposed"
+topic       = "wprop"
+emitter_fn  = "withdrawal_proposed"
+
+[[event.fields]]
+name = "proposed_by"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "amount"
+type = "i128"
+
+[[event.fields]]
+name = "destination"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventWithdrawalExecuted"
+topic       = "wexec"
+emitter_fn  = "withdrawal_executed"
+
+[[event.fields]]
+name = "authorized_by"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "amount"
+type = "i128"
+
+[[event.fields]]
+name = "destination"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "treasury_balance"
+type = "i128"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventBatchProcessed"
+topic       = "batch"
+emitter_fn  = "batch_processed"
+
+[[event.fields]]
+name = "caller"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "batch_size"
 type = "u32"
 
 [[event.fields]]
-name = "anchor"
+name = "first_tx_id"
 type = "String"
+
+[[event.fields]]
+name = "last_tx_id"
+type = "String"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
 
 [[event.fields]]
 name = "ledger"
