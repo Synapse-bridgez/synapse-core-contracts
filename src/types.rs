@@ -27,6 +27,14 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// always carry the real deployed commit hash.
 pub const BUILD_COMMIT: &str = env!("SYNAPSE_BUILD_COMMIT");
 
+/// Current on-chain events schema version.
+///
+/// Mirrors the locked event schema documented in `EVENTS.md`. Surfaced by
+/// [`HealthReport`] so dashboard/monitoring consumers can detect a schema
+/// drift between the deployed contract and the version they were built
+/// against without issuing a separate query.
+pub const EVENTS_VERSION: u32 = 1;
+
 // ─── Structured error diagnostics (#167) ──────────────────────────────────────
 
 /// Off-chain handling guidance for a [`ContractError`] variant.
@@ -273,10 +281,84 @@ pub enum StorageKey {
     /// Per-anchor tier config keyed by the anchor address.
     AnchorTier(soroban_sdk::Address),
 
+    // ── Wave 2: Diagnostic Queries (#151) ────────────────────────────────────
+    /// Singleton: current treasury balance in stroops.
+    ///
+    /// Read directly by [`crate::SynapseCoreContract::get_treasury_balance`]
+    /// as a lightweight, dashboard-friendly counterpart to the fuller
+    /// `get_fee_reconciliation` report. Absent means zero (no fees accrued
+    /// yet), never an error.
+    TreasuryBalance,
+    /// Singleton: total bonded collateral across all signers, in stroops.
+    ///
+    /// Read directly by [`crate::SynapseCoreContract::get_bonded_collateral`]
+    /// when called with `None`. Absent means zero (no bonding has occurred
+    /// yet), never an error.
+    TotalBondedCollateral,
+
     // ── Timelocked Upgrade (#163) ────────────────────────────────────────────
     /// Singleton: in-flight timelocked upgrade proposal. Absent when no
     /// upgrade is pending. See [`PendingUpgrade`].
     PendingUpgrade,
+}
+
+// ─── Wave 2: Diagnostic Queries (#153) ────────────────────────────────────────
+
+/// Structured, dashboard-friendly diagnostic snapshot returned by
+/// [`crate::SynapseCoreContract::health_detailed`].
+///
+/// This is a purely additive companion to the existing boolean-ish
+/// `health()` query: `health()` is left untouched for backward compatibility
+/// with current `synapse-web` consumers, while `health_detailed()` composes
+/// the same signal together with the per-subsystem state that this Wave
+/// added. Every field is derived from a single cheap storage read so the
+/// report stays suitable for frequent dashboard polling.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct HealthReport {
+    /// Whether `initialize()` has been called. `false` means the contract is
+    /// not yet configured and every other field should be treated as
+    /// provisional.
+    pub initialised: bool,
+
+    /// Emergency-pause / circuit-breaker state. `true` means new callback
+    /// ingestion via `register_callback` is refused.
+    pub paused: bool,
+
+    /// Whether a trusted relay signer has been configured. `false` means
+    /// callback ingestion cannot be authorised yet.
+    pub relay_signer_set: bool,
+
+    /// Whether an admin transfer is currently in flight (an address has been
+    /// nominated via `StorageKey::PendingAdmin` and has not yet accepted).
+    pub pending_admin: bool,
+
+    /// Storage-tier footprint summary for the diagnostic-relevant singletons.
+    pub storage: StorageFootprint,
+
+    /// On-chain storage schema version, mirroring [`SCHEMA_VERSION`].
+    pub schema_version: u32,
+
+    /// On-chain events schema version, mirroring [`EVENTS_VERSION`].
+    pub events_version: u32,
+}
+
+/// Storage-tier footprint summary embedded in [`HealthReport`].
+///
+/// Each field is a direct read of an existing singleton key, so assembling
+/// the summary adds no meaningful cost to `health_detailed()`. Absent keys
+/// are reported as zero rather than as an error.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StorageFootprint {
+    /// Current treasury balance in stroops
+    /// ([`StorageKey::TreasuryBalance`]). Zero when no fees have accrued.
+    pub treasury_balance: i128,
+
+    /// Total bonded collateral across all signers, in stroops
+    /// ([`StorageKey::TotalBondedCollateral`]). Zero when no bonding has
+    /// occurred.
+    pub total_bonded_collateral: i128,
 }
 
 // ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
@@ -287,16 +369,7 @@ pub enum StorageKey {
 /// All tunable values (fee rate, unbond delay, slash percentage, fee ceiling,
 /// etc.) live here rather than as independent ad-hoc admin-settable fields.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ParamEntry {
-    /// Param value. Represented as `i128` to accommodate both integer counts
-    /// and scaled basis-point rates (e.g. 9_500 = 95.00 %).
-    pub value: i128,
-    /// Ledger sequence at which this param was last updated.
-    pub updated_at_ledger: u32,
-    /// Address that last set this param (always the admin).
-    pub updated_by: soroban_sdk::Address,
-}
+#[derive(Clone, Debug
 
 // ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
 

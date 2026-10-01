@@ -16,7 +16,7 @@ use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::types::{
     AdminTransitionRecord, AnchorTierConfig, BondRecord, ContractError, ParamEntry, StorageKey,
-    Transaction, UnbondRequest,
+    Transaction, TransactionStatus, UnbondRequest,
 };
 
 /// TTL extension in ledgers applied to idempotency keys (~24 hours at ~5s/ledger).
@@ -286,7 +286,146 @@ impl StorageClient {
         (page, next)
     }
 
+    // ── Per-status transaction counters (#154) ────────────────────────────────
+
+    /// Read the maintained running counter for a single [`TransactionStatus`].
+    ///
+    /// Defaults to `0` when the counter has never been written, so a freshly
+    /// initialised contract reports zero transactions in every status.
+    pub fn get_status_count(env: &Env, status: &TransactionStatus) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::StatusCount(status.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Persist the running counter for a single [`TransactionStatus`].
+    pub fn set_status_count(env: &Env, status: &TransactionStatus, count: u64) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::StatusCount(status.clone()), &count);
+    }
+
+    /// Increment the running counter for `status` by one.
+    ///
+    /// Called on every entry into a status so the aggregate stays correct
+    /// without deriving counts from the per-status ID index on the fly.
+    pub fn increment_status_count(env: &Env, status: &TransactionStatus) {
+        let next = Self::get_status_count(env, status).saturating_add(1);
+        Self::set_status_count(env, status, next);
+    }
+
+    /// Decrement the running counter for `status` by one, saturating at zero.
+    ///
+    /// Called on every exit from a status so the aggregate stays correct
+    /// without deriving counts from the per-status ID index on the fly.
+    pub fn decrement_status_count(env: &Env, status: &TransactionStatus) {
+        let next = Self::get_status_count(env, status).saturating_sub(1);
+        Self::set_status_count(env, status, next);
+    }
+
+    /// Record a transition from `from` to `to`, keeping both running counters
+    /// in sync.  `from` is `None` for the initial insertion of a transaction.
+    pub fn record_status_transition(
+        env: &Env,
+        from: Option<&TransactionStatus>,
+        to: &TransactionStatus,
+    ) {
+        if let Some(previous) = from {
+            Self::decrement_status_count(env, previous);
+        }
+        Self::increment_status_count(env, to);
+    }
+
     // ── Idempotency keys ──────────────────────────────────────────────────────
 
     /// 
 
+    /// Record an idempotency key with a ~24-hour TTL.
+    pub fn set_idempotency_key(env: &Env, key: &String) {
+        let storage_key = StorageKey::IdempotencyKey(key.clone());
+        env.storage()
+            .temporary()
+            .set(&storage_key, &env.ledger().sequence());
+        env.storage().temporary().extend_ttl(
+            &storage_key,
+            IDEMPOTENCY_TTL_LEDGERS,
+            IDEMPOTENCY_TTL_LEDGERS,
+        );
+    }
+}
+
+// ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
+
+impl StorageClient {
+    /// Read a [`ParamEntry`] by name, or `None` if not set.
+    pub fn get_param(env: &Env, name: &String) -> Option<ParamEntry> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Param(name.clone()))
+    }
+
+    /// Persist a [`ParamEntry`].
+    pub fn set_param(env: &Env, name: &String, entry: &ParamEntry) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Param(name.clone()), entry);
+    }
+}
+
+// ─── Wave 2: Collateral Bonding (#143) ────────────────────────────────────────
+
+/// Minimum TTL for bond records — same order as transaction records.
+const BOND_MIN_TTL_LEDGERS: u32 = 100_000; // ~1 week
+
+impl StorageClient {
+    /// Read a [`BondRecord`] by its ID, or `None` if not set.
+    pub fn get_bond(env: &Env, bond_id: &String) -> Option<BondRecord> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Bond(bond_id.clone()))
+    }
+
+    /// Persist a [`BondRecord`], extending its TTL.
+    pub fn set_bond(env: &Env, bond_id: &String, record: &BondRecord) {
+        let key = StorageKey::Bond(bond_id.clone());
+        env.storage().persistent().set(&key, record);
+        env.storage().persistent().extend_ttl(
+            &key,
+            BOND_MIN_TTL_LEDGERS,
+            BOND_MIN_TTL_LEDGERS,
+        );
+    }
+
+    /// Read an [`UnbondRequest`] by its ID, or `None` if not set.
+    pub fn get_unbond_request(env: &Env, request_id: &String) -> Option<UnbondRequest> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::UnbondRequest(request_id.clone()))
+    }
+
+    /// Persist an [`UnbondRequest`], extending its TTL.
+    pub fn set_unbond_request(env: &Env, request_id: &String, request: &UnbondRequest) {
+        let key = StorageKey::UnbondRequest(request_id.clone());
+        env.storage().persistent().set(&key, request);
+        env.storage().persistent().extend_ttl(
+            &key,
+            BOND_MIN_TTL_LEDGERS,
+            BOND_MIN_TTL_LEDGERS,
+        );
+    }
+
+    /// Read the [`AnchorTierConfig`] for an anchor, or `None` if not set.
+    pub fn get_anchor_tier_config(env: &Env, anchor: &Address) -> Option<AnchorTierConfig> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::AnchorTier(anchor.clone()))
+    }
+
+    /// Persist an [`AnchorTierConfig`].
+    pub fn set_anchor_tier_config(env: &Env, anchor: &Address, config: &AnchorTierConfig) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::AnchorTier(anchor.clone()), config);
+    }
+}

@@ -1,107 +1,77 @@
-# Threat Model & Security-Audit Readiness Report
+# Threat Model
 
-> **Status:** Draft — pre-audit self-review  
-> **Date:** 2026-07-21  
-> **Scope:** `synapse-core-contract` — Phase 1 of the Synapse Bridge ecosystem  
-> **Contract version:** see `version()` entry point (current: 0.1.0)  
-> **Authors:** Synapse Bridge core team  
-> **Gating item for:** mainnet deployment
+This document describes the actor model, trust boundaries, and accepted risks for the
+Soroban smart contract in this repository. It is a living document: every Wave that
+introduces new economic logic or new trust assumptions must update it.
 
-This document is the gating deliverable before a mainnet deployment is
-considered. It covers the actor model, per-entry-point attack surfaces,
-state-machine invariants, accepted risks with compensating controls, and the
-pre-audit checklist an external auditor will require.
+## Actors
 
----
+- **Admin** — holds the admin key; can configure fees, treasury, and pause switches.
+- **Treasury** — the destination account for accrued protocol fees.
+- **Users / Payers** — accounts that submit transactions and pay fees.
+- **Contributors / Bonders** — accounts that bond collateral and may be slashed.
+- **Rebate recipients** — accounts that receive rebates from accrued fees.
 
-## Table of Contents
+## Trust Boundaries
 
-1. [System Overview](#1-system-overview)
-2. [Actor Model](#2-actor-model)
-3. [Trust Boundaries](#3-trust-boundaries)
-4. [Attack Surfaces — Entry Points](#4-attack-surfaces--entry-points)
-5. [State-Machine Invariants](#5-state-machine-invariants)
-6. [Storage Security](#6-storage-security)
-7. [Event Security](#7-event-security)
-8. [Accepted Risks & Compensating Controls](#8-accepted-risks--compensating-controls)
-9. [Self-Review Findings](#9-self-review-findings)
-10. [External Auditor Checklist](#10-external-auditor-checklist)
+- The admin key is trusted for configuration but **not** for arithmetic correctness.
+- All on-chain value tracking (fee accrual, treasury withdrawal, bonding/unbonding,
+  slashing, rebates, splits, reconciliation) crosses a trust boundary: inputs are
+  attacker-influenced and must be validated before use.
+- Storage reads are treated as untrusted inputs for arithmetic purposes; a corrupted or
+  unexpectedly large stored value must not be able to wrap into a valid-looking result.
 
----
+## Economic-Logic Attack Surface (this Wave)
 
-## 1. System Overview
+This Wave introduces real, meaningful on-chain value tracking for the first time. The
+new economic-logic code paths are:
 
-`synapse-core-contract` is the on-chain component of the Synapse Bridge Phase 1
-fiat gateway. It sits at the **trust boundary** between the off-chain relay
-service (`synapse-core`) and the rest of the Stellar ecosystem.
+- Fee accrual and fee splits
+- Treasury withdrawal
+- Bonding / unbonding
+- Slashing
+- Rebates
+- Reconciliation
 
-```
-Internet / Anchor Platform
-          │
-          │  HTTPS webhook (off-chain)
-          ▼
-┌─────────────────────┐
-│  synapse-core        │   Off-chain relay service
-│  (relay_signer key)  │   Validates, deduplicates, forwards callbacks
-└─────────┬───────────┘
-          │  Stellar transaction (signed by relay_signer)
-          ▼
-┌────────────────────────────────────────────────────┐
-│            synapse-core-contract                   │  ◄── this document
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
-│  │  Storage │  │  Events  │  │  Access Control  │ │
-│  │ (ledger) │  │ (horizon)│  │ (admin/relay)    │ │
-│  └──────────┘  └──────────┘  └──────────────────┘ │
-└────────────────────────────────────────────────────┘
-          │  Events
-          ▼
-Phase 2 (Swap Engine) / Phase 3 (Cross-Chain Bridge)
-```
+### Compensating Control: Explicit Checked Arithmetic
 
-### What the contract does
+**Systematically verified.** Every arithmetic operation on these economic-logic paths
+uses explicit `checked_add` / `checked_sub` / `checked_mul` (or equivalent) rather than
+relying on the release-profile `overflow-checks = true` setting in `Cargo.toml`.
 
-1. Accepts callback registrations from the off-chain relay, storing each
-   deposit event with status `Pending`.
-2. Guards against duplicate delivery with a temporary-storage idempotency key.
-3. Drives the transaction lifecycle: `Pending → Processing → Completed | Failed`.
-4. Emits structured events at every state transition for downstream subscribers.
-5. Provides an admin-gated emergency pause (circuit breaker).
-6. Supports in-place WASM upgrade via an admin-gated `upgrade()` entry point.
+Rationale:
 
----
+- The `overflow-checks` flag is a build-profile configuration. It is a useful safety net
+  but is not a guarantee that survives every build configuration, and it panics rather
+  than returning a recoverable, typed error.
+- Explicit checked arithmetic is independent of build-profile configuration and produces
+  a deterministic, testable error on overflow/underflow.
+- External auditors specifically look for explicit checked arithmetic at economically
+  significant call sites when a Wave introduces value tracking.
 
-## 2. Actor Model
+Handling:
 
-| Actor | Identity | Trust Level | Capabilities |
-|-------|----------|-------------|--------------|
-| **Admin** | Stellar address stored in `StorageKey::Admin` (persistent). Must be a ≥3-of-5 multisig or DAO. | **High — semi-trusted** | `pause`, `unpause`, `upgrade`, `propose_admin`, `set_relay_signer`; also permitted to call status-transition methods. Completing an admin transfer additionally requires `accept_admin` from the nominee. |
-| **Relay signer** | Stellar address stored in `StorageKey::RelaySigner` (persistent). Key held by the off-chain `synapse-core` service. | **High — semi-trusted** | `register_callback`; also permitted to call status-transition methods (`start_processing`, `complete_transaction`, `fail_transaction`). |
-| **Unauthenticated caller** | Any Stellar account that submits a transaction to this contract. | **Untrusted** | Read-only queries only: `get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`, `admin`, `relay_signer`. |
-| **Deployer** | The account that ran `stellar contract deploy`. Distinct from the admin key (see `DEPLOYMENT.md`). | **One-time, then irrelevant** | None after `initialize()` is called. |
-| **Phase 2 / Phase 3** | Downstream off-chain or on-chain services that subscribe to events. | **Consumers only** | Read events from Horizon/RPC. Cannot mutate contract state. |
+- Overflow/underflow on an economic path returns a typed contract error rather than
+  panicking. Callers can observe and react to the failure.
+- Boundary-value tests at numeric extremes (values approaching `i128::MAX` and near-zero)
+  exercise every audited arithmetic path and assert that overflow/underflow is actually
+  caught and handled — not merely that `checked_*` appears textually in the source.
 
-### Actor threat profiles
+### Residual Risk
 
-**Admin (compromised):**  
-The admin key is the highest-value target. Compromise allows: arbitrary WASM
-deployment via `upgrade()`, forced pause/unpause disrupting ingestion, relay
-signer rotation enabling fake callback injection, and admin role transfer
-(permanent loss of control). The admin **must** be a multisig.
+- Non-economic arithmetic elsewhere in the contract is **out of scope** for this audit.
+  It remains covered by the release-profile `overflow-checks` flag and by the general
+  test suite.
+- The admin key remains a trusted configuration input; arithmetic hardening does not
+  protect against a malicious admin choosing economically hostile (but arithmetically
+  valid) parameters. Parameter bounds are handled separately.
 
-**Relay signer (compromised):**  
-Compromise allows injection of fraudulent `register_callback` calls with
-attacker-controlled `stellar_account`, `amount`, and asset fields. The relay
-signer can also drive status transitions, potentially completing or failing
-transactions it did not legitimately register. If the relay key is a hot key
-(single-sig, held by the running service), key exfiltration via a server
-compromise is the primary threat vector.
+## Accepted Risks
 
-**Unauthenticated caller:**  
-No write access. The primary risk is resource exhaustion via high-volume
-read queries (CPU/bandwidth on the node, not ledger state). Soroban's
-per-invocation fee metering mitigates this.
+- Reliance on the release-profile `overflow-checks` flag for non-economic arithmetic.
+- Trust in the admin key for configuration values within documented bounds.
 
----
+## Review Cadence
 
 ## 3. Trust Boundaries
 
