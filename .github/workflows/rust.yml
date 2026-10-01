@@ -35,6 +35,14 @@ jobs:
       - name: Run tests
         run: cargo test --all-features --verbose
 
+      # #133: event-payload snapshots are compared, never rewritten, unless
+      # SYNAPSE_UPDATE_EVENT_SNAPSHOTS is set. Belt-and-braces: fail if the
+      # test run left any fixture modified or untracked.
+      - name: Event snapshots unchanged by the test run (#133)
+        run: |
+          git diff --exit-code -- fixtures/event_snapshots/
+          test -z "$(git status --porcelain -- fixtures/event_snapshots/)"
+
       - name: Build wasm (once)
         run: cargo build --target wasm32-unknown-unknown --release
 
@@ -77,6 +85,40 @@ jobs:
           echo "::group::Event emission cost breakdown"
           cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
           echo "::endgroup::"
+
+  # ── Profile differential testing — Issue #131 ──────────────────────────
+  #
+  # `release` and `release-with-logs` differ only in debug-assertions. This
+  # job runs the full suite under both profiles, then diffs a behaviour trace
+  # (return values, events, ledger state for every entry point) between them.
+  # A self-test first proves the diff catches a deliberately injected
+  # debug-assertions-dependent divergence. See scripts/diff_profiles.sh.
+  profile-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-profile-diff-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Test suite (release)
+        run: cargo test --profile release
+
+      - name: Test suite (release-with-logs)
+        run: cargo test --profile release-with-logs
+
+      - name: Harness self-test (must detect injected divergence)
+        run: scripts/diff_profiles.sh --self-test
+
+      - name: Compare release vs release-with-logs behaviour
+        run: scripts/diff_profiles.sh
 
   # ── Mutation testing — Issue #128 ─────────────────────────────────────────
   #
