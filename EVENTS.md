@@ -79,8 +79,11 @@ supported.
 | [`EventGuardianSet`](#eventguardianset) | `guardian` | `EventEmitter::guardian_set` | `set_guardian` | **Live** |
 | [`EventAutoPaused`](#eventautopaused) | `apause` | `EventEmitter::auto_paused` | `trip_auto_pause` | **Live** |
 | [`EventAutoUnpaused`](#eventautounpaused) | `aunpause` | `EventEmitter::auto_unpaused` | `unpause_auto` (quorum met) | **Live** |
-| [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` (sibling issue) | **Schema locked** |
-| [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` (sibling issue) | **Schema locked** |
+| [`EventDisputeRaised`](#eventdisputeraised) | `dispute` | `EventEmitter::dispute_raised` | `dispute_transaction` | **Live** |
+| [`EventDisputeResolved`](#eventdisputeresolved) | `dsprslvd` | `EventEmitter::dispute_resolved` | `resolve_dispute` | **Live** |
+| [`EventFeeAccrued`](#eventfeeaccrued) | `fee` | `EventEmitter::fee_accrued` | `complete_transaction` (non-zero fee only) | **Live** |
+| [`EventWithdrawalProposed`](#eventwithdrawalproposed) | `wprop` | `EventEmitter::withdrawal_proposed` | `propose_withdrawal` | **Live** |
+| [`EventWithdrawalExecuted`](#eventwithdrawalexecuted) | `wexec` | `EventEmitter::withdrawal_executed` | `authorize_withdrawal` | **Live** |
 
 **Locked schema** means topics, struct fields, types, and field order are fixed
 in this document and in `src/events.rs` even if the `publish` call is still
@@ -544,7 +547,7 @@ Verified by `test_pause::test_self_check_events_topics`.
 |--|--|
 | **Topics** | `synapse`, `dispute` |
 | **Struct** | `EventDisputeRaised` |
-| **Emitted by** | `dispute_transaction` (sibling issue) |
+| **Emitted by** | `dispute_transaction` |
 | **When** | A dispute is opened against a transaction |
 | **Status** | Schema locked |
 
@@ -555,13 +558,13 @@ Verified by `test_pause::test_self_check_events_topics`.
 | `caller` | `Address` | Address that raised the dispute (relay signer or admin) |
 | `ledger` | `u32` | Ledger sequence at emit |
 
-**Re-dispute cardinality:** a given `tx_id` may produce more than one
-`dispute` / `dsprslvd` event pair over its lifetime if the dispute
-state machine permits re-disputing after a prior resolution. Subscribers
-MUST correlate pairs by `tx_id` and emission order rather than assuming
-at-most-one per transaction. Once the sibling dispute state-machine issue
-finalises the cardinality policy, this note will be updated to reflect the
-exact rule (once-only or repeatable).
+**Re-dispute cardinality:** repeatable. A transaction whose dispute was
+rejected (`upheld = false`) stays `Completed` and may be disputed again, so a
+given `tx_id` may produce more than one `dispute` / `dsprslvd` pair over its
+lifetime. An upheld dispute moves it to `Failed`, which cannot be disputed.
+Subscribers MUST correlate pairs by `tx_id` and emission order rather than
+assuming at-most-one per transaction. Open disputes can be listed oldest-first
+with `get_dispute_queue`.
 
 Verified by snapshot-style test `tests::test_dispute_raised_event_payload_snapshot`
 (topics `synapse` / `dispute`).
@@ -572,7 +575,7 @@ Verified by snapshot-style test `tests::test_dispute_raised_event_payload_snapsh
 |--|--|
 | **Topics** | `synapse`, `dsprslvd` |
 | **Struct** | `EventDisputeResolved` |
-| **Emitted by** | `resolve_dispute` (sibling issue) |
+| **Emitted by** | `resolve_dispute` |
 | **When** | A raised dispute is resolved by the admin |
 | **Status** | Schema locked |
 
@@ -598,6 +601,61 @@ Verified by snapshot-style tests
 `tests::test_dispute_resolved_upheld_true_event_payload_snapshot` and
 `tests::test_dispute_resolved_upheld_false_event_payload_snapshot`
 (topics `synapse` / `dsprslvd`).
+
+
+### EventFeeAccrued
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `fee` |
+| **Struct** | `EventFeeAccrued` |
+| **Emitted by** | `complete_transaction` |
+| **When** | After `done`, only when `floor(amount * base_fee_bps / 10_000) > 0` |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tx_id` | `String` | Transaction whose completion accrued the fee |
+| `fee_amount` | `i128` | Fee added to the treasury, in stroops |
+| `treasury_balance` | `i128` | Treasury balance after accrual |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+Fee-rate changes are observable as `param` events for `base_fee_bps`.
+
+### EventWithdrawalProposed
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `wprop` |
+| **Struct** | `EventWithdrawalProposed` |
+| **Emitted by** | `propose_withdrawal` |
+| **When** | Admin records a pending treasury withdrawal (step 1 of 2; replaces any earlier pending proposal) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `proposed_by` | `Address` | Admin that proposed |
+| `amount` | `i128` | Proposed amount, in stroops |
+| `destination` | `Address` | Proposed recipient |
+| `ledger` | `u32` | Ledger sequence at emit |
+
+### EventWithdrawalExecuted
+
+| | |
+|--|--|
+| **Topics** | `synapse`, `wexec` |
+| **Struct** | `EventWithdrawalExecuted` |
+| **Emitted by** | `authorize_withdrawal` |
+| **When** | Relay signer co-authorizes the matching pending proposal and the treasury is debited (step 2 of 2) |
+| **Status** | Live |
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `authorized_by` | `Address` | Relay signer that co-authorized |
+| `amount` | `i128` | Amount debited, in stroops |
+| `destination` | `Address` | Recipient |
+| `treasury_balance` | `i128` | Treasury balance after the debit |
+| `ledger` | `u32` | Ledger sequence at emit |
 
 ---
 
@@ -631,7 +689,7 @@ names, types, and order are frozen.
 | `register_callback` (first write) | 1. `reg` |
 | `register_callback` (idempotent hit) | *(no events)* |
 | `start_processing` | 1. `status` (`Pending` → `Processing`) |
-| `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done` |
+| `complete_transaction` | 1. `status` (`Processing` → `Completed`)<br>2. `done`<br>3. `fee` *(only when a non-zero fee accrues)* |
 | `fail_transaction` | 1. `status` (`Pending`\|`Processing` → `Failed`)<br>2. `fail` |
 | `propose_admin` | 1. `propose` |
 | `accept_admin` | 1. `admin` |
@@ -644,6 +702,8 @@ names, types, and order are frozen.
 | `rollback_upgrade` | 1. `upgrade`<br>2. `rollback` |
 | `upgrade_and_migrate` | 1. `upgrade`<br>2. `migrate` |
 | `pause` / `unpause` | 1. `pause` |
+| `propose_withdrawal` | 1. `wprop` |
+| `authorize_withdrawal` | 1. `wexec` |
 | `set_signer_attestation` | 1. `attest` |
 | `renounce_admin` | 1. `renounce` |
 | `set_guardian` | 1. `guardian` |
@@ -671,17 +731,19 @@ compatibility test in `src/events.rs`
 (`test_additive_field_old_decoder_compatibility`), which decodes a new-shape
 payload using old-shape decoding logic and asserts graceful handling.
 
-Future entry-points wiring the dispute events (sibling issue):
+Dispute entry-points:
 
 | Entry-point | Order (first → last) |
 |-------------|----------------------|
 | `dispute_transaction` | 1. `dispute` |
-| `resolve_dispute` | 1. `dsprslvd` |
+| `resolve_dispute` | 1. `status` (`Completed → Failed`, only when `upheld = true`) 2. `dsprslvd` |
 
 **Rationale for `complete_transaction`:** Phase 2 indexers that listen only to
 `done` still see completion; those that key off `status` with
 `new_status == Completed` see the transition first, then the hash-bearing
 `done` payload. Reordering would break dual-subscriber setups.
+`fee` is appended **after** `done` so subscribers relying on the
+`status` → `done` pair see no change in relative order.
 
 ---
 
@@ -785,6 +847,11 @@ dependencies) and is documented in the manifest file itself.
 2. Update `event_conformance_manifest.toml` to match.
 3. Update the catalogue table(s) in §3 of this file.
 4. Run `make check` — all three artefacts must agree or CI blocks.
+5. Regenerate the payload snapshots
+   (`SYNAPSE_UPDATE_EVENT_SNAPSHOTS=1 cargo test event_snapshot`) and commit
+   the reviewed diff under `fixtures/event_snapshots/`. Those fixtures pin the
+   exact emitted topics and payload XDR per entry point
+   (`src/test_event_snapshots.rs`, #133). Any unregenerated change fails CI.
 
 ### Manual review steps
 

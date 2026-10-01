@@ -17,6 +17,13 @@ separately from general code changes. Full topic/field contracts live in
 
 ### Event schema
 
+- Restored `EventBatchProcessed` (topic `batch`) to `src/events.rs`; it was
+  catalogued as Live in `EVENTS.md` but its struct and emitter were lost in
+  #197. Now also covered by the conformance manifest.
+- `EventDisputeRaised` / `EventDisputeResolved` are now **Live**, emitted by
+  `dispute_transaction` / `resolve_dispute`. An upheld `resolve_dispute`
+  emits `status` (`Completed → Failed`) before `dsprslvd`.
+
 - Added `EventDisputeRaised` (topic `dispute`), emitted by the future
   `dispute_transaction` entry-point (sibling issue). Schema locked in
   `src/events.rs` and catalogued in `EVENTS.md`. Additive new event per
@@ -34,8 +41,59 @@ separately from general code changes. Full topic/field contracts live in
   `EventUpgradeSelfCheckFailed` (topic `chk_fail`), emitted by `upgrade`
   around the post-upgrade storage-integrity self-check. Additive new
   events — Minor bump.
+- Added `EventFeeAccrued` (`fee`), `EventWithdrawalProposed` (`wprop`), and
+  `EventWithdrawalExecuted` (`wexec`). Additive new events — Minor bump.
+  `fee` is emitted by `complete_transaction` **after** `done`, only when a
+  non-zero fee accrues; the existing `status` → `done` order is unchanged.
 
 ### Added
+
+- On-chain fee accrual (#141): `complete_transaction` accrues
+  `floor(amount * base_fee_bps / 10_000)` to `treasury_balance()`, reading
+  the existing `base_fee_bps` registry param (unset = no fee). The math is
+  overflow-free and checked (`ArithmeticOverflow`). See
+  [ADR-0008](./docs/adr/0008-fee-accrual-and-treasury-withdrawal.md).
+- Two-party treasury withdrawal (#142): admin `propose_withdrawal(amount,
+  destination)`, then relay-signer `authorize_withdrawal(caller, amount,
+  destination)`, which must restate the proposal
+  (`WithdrawalProposalMismatch` otherwise). Withdrawals are capped per epoch
+  by the `treasury_epoch_cap` / `treasury_epoch_length` params. Queries:
+  `treasury_config()`, `pending_withdrawal()`. New error codes 110–117.
+- `set_param` range-checks `base_fee_bps` (0–10 000), `treasury_epoch_cap`
+  (> 0), and `treasury_epoch_length` (1–`u32::MAX`), rejecting other values
+  with `InvalidParamValue`. Other param names are unchanged.
+- `src/test_accepted_risks.rs` (#139): executable tests for the THREAT_MODEL.md
+  §8 compensating controls, R-01 … R-06 (R-06 is new: treasury two-party auth).
+- `tools/export-test-vectors` and `test-vectors.json` (#140): portable test
+  vectors for independent auditor replay, documented in
+  [`docs/test-vectors.md`](./docs/test-vectors.md).
+- `get_dispute_queue(cursor, limit)` (#166): paginated, oldest-first list of
+  open disputes, with stable sequence-number cursors. Backed by the restored
+  `dispute_transaction` / `resolve_dispute` / `is_disputed` entry points and
+  the new `get_dispute` query. At most `MAX_OPEN_DISPUTES` (100) may be open.
+- Global `global_max_amount` ceiling (#169), set via the param registry and
+  on by default (`DEFAULT_GLOBAL_MAX_AMOUNT` = 10^15). Enforced on single and
+  batch registration alongside the restored per-anchor ceiling
+  (`set_anchor_amount_ceiling`); the lower of the two wins. New queries
+  `get_amount_ceiling(anchor)` and `get_global_max_amount()`.
+- Resource-budget check in `batch_register_callback` (#173): a conservative
+  write/event byte estimate rejects over-budget batches with
+  `BatchBudgetExceeded` before any write. See `COST_MODEL.md` §11.1.
+- Stricter Clippy configuration (#175): `pedantic`, `nursery` and `cargo`
+  enabled in `Cargo.toml`, with individually justified exceptions.
+  See `CONTRIBUTING.md` § Lints.
+
+### Fixed
+
+- `main` compiles again: repaired merge damage in `src/events.rs` from #197
+  and restored the batch-registration, dispute and per-anchor-ceiling code that
+  `src/validation.rs` and the test suite still depended on. Tests for other
+  entry points removed in #197 are quarantined; see `QUARANTINE.md`.
+- `unbond_collateral` no longer truncates an out-of-range
+  `unbond_delay_ledgers` param (e.g. `2^32 + 5` became a 5-ledger delay). A
+  negative or oversized delay now fails closed (never claimable).
+- `batch_register_callback` now rejects replayed or in-batch duplicate
+  idempotency keys with `DuplicateRequest`.
 
 - Timelocked upgrade flow (#81 / ADR-0004): `propose_upgrade`,
   `finalize_upgrade`, `cancel_upgrade`, `get_pending_upgrade`,
@@ -50,13 +108,62 @@ separately from general code changes. Full topic/field contracts live in
 - Schema compatibility ranges (#84 / ADR-0006):
   `set_schema_compatibility_range` / `schema_compatibility_range`; default
   unset behaviour remains exact-match (ADR-0003).
+- Resource-usage regression gate (#119): CI meters every hot entry point of
+  the release WASM against `resource_baseline.toml` and fails on a >15%
+  regression. See COST_MODEL.md §12 for the baseline-update process.
+- Release WASM size gate (#122): CI fails if `make wasm`'s output grows >5%
+  over `wasm_size.toml`'s baseline or exceeds a 96 KiB ceiling (75% of
+  Soroban's 131 072-byte `contract_max_size_bytes`). See COST_MODEL.md §13.
+- Test infrastructure (#131–#134):
+  - Differential testing between the `release` and `release-with-logs`
+    profiles (#131): `scripts/diff_profiles.sh` / `make profile-diff` diffs a
+    return-value + event + ledger-state trace of every entry point across
+    both profiles. It runs in the new `profile-diff` CI job alongside a
+    self-test that proves it catches an injected `debug_assertions`
+    divergence.
+  - Relay-signer rotation × in-flight transaction harness (#132): exhaustive
+    rotation-timing/kind/driver enumeration plus seeded chaos runs against a
+    reference model, asserting stale signers are always rejected and no
+    transaction is ever left stuck (`src/test_rotation_chaos.rs`).
+  - Event-payload snapshot gate (#133): committed fixtures in
+    `fixtures/event_snapshots/` pin exact topics and payload XDR for every
+    emitting entry point and ordering variant. Drift fails `cargo test` with a
+    diff, and updates need `SYNAPSE_UPDATE_EVENT_SNAPSHOTS=1`. Catalogue gaps
+    against EVENTS.md §2 are tracked explicitly.
+  - Boundary-value coverage for every numeric/length cap (#134), with the cap
+    inventory and findings in `src/test_boundaries.rs`.
 
 ### Changed
 
+- `register_callback` validation runs cheapest-first (#120); with several
+  invalid fields the *first* error reported can differ (e.g. `InvalidAmount`
+  before `InvalidStellarAccount`). Accept/reject outcomes are unchanged.
+  Worst-case rejection −28% CPU; cheap rejections −45…−66%.
+- Hot entry points allocate fewer host objects (#121): `start_processing`,
+  `complete_transaction`, `fail_transaction` ≈ −18% CPU / −7% memory;
+  `register_callback` −9% / −3%. No storage-layout or AB
+
+### Changed
+
+- `register_callback` validation runs cheapest-first (#120); with several
+  invalid fields the *first* error reported can differ (e.g. `InvalidAmount`
+  before `InvalidStellarAccount`). Accept/reject outcomes are unchanged.
+  Worst-case rejection −28% CPU; cheap rejections −45…−66%.
+- Hot entry points allocate fewer host objects (#121): `start_processing`,
+  `complete_transaction`, `fail_transaction` ≈ −18% CPU / −7% memory;
+  `register_callback` −9% / −3%. No storage-layout or ABI change.
 - THREAT_MODEL.md §8 **R-05** status updated from accepted (no timelock) to
   **mitigated** via the propose/finalize flow.
 - `upgrade()` schema guard now checks the configured `[min, max]` range
   instead of exact equality only (range defaults to exact match).
+
+### Fixed
+
+- `unbond_collateral` converted the `unbond_delay_ledgers` param with a
+  wrapping `as u32` cast, so a delay of 2^32 (or any multiple) became a zero
+  delay and the unbond was claimable immediately, bypassing the slash window.
+  Negative values wrapped to huge delays. The value is now clamped to
+  `[0, u32::MAX]` before conversion (found by the #134 boundary audit).
 
 ### Event schema (prior unreleased)
 - Added `EventRelaySignerRotated` (topic `relay`), emitted by
@@ -141,6 +248,13 @@ separately from general code changes. Full topic/field contracts live in
   keys, `#89`).
 
 ### Fixed
+
+- `main` builds and tests again: bad-merge fragments in `events.rs`, orphan
+  validators referencing never-merged error variants, and test modules that
+  did not compile. Tests for entry points lost in the #176–#197 merges are
+  gated behind `cfg(synapse_quarantine)` (see `src/lib.rs`) until restored.
+  `schema_ci` and `bench_events` are now compiled, so the #88 schema gate and
+  event benches actually run; CI installs the `wasm32` target again.
 
 - **Security:** `propose_admin` rejects nominating the contract's own
   address, which could not practically call `accept_admin` back and would
