@@ -20,7 +20,7 @@
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env, String,
+    Address, BytesN, Env, String,
 };
 
 use crate::types::{CallbackPayload, CallbackType, ContractError};
@@ -52,7 +52,7 @@ fn setup() -> (Env, SynapseCoreContractClient<'static>, Address, Address) {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &relay);
+    client.initialize(&admin, &relay, &BytesN::from_array(&env, &[0x01u8; 32]));
     (env, client, admin, relay)
 }
 
@@ -136,7 +136,7 @@ fn test_set_param_requires_admin() {
     let admin = Address::generate(&env);
     let relay = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &relay);
+    client.initialize(&admin, &relay, &BytesN::from_array(&env, &[0x01u8; 32]));
 
     // Try to set a param without admin auth — should panic (auth failure).
     // We verify that only the admin can write by checking the stored `updated_by`.
