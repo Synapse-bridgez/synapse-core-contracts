@@ -387,14 +387,7 @@ read fees per upgrade — negligible next to the WASM-swap host cost itself.
 
 ## 11. Batch registration (`batch_register_callback`)
 
-Batch size is capped at `MAX_BATCH_SIZE` (20). Worst case is 20 payloads with
-max-length string fields: each payload costs one persistent write for the
-transaction (~512 B fee-rounded, see section 2), one temporary write for the
-idempotency key, one status-index update, and one event, plus a single
-`EventBatchProcessed`. Validation runs over the whole batch before any write,
-including an O(n^2) in-batch duplicate check (at most 190 comparisons). The
-cap is deliberately conservative to stay well under the per-transaction
-resource limits; raise it only after benchmarking.
+Two limits apply, both checked before any storage write (#173):
 
 ### 11.1 Resource-budget check (#173)
 
@@ -423,19 +416,6 @@ idempotency keys (or over-long fields, which it catches before per-item
 validation runs). Tests in `src/test_batch_budget.rs` pin the exact boundary:
 a batch at exactly 32 768 estimated write bytes succeeds, and one byte more
 is rejected with no storage write and no events.
-
-## 12. Resource-usage regression gate (#119)
-
-`.github/workflows/resource-gate.yml` builds the release WASM and runs
-`scripts/check_resource_budget.sh`, which meters every hot entry point
-(`src/bench_resources.rs`) and compares against the committed
-[`resource_baseline.toml`](./resource_baseline.toml). The build fails if any
-scenario's `cpu_insns` or `mem_bytes` exceeds its baseline by more than
-`threshold_pct` (initially **15%**).
-
-### 12.1 What is measured
-
-* **Release WASM, not native Rust.
 
 ## 12. Resource-usage regression gate (#119)
 

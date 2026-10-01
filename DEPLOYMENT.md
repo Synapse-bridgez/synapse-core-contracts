@@ -131,6 +131,20 @@ stellar contract invoke \
 This is a one-time call; it will fail with `AlreadyInitialised` if called
 again.
 
+Then record the WASM hash you deployed, so the first upgrade stores a real
+`previous_wasm_hash` in `get_upgrade_history()` and can be undone with
+`rollback_upgrade`. This is also a one-time call:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source <ADMIN_SECRET> \
+  --network <network> \
+  -- \
+  register_installed_wasm \
+  --wasm_hash <WASM_HASH_FROM_UPLOAD>
+```
+
 ---
 
 ## Post-Deployment Smoke Test

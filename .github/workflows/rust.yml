@@ -86,6 +86,16 @@ jobs:
           cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
           echo "::endgroup::"
 
+      # Ledger-I/O budgets per entry point (#116 / #123 / #125). Budgets are
+      # asserted by the "Run tests" step; this prints native and release-WASM
+      # numbers (CPU + fee estimate) for trend tracking.
+      - name: Ledger-I/O resource budgets (tracked metric)
+        run: |
+          echo "::group::Resource budgets"
+          SYNAPSE_BENCH_WASM=$PWD/target/wasm32-unknown-unknown/release/synapse_core_contract.wasm \
+            cargo test bench_resource -- --nocapture 2>&1 | grep -E '^\[resources'
+          echo "::endgroup::"
+
   # ── Profile differential testing — Issue #131 ──────────────────────────
   #
   # `release` and `release-with-logs` differ only in debug-assertions. This

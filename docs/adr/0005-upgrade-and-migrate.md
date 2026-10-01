@@ -24,10 +24,12 @@ primitive with clear failure semantics and resource bounds.
 1. Schema-range check
 2. Dispatch `migration_id` in `migration.rs` (routines shipped in **this** WASM)
 3. On success, shared WASM-swap primitive with `LastUpgradeMigrated = true`
+   when the routine touched storage (a no-op migration stays reversible)
 4. On any `Err`, Soroban aborts the invoke — storage byte-identical, no swap
 
 **Bound:** `MAX_MIGRATION_STORAGE_TOUCHES = 64`. Planned work above the cap
-returns `MigrationBoundExceeded` before further touches.
+returns `MigrationFailed` before further touches (the error enum is capped at
+50 variants, so the bound shares the migration-failure code).
 
 **Resumability (v1 out of scope):** Migrations that cannot fit in one call
 need a multi-call state machine (cursor + checkpoint keys). Document the

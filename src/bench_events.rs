@@ -178,6 +178,8 @@ fn bench_event_reg() {
         callback_status: String::from_str(&env, "pending_external"),
         stellar_tx_hash: String::from_str(&env, ""),
         failure_reason: String::from_str(&env, ""),
+        retry_count: 0,
+        settled_amount: None,
     };
 
     let result = measure_event(&env, &contract_id, || {
@@ -519,6 +521,8 @@ fn bench_wave7_cumulative_cost() {
         callback_status: String::from_str(&env, "pending_external"),
         stellar_tx_hash: String::from_str(&env, ""),
         failure_reason: String::from_str(&env, ""),
+        retry_count: 0,
+        settled_amount: None,
     };
 
     // ── Measure ───────────────────────────────────────────────────────────

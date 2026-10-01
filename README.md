@@ -202,9 +202,11 @@ existing (possibly `Completed`/`Failed`) transaction.
 | Data             | Tier        | Reason                                  |
 |------------------|-------------|-----------------------------------------|
 | Admin / relay    | `persistent`| Must survive contract instance restore  |
-| Transactions     | `persistent`| Long-lived audit record                 |
+| Transactions     | `persistent`| Long-lived audit record, stored packed as `StoredTransaction` |
+| Status index     | `persistent`| One slot entry per transaction + a count per status |
 | Idempotency keys | `temporary` | Self-expiring after 24 h (≈18 000 ledgers) |
-| Init flag        | `instance`  | Lives with the contract instance        |
+| Relay approvals  | `temporary` | Co-signer approvals, consumed by the next relay call |
+| Init / pause flags, relay signer set, default ceiling | `instance` | Small, read on hot paths; loaded with every invocation anyway |
 
 ### In-Place Contract Upgradability
 

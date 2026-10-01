@@ -314,7 +314,7 @@ fn test_claim_unbond_rejects_if_delay_not_elapsed() {
     // Only 50 ledgers forward — delay is 100.
     env.ledger().with_mut(|l| l.sequence_number = 1_050);
     let result = client.try_claim_unbond(&relay);
-    assert_eq!(result, Err(Ok(ContractError::UnbondDelayNotElapsed)));
+    assert_eq!(result, Err(Ok(ContractError::TimelockNotElapsed)));
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn test_slash_signer_rejects_tx_id_mismatch_in_payload_a() {
         payload_b: pb,
     };
     let result = client.try_slash_signer(&relay, &evidence, &admin);
-    assert_eq!(result, Err(Ok(ContractError::EvidenceTxIdMismatch)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidSlashEvidence)));
 }
 
 #[test]
@@ -474,7 +474,7 @@ fn test_slash_signer_rejects_identical_payloads() {
         payload_b: pb,
     };
     let result = client.try_slash_signer(&relay, &evidence, &admin);
-    assert_eq!(result, Err(Ok(ContractError::EvidenceNotConflicting)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidSlashEvidence)));
 }
 
 #[test]
@@ -505,7 +505,7 @@ fn test_slash_signer_idempotency_key_difference_alone_is_not_conflicting() {
         payload_b: pb,
     };
     let result = client.try_slash_signer(&relay, &evidence, &admin);
-    assert_eq!(result, Err(Ok(ContractError::EvidenceNotConflicting)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidSlashEvidence)));
 }
 
 // ─── set_anchor_tier / get_anchor_tier / compute_effective_fee (#145) ─────────

@@ -15,6 +15,17 @@ separately from general code changes. Full topic/field contracts live in
 
 ## [Unreleased]
 
+> **Restoration note (#199).** Merges #176–#197 dropped most of their `src/`
+> changes, and `main` did not compile from #176 until #199 was fixed. The
+> features below were re-implemented against the current API. Items that were
+> announced here but never existed in code have been removed from this
+> changelog: the #87 upgrade quorum (`set_upgrade_quorum`, `cosigners`,
+> `uqset` / `uprop`), #89 namespaced storage keys and `SCHEMA_VERSION = 2`,
+> #90 genesis hash (3-argument `initialize`, `get_previous_wasm_hash`),
+> `*_with_nonce` entry points, `get_transaction_history`, transaction expiry,
+> guardian / auto-pause / attestation / renounce. `initialize` and `upgrade`
+> keep their 2-argument signatures and the schema version stays `1`.
+
 ### Event schema
 
 - Restored `EventBatchProcessed` (topic `batch`) to `src/events.rs`; it was
@@ -23,6 +34,16 @@ separately from general code changes. Full topic/field contracts live in
 - `EventDisputeRaised` / `EventDisputeResolved` are now **Live**, emitted by
   `dispute_transaction` / `resolve_dispute`. An upheld `resolve_dispute`
   emits `status` (`Completed → Failed`) before `dsprslvd`.
+- Added `cancel`, `retry`, `batch` (`EventBatchProcessed`), `partial`,
+  `tagged`, `merged`, `fwd`, `ceiling`, `rs_prop`, `rs_canc`, `rs_add`,
+  `rs_rm` and `rs_thr` events. Additive new events — Minor bump.
+- `EventStatusChanged` can now carry `Cancelled` as `new_status`, and
+  `Failed → Pending` (retry) as a transition. `TransactionStatus` gains a
+  trailing `Cancelled` variant.
+- EVENTS.md §2 now lists every emitted topic and is checked against
+  `src/events.rs` by `event_decoder_covers_catalogued_topics`. Wave 2 events
+  (`param`, `bonded`, `unbondrq`, `unbondcl`, `slashed`, `tierset`,
+  `rebate`) were emitted but undocumented; they are now catalogued.
 
 - Added `EventDisputeRaised` (topic `dispute`), emitted by the future
   `dispute_transaction` entry-point (sibling issue). Schema locked in
@@ -82,6 +103,19 @@ separately from general code changes. Full topic/field contracts live in
 - Stricter Clippy configuration (#175): `pedantic`, `nursery` and `cargo`
   enabled in `Cargo.toml`, with individually justified exceptions.
   See `CONTRIBUTING.md` § Lints.
+- Transaction lifecycle (#176–#178): `cancel_transaction` (terminal
+  `Cancelled`), `retry_transaction` (`Failed → Pending`, at most
+  `MAX_RETRIES` = 3), `batch_register_callback` (atomic, ≤ 20 payloads),
+  paginated `get_transactions_by_status`, `partial_complete_transaction`,
+  `add_transaction_tag` / `get_transaction_tags`, and per-anchor / default
+  amount ceilings (`set_amount_ceiling`, `set_default_amount_ceiling`,
+  `get_amount_ceiling`) enforced on every ingestion.
+- Recovery and relay signers (#179): `merge_duplicate_transactions`,
+  `set_forwarding_route` / `get_forwarding_route`, an N-of-M relay signer set
+  (`relay_signer_set`, `add_relay_signer`, `remove_relay_signer`,
+  `set_relay_threshold`, `approve_relay_call`) and timelocked relay rotation
+  (`set_relay_signer_delay`, `propose_relay_signer`, `finalize_relay_signer`,
+  `cancel_relay_signer_change`, `pending_relay_signer`).
 
 ### Fixed
 
@@ -156,6 +190,26 @@ separately from general code changes. Full topic/field contracts live in
   **mitigated** via the propose/finalize flow.
 - `upgrade()` schema guard now checks the configured `[min, max]` range
   instead of exact equality only (range defaults to exact match).
+- **Breaking (error codes):** Soroban caps a contract error enum at 50
+  variants, so related errors now share a code: `TimelockNotElapsed` (62)
+  covers the upgrade, relay-signer and unbond delays (was
+  `UnbondDelayNotElapsed` = 83); `NoPendingChange` (63) covers pending
+  upgrades and relay-signer changes; `InvalidSlashEvidence` (90) replaces
+  `EvidenceTxIdMismatch` / `EvidenceNotConflicting` (90 / 91). Unused
+  `StorageError` (50) and `InvalidParamValue` (71) are removed.
+- `set_relay_signer` returns `TimelockRequired` once a non-zero relay-signer
+  delay is configured.
+- **Breaking:** `MAX_BATCH_SIZE` is 7, not 20. Protocol 22 allows 25 ledger
+  writes per transaction and each payload needs 3, so larger batches could
+  never succeed on a real network. Batches are also checked against a
+  conservative write/event budget before any write and rejected with the new
+  `BatchResourceBudgetExceeded` (38) (#173).
+- Cheaper hot path (#116, #117, #123): `register_callback` fee −14.7 %,
+  batches −18 %, transitions −2 to −5 % (COST_MODEL.md §12). Transactions are
+  stored as a packed `StoredTransaction`; `get_transaction` still returns
+  `Transaction`. The relay signer set moved to instance storage.
+- Ledger read/write budgets per entry point are pinned by
+  `bench_resource_budgets` (#116, #123, #125).
 
 ### Fixed
 
@@ -182,13 +236,13 @@ separately from general code changes. Full topic/field contracts live in
   or not at all if never accepted.
 - `EventContractUpgraded` gains an additive trailing `schema_version` field
   — Minor bump per the same policy.
+- `rollback_upgrade` and `upgrade_and_migrate` also emit `chk_pass` before
+  `upgrade`, like every upgrade path.
 - **Emission-order change for `upgrade`:** success now emits `chk_pass`
   then `upgrade` (was `upgrade` alone). Self-check failure emits `chk_fail`
   and reverts. Minor bump for the additive events; integrators that assumed
   a single `upgrade` event per successful call should tolerate the leading
   `chk_pass`.
-- Added `EventUpgradeQuorumSet` (topic `uqset`) and `EventUpgradeProposed`
-  (topic `uprop`) for the optional upgrade quorum (#87) — Minor bump.
 
 ### Added
 
@@ -214,13 +268,6 @@ separately from general code changes. Full topic/field contracts live in
   addresses against `contract-ids.json` instead of trusting that record
   alone. See `DEPLOYMENT.md`'s post-deployment smoke test.
 - `schema_version()` / `pending_admin()` read-only query entry points.
-- **#87** Optional upgrade M-of-N quorum (`set_upgrade_quorum` /
-  `upgrade_quorum` / `propose_upgrade` / `approve_upgrade`). Default `None`
-  preserves single-admin upgrades; when set, admin-alone is rejected.
-- **#89** Namespaced `StorageKey::Ns(STORAGE_KEY_NAMESPACE, DataKey)` plus
-  `migrate_storage_keys` / `upgrade_and_migrate` for the v1 → v2 cutover.
-- **#90** `get_previous_wasm_hash()` — self-reported hash the contract most
-  recently upgraded from (genesis recorded at `initialize`).
 - **#88** `migrations.toml` + CI/`make schema-check` that builds the release
   WASM once, invokes `schema_version()`, and fails on exact-match miss
   (negative fixture under `fixtures/ci/`).
@@ -239,13 +286,6 @@ separately from general code changes. Full topic/field contracts live in
   match the on-chain `schema_version()` or the call is rejected with
   `SchemaVersionMismatch` before contract WASM is touched. Fixes
   THREAT_MODEL.md finding F-04.
-- **Breaking:** `initialize(admin, relay_signer)` is now
-  `initialize(admin, relay_signer, wasm_hash)` so genesis provenance is
-  on-chain for `#90`.
-- **Breaking:** `upgrade(…)` gains a trailing `cosigners: Vec<Address>`
-  argument (empty when no upgrade quorum is configured) — `#87`.
-- **Breaking:** on-chain `SCHEMA_VERSION` is now `2` (namespaced storage
-  keys, `#89`).
 
 ### Fixed
 
@@ -255,7 +295,6 @@ separately from general code changes. Full topic/field contracts live in
   gated behind `cfg(synapse_quarantine)` (see `src/lib.rs`) until restored.
   `schema_ci` and `bench_events` are now compiled, so the #88 schema gate and
   event benches actually run; CI installs the `wasm32` target again.
-
 - **Security:** `propose_admin` rejects nominating the contract's own
   address, which could not practically call `accept_admin` back and would
   have permanently bricked every admin-gated operation. Fixes
@@ -334,11 +373,3 @@ Rules of thumb (normative text in [`EVENTS.md`](./EVENTS.md#5-semver-policy)):
 
 - Removal / rename / reorder / type change / emission-order change → **major** + advance notice.
 - New trailing field or new event type → **minor** (or patch if docs-only).
-
-## Unreleased
-
-- Added `get_nonce` and `*_with_nonce` variants of privileged entry points
-  (per-address strictly sequential nonce; gaps and reuse fail with `InvalidNonce`).
-  Existing signatures are unchanged; off-chain relay should migrate to the
-  nonce variants before the plain ones are removed in a future breaking release.
-- Added append-only `get_transaction_history` (cap 32 entries, oldest evicted). Transactions registered before this release have no history; an off-chain migration note applies (no on-chain backfill).
