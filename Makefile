@@ -10,9 +10,11 @@ check: fmt clippy test wasm
 fmt:
 	cargo fmt --all -- --check
 
-## Lint with clippy; deny all warnings.
+## Lint with clippy; deny all warnings. The pedantic/nursery/cargo groups and
+## their individually justified exceptions are configured in Cargo.toml's
+## [lints.clippy] table (#175), so this command matches CI exactly.
 clippy:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 
 ## Run the test suite (native host, not wasm).
 test:

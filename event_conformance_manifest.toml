@@ -262,3 +262,30 @@ type = "soroban_sdk::Address"
 [[event.fields]]
 name = "ledger"
 type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
+struct_name = "EventBatchProcessed"
+topic       = "batch"
+emitter_fn  = "batch_processed"
+
+[[event.fields]]
+name = "caller"
+type = "soroban_sdk::Address"
+
+[[event.fields]]
+name = "batch_size"
+type = "u32"
+
+[[event.fields]]
+name = "first_tx_id"
+type = "String"
+
+[[event.fields]]
+name = "last_tx_id"
+type = "String"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"

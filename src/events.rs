@@ -46,6 +46,17 @@ pub struct EventTransactionRegistered {
     pub ledger: u32,
 }
 
+/// Emitted exactly once by [`SynapseCoreContract::batch_register_callback`],
+/// after every per-item [`EventTransactionRegistered`] of that batch.
+#[contracttype]
+pub struct EventBatchProcessed {
+    pub caller: soroban_sdk::Address,
+    pub batch_size: u32,
+    pub first_tx_id: String,
+    pub last_tx_id: String,
+    pub ledger: u32,
+}
+
 /// Emitted on every status change driven by [`SynapseCoreContract::start_processing`],
 /// [`SynapseCoreContract::complete_transaction`], or
 /// [`SynapseCoreContract::fail_transaction`].
@@ -88,7 +99,7 @@ pub struct EventAdminTransferred {
 /// Emitted by [`SynapseCoreContract::propose_admin`] when a new admin is
 /// nominated. The transfer is not yet effective at this point — see
 /// [`EventAdminTransferred`], emitted only once the nominee itself calls
-/// `accept_admin` (two-step transfer, THREAT_MODEL.md finding F-03).
+/// `accept_admin` (two-step transfer, `THREAT_MODEL.md` finding F-03).
 #[contracttype]
 pub struct EventAdminTransferProposed {
     pub current_admin: soroban_sdk::Address,
@@ -121,7 +132,7 @@ pub struct EventContractUpgraded {
     pub new_wasm_hash: soroban_sdk::BytesN<32>,
     pub ledger: u32,
     /// The on-chain schema version that `expected_schema_version` was
-    /// checked against before this upgrade proceeded (THREAT_MODEL.md
+    /// checked against before this upgrade proceeded (`THREAT_MODEL.md`
     /// finding F-04). Additive trailing field — see EVENTS.md semver policy.
     pub schema_version: u32,
 }
@@ -213,6 +224,8 @@ pub struct EventSlashed {
     pub ledger: u32,
 }
 
+// ── Disputes (#112) ────────────────────────────────────────────────────────────
+
 /// Emitted when a dispute is raised against a transaction.
 ///
 /// A dispute may be raised more than once over a transaction's lifetime if
@@ -221,6 +234,9 @@ pub struct EventSlashed {
 ///
 /// Downstream support tooling and admin dashboards subscribe to this event
 /// to surface disputes in real time without polling ledger state.
+///
+/// Subscribers correlate this with the following [`EventDisputeResolved`] for
+/// the same `tx_id` to reconstruct the full dispute lifecycle.
 #[contracttype]
 pub struct EventDisputeRaised {
     /// The transaction ID under dispute — shared with [`EventDisputeResolved`]
@@ -269,7 +285,7 @@ pub struct EventDisputeResolved {
 #[contracttype]
 pub struct EventAnchorTierSet {
     pub anchor: soroban_sdk::Address,
-    /// Rebate in basis points (0–10_000).
+    /// Rebate in basis points (`0–10_000`).
     pub rebate_bps: u32,
     /// Human-readable tier label.
     pub label: String,
@@ -322,6 +338,26 @@ impl EventEmitter {
                 amount: tx.amount,
                 asset_code: tx.asset_code.clone(),
                 anchor_transaction_id: tx.anchor_transaction_id.clone(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+    }
+
+    /// Emit [`EventBatchProcessed`].
+    pub fn batch_processed(
+        env: &Env,
+        caller: &soroban_sdk::Address,
+        batch_size: u32,
+        first_tx_id: &String,
+        last_tx_id: &String,
+    ) {
+        env.events().publish(
+            (symbol_short!("synapse"), symbol_short!("batch")),
+            EventBatchProcessed {
+                caller: caller.clone(),
+                batch_size,
+                first_tx_id: first_tx_id.clone(),
+                last_tx_id: last_tx_id.clone(),
                 ledger: env.ledger().sequence(),
             },
         );
@@ -530,7 +566,6 @@ impl EventEmitter {
     /// Emit [`EventDisputeRaised`].
     ///
     /// Topics: `synapse` / `dispute`.
-    #[allow(dead_code)]
     pub fn dispute_raised(
         env: &Env,
         tx_id: &String,
@@ -594,7 +629,6 @@ impl EventEmitter {
     ///
     /// `upheld = true`  → dispute upheld, transaction reverted to `Failed`.
     /// `upheld = false` → dispute rejected, transaction returned to `Completed`.
-    #[allow(dead_code)]
     pub fn dispute_resolved(
         env: &Env,
         tx_id: &String,
