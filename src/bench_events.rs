@@ -483,7 +483,16 @@ fn bench_event_upgrade() {
 ///
 /// Administrative events (one-time, amortised across many transactions):
 /// `init`, `propose`, `admin`, `relay`, `pause`, `upgrade`.
+// ── Regression gate ───────────────────────────────────────────────────────────
+// Update these constants AND add a row to COST_MODEL.md §9 when changing.
+//
+// Ceiling history:
+//   2026-Q3: CPU=5_000_000  MEM=1_000_000  (initial measurement, Wave 7)
+const CUMULATIVE_CPU_CEILING: u64 = 5_000_000;
+const CUMULATIVE_MEM_CEILING: u64 = 1_000_000;
+
 #[test]
+#[allow(clippy::too_many_lines)] // one straight-line measurement per event; splitting hides the sum
 fn bench_wave7_cumulative_cost() {
     let env = Env::default();
     let contract_id = env.register(SynapseCoreContract, ());
@@ -619,22 +628,11 @@ fn bench_wave7_cumulative_cost() {
     );
     eprintln!("[bench] ─── lifecycle totals ──────────────────────────────────");
     eprintln!(
-        "[bench] lifecycle (reg+2xstatus+done)  cpu={:<8}  mem={:<8}",
-        lifecycle_cpu, lifecycle_mem
+        "[bench] lifecycle (reg+2xstatus+done)  cpu={lifecycle_cpu:<8}  mem={lifecycle_mem:<8}"
     );
-    eprintln!(
-        "[bench] all 10 events                  cpu={:<8}  mem={:<8}",
-        total_cpu, total_mem
-    );
+    eprintln!("[bench] all 10 events                  cpu={total_cpu:<8}  mem={total_mem:<8}");
 
-    // ── Regression gate ───────────────────────────────────────────────────
-    // Update these constants AND add a row to COST_MODEL.md §9 when changing.
-    //
-    // Ceiling history:
-    //   2026-Q3: CPU=5_000_000  MEM=1_000_000  (initial measurement, Wave 7)
-    const CUMULATIVE_CPU_CEILING: u64 = 5_000_000;
-    const CUMULATIVE_MEM_CEILING: u64 = 1_000_000;
-
+    // ── Regression gate (see CUMULATIVE_*_CEILING above) ─────────────────
     assert!(
         total_cpu <= CUMULATIVE_CPU_CEILING,
         "cumulative event CPU {total_cpu} exceeds ceiling {CUMULATIVE_CPU_CEILING}; \

@@ -18,6 +18,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -28,7 +29,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Format check
         run: cargo fmt --all -- --check
-      - name: Clippy
+      - name: Clippy (pedantic + nursery + cargo, see [lints.clippy] in Cargo.toml)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests

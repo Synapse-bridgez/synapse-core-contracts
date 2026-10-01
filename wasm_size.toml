@@ -1,0 +1,17 @@
+# Release WASM binary-size gate (#122). Checked by scripts/check_wasm_size.sh.
+#
+# baseline_bytes   Size of `make wasm`'s output at the last accepted change.
+#                  Regenerate with `scripts/check_wasm_size.sh --update`.
+# max_growth_pct   Fail when the WASM grows more than this over the baseline.
+# ceiling_bytes    Hard cap regardless of baseline: 75% of the network limit,
+#                  leaving 32 KiB of headroom for in-place upgrades.
+# network_limit_bytes
+#                  Soroban `contract_max_size_bytes`, read from the live
+#                  mainnet and testnet config (ConfigSettingID 0) on
+#                  2026-09-29. Informational; re-check when a protocol
+#                  upgrade changes network settings (COST_MODEL.md §13).
+
+baseline_bytes = 53432
+max_growth_pct = 5
+ceiling_bytes = 98304
+network_limit_bytes = 131072

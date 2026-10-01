@@ -3,19 +3,35 @@
 //! On-chain equivalents of the `synapse-core` Rust service's domain model.
 //! Every struct that touches ledger storage derives [`soroban_sdk::contracttype`].
 
-use soroban_sdk::{contracterror, contracttype, String};
+use soroban_sdk::{contracterror, contracttype, Address, String};
 
 /// Current on-chain storage schema version.
 ///
 /// Bump this whenever [`Transaction`] or [`StorageKey`] layout changes in a
 /// way that a running upgrade needs to be aware of. `initialize()` stores it;
 /// `SynapseCoreContract::upgrade()` requires the caller to pass the value it
-/// currently expects on-chain before proceeding (THREAT_MODEL.md finding
+/// currently expects on-chain before proceeding (`THREAT_MODEL.md` finding
 /// F-04). This cannot validate the *new* WASM's schema — Soroban gives the
 /// currently-running code no way to introspect an uploaded-but-not-yet-
 /// installed WASM blob — so it guards against upgrading the wrong deployment
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Hard cap on the number of payloads accepted by `batch_register_callback`.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
+/// Maximum `limit` accepted by paginated read-only queries.
+pub const MAX_PAGE_LIMIT: u32 = 50;
+
+/// Contract-wide maximum registrable amount used while the
+/// `global_max_amount` param has never been set: 10^15 stroops
+/// (100M units at 7 decimals). Makes the global ceiling an always-on
+/// backstop, even on a freshly initialised contract.
+pub const DEFAULT_GLOBAL_MAX_AMOUNT: i128 = 1_000_000_000_000_000;
+
+/// Maximum number of simultaneously open disputes. Bounds the size of the
+/// single persistent entry backing `get_dispute_queue`.
+pub const MAX_OPEN_DISPUTES: u32 = 100;
 
 // ─── Transaction status ───────────────────────────────────────────────────────
 
@@ -63,7 +79,7 @@ pub struct Transaction {
     /// Stellar account address of the depositor (G… address, 56 chars).
     pub stellar_account: String,
 
-    /// Deposit amount in stroops (1 XLM = 10_000_000 stroops).
+    /// Deposit amount in stroops (1 XLM = `10_000_000` stroops).
     /// Stored as i128 to match Soroban's native token amount convention.
     pub amount: i128,
 
@@ -91,7 +107,7 @@ pub struct Transaction {
     pub callback_type: CallbackType,
 
     /// Raw status string received from the Anchor Platform
-    /// (e.g. "pending_external", "completed").
+    /// (e.g. `"pending_external"`, `"completed"`).
     pub callback_status: String,
 
     /// Stellar transaction hash recorded after on-chain settlement.
@@ -187,6 +203,20 @@ pub enum StorageKey {
     // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
     /// Per-anchor tier config keyed by the anchor address.
     AnchorTier(soroban_sdk::Address),
+
+    // ── Amount ceilings (#169) ───────────────────────────────────────────────
+    /// Per-anchor maximum registrable amount, keyed by the payload's
+    /// `asset_issuer`. Absent means only the global ceiling applies.
+    AnchorCeiling(String),
+
+    // ── Disputes (#166) ──────────────────────────────────────────────────────
+    /// Per-transaction open-dispute record. Present only while the
+    /// transaction is under dispute.
+    Dispute(String),
+    /// Singleton: open disputes in the order they were raised (oldest first).
+    DisputeQueue,
+    /// Singleton: monotonically increasing dispute sequence counter.
+    DisputeSeq,
 }
 
 // ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
@@ -197,10 +227,10 @@ pub enum StorageKey {
 /// All tunable values (fee rate, unbond delay, slash percentage, fee ceiling,
 /// etc.) live here rather than as independent ad-hoc admin-settable fields.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParamEntry {
     /// Param value. Represented as `i128` to accommodate both integer counts
-    /// and scaled basis-point rates (e.g. 9_500 = 95.00 %).
+    /// and scaled basis-point rates (e.g. `9_500` = 95.00 %).
     pub value: i128,
     /// Ledger sequence at which this param was last updated.
     pub updated_at_ledger: u32,
@@ -239,7 +269,7 @@ pub struct UnbondRequest {
     pub amount: i128,
     /// Ledger sequence at which the unbond was requested.
     pub requested_at_ledger: u32,
-    /// Ledger sequence at which the unbond may be claimed (= requested_at +
+    /// Ledger sequence at which the unbond may be claimed (= `requested_at` +
     /// the `unbond_delay_ledgers` param at request time).
     pub claimable_at_ledger: u32,
 }
@@ -277,23 +307,52 @@ pub struct SlashEvidence {
 /// The admin sets this to indicate that a particular anchor qualifies for a
 /// reduced effective fee rate.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorTierConfig {
     /// Anchor address this tier applies to.
     pub anchor: soroban_sdk::Address,
-    /// Rebate in basis points (0–10_000).
+    /// Rebate in basis points (`0–10_000`).
     ///
     /// `0`     = no rebate (full fee rate applies).
     /// `500`   = 5 % rebate.
     /// `10_000` = 100 % rebate (zero effective fee).
     ///
-    /// Effective fee = base_fee_bps × (10_000 − rebate_bps) / 10_000.
+    /// Effective fee = `base_fee_bps` × (`10_000` − `rebate_bps`) / `10_000`.
     pub rebate_bps: u32,
     /// Human-readable label for the tier (e.g. "gold", "silver", "standard").
     /// Max 16 chars; purely informational.
     pub label: String,
     /// Ledger sequence at which this tier was last set.
     pub updated_at_ledger: u32,
+}
+
+// ─── Disputes (#166) ──────────────────────────────────────────────────────────
+
+/// An open dispute against a `Completed` transaction.
+///
+/// Stored in persistent storage keyed by [`StorageKey::Dispute`] and removed
+/// when the dispute is resolved.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisputeRecord {
+    /// Position in the dispute queue; also the `get_dispute_queue` cursor.
+    pub seq: u64,
+    /// Short reason code supplied by the caller.
+    pub reason: String,
+    /// Relay signer or admin that raised the dispute.
+    pub raised_by: Address,
+    /// Ledger sequence at which the dispute was raised.
+    pub raised_at_ledger: u32,
+    /// Ledger timestamp (seconds) at which the dispute was raised.
+    pub raised_at_timestamp: u64,
+}
+
+/// One entry of the open-dispute queue, ordered by `seq` (oldest first).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisputeQueueEntry {
+    pub seq: u64,
+    pub tx_id: String,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -392,10 +451,31 @@ pub enum ContractError {
     SignerNotBonded = 92,
 
     // ── Wave 2: Anchor Rebate (#145) ────────────────────────────────────────
-    /// `set_anchor_tier` rebate_bps exceeds 10_000 (100 %).
+    /// `set_anchor_tier` `rebate_bps` exceeds `10_000` (100 %).
     InvalidRebateBps = 100,
     /// `set_anchor_tier` label exceeds the maximum allowed length.
     InvalidTierLabel = 101,
     /// `get_anchor_tier` / `compute_effective_fee` anchor has no tier set.
     AnchorTierNotFound = 102,
+
+    // ── Batch registration (#173) ───────────────────────────────────────────
+    /// A batch was empty or exceeded `MAX_BATCH_SIZE`.
+    InvalidBatchSize = 110,
+    /// A batch's conservative worst-case resource estimate exceeds the safety
+    /// budget, independent of its item count. Rejected before any write.
+    BatchBudgetExceeded = 111,
+
+    // ── Disputes (#166) ─────────────────────────────────────────────────────
+    /// Transaction is already under dispute.
+    AlreadyDisputed = 120,
+    /// Transaction is not under dispute.
+    NotDisputed = 121,
+    /// `MAX_OPEN_DISPUTES` disputes are already open.
+    DisputeQueueFull = 122,
+    /// A pagination `limit` was zero or exceeded `MAX_PAGE_LIMIT`.
+    InvalidPageLimit = 123,
+
+    // ── Amount ceilings (#169) ──────────────────────────────────────────────
+    /// Amount exceeds the stricter of the per-anchor and global ceilings.
+    AmountCeilingExceeded = 130,
 }

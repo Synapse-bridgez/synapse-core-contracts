@@ -57,3 +57,4 @@ setup:
 ## CI uses a minimum-kill-rate budget (see .github/workflows/rust.yml).
 mutants:
 	cargo mutants --in-place
+
