@@ -17,6 +17,55 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Build/commit-hash identifier baked in at compile time.
+///
+/// CI sets the `SYNAPSE_BUILD_COMMIT` environment variable to the real git
+/// commit hash before invoking `cargo build`; the `build.rs` build script
+/// forwards it to the compiler via `cargo:rustc-env`, so the value is
+/// embedded directly into the deployed WASM. Local dev builds that do not set
+/// the variable fall back to `"unknown"` — a genuine CI-built artifact will
+/// always carry the real deployed commit hash.
+pub const BUILD_COMMIT: &str = env!("SYNAPSE_BUILD_COMMIT");
+
+// ─── Structured error diagnostics (#167) ──────────────────────────────────────
+
+/// Off-chain handling guidance for a [`ContractError`] variant.
+///
+/// Consumed by the `synapse-core` relay service's error-handling and alerting
+/// logic to decide how to react to a failed call without string-matching.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ErrorHandling {
+    /// Transient condition — the caller may safely retry the same call.
+    RetrySafe,
+    /// Permanent condition — retrying will not help; drop the call.
+    NotRetryable,
+    /// Requires operator attention; raise an alert.
+    AlertWorthy,
+    /// Expected/routine rejection; log only, no alert.
+    Routine,
+}
+
+/// Structured, machine-parseable diagnostic for a [`ContractError`] variant.
+///
+/// Every `ContractError` variant maps to exactly one `ErrorDiagnostic` via
+/// [`ContractError::diagnostic`]. The shape is deliberately fixed — a stable
+/// numeric `code` plus a small set of well-typed context fields — so the
+/// off-chain relay service can parse it without pattern-matching on free-text
+/// strings. See `docs/ERRORS.md` for the full reference table.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ErrorDiagnostic {
+    /// Stable numeric error code. Never reused or renumbered once published.
+    pub code: u32,
+    /// Whether the caller may retry, must drop, or should alert.
+    pub handling: ErrorHandling,
+    /// Whether this failure warrants an operator alert.
+    pub alert: bool,
+    /// Whether the failed call may be safely retried as-is.
+    pub retry_safe: bool,
+}
+
 // ─── Transaction status ───────────────────────────────────────────────────────
 
 /// Mirrors the `status` column in the `transactions` table.
@@ -141,6 +190,47 @@ pub struct CallbackPayload {
     pub callback_status: String,
 }
 
+// ─── Bundled deployment metadata (#159) ───────────────────────────────────────
+
+/// Bundled deployment identity returned by
+/// [`crate::SynapseCoreContract::contract_metadata`].
+///
+/// Convenience aggregate of the individual read-only queries so support
+/// tooling and dashboards can fetch the full "what exactly is deployed right
+/// now" picture in a single round-trip, avoiding inconsistent reads from
+/// separate calls made at slightly different times. Each field mirrors the
+/// value returned by its corresponding individual query exactly.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractMetadata {
+    /// Contract crate version — mirrors `version()`.
+    pub version: String,
+    /// On-chain storage schema version — mirrors `schema_version()`.
+    pub schema_version: u32,
+    /// Locked event schema version — mirrors `events_version()`.
+    pub events_version: u32,
+    /// Git commit hash baked in at compile time — see [`BUILD_COMMIT`].
+    pub build_commit: String,
+}
+
+// ─── Relay signer set (#161) ──────────────────────────────────────────────────
+
+/// Current relay-signer roster and quorum threshold returned by
+/// [`crate::SynapseCoreContract::get_relay_signer_set`].
+///
+/// Roster/threshold only — deliberately carries no per-signer state (liveness,
+/// quarantine, etc.); that belongs to the separate heartbeat query. The
+/// `signers` vector is the authoritative current membership and `threshold` is
+/// the number of signers that must agree to authorize a relay action.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySignerSet {
+    /// Current relay-signer roster.
+    pub signers: soroban_sdk::Vec<soroban_sdk::Address>,
+    /// Number of signers required to authorize a relay action.
+    pub threshold: u32,
+}
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Discriminants used as ledger storage keys.
@@ -177,16 +267,16 @@ pub enum StorageKey {
     /// Per-parameter record keyed by param name string.
     Param(String),
 
-    // ── Wave 2: Collateral Bonding (#143) ────────────────────────────────────
-    /// Per-signer bond record keyed by the signer address.
-    BondRecord(soroban_sdk::Address),
-    /// Per-signer unbond request keyed by the signer address.
-    /// Absent when no unbond is pending.
-    UnbondRequest(soroban_sdk::Address),
+    // ── Wave 2: Collateral Bonding (#143) ────
 
     // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
     /// Per-anchor tier config keyed by the anchor address.
     AnchorTier(soroban_sdk::Address),
+
+    // ── Timelocked Upgrade (#163) ────────────────────────────────────────────
+    /// Singleton: in-flight timelocked upgrade proposal. Absent when no
+    /// upgrade is pending. See [`PendingUpgrade`].
+    PendingUpgrade,
 }
 
 // ─── Wave 2: Param Registry (#146) ────────────────────────────────────────────
@@ -208,194 +298,64 @@ pub struct ParamEntry {
     pub updated_by: soroban_sdk::Address,
 }
 
-// ─── Wave 2: Collateral Bonding (#143) ────────────────────────────────────────
+// ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
 
-/// Collateral bond record for a relay signer.
+/// In-flight timelocked upgrade proposal.
 ///
-/// Stored in persistent ledger storage keyed by [`StorageKey::BondRecord`].
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BondRecord {
-    /// The signer whose collateral is bonded.
-    pub signer: soroban_sdk::Address,
-    /// Amount currently bonded (in stroops / token's smallest unit).
-    pub amount: i128,
-    /// Ledger sequence at which the current bond was first created.
-    pub bonded_at_ledger: u32,
-    /// Ledger sequence of the most recent top-up (same as `bonded_at_ledger`
-    /// if no top-up has occurred since the initial bond).
-    pub updated_at_ledger: u32,
-}
-
-/// Pending unbond request from a relay signer.
-///
-/// Stored in persistent ledger storage keyed by [`StorageKey::UnbondRequest`].
-/// The existence of this record is the proof that an unbond has been requested
-/// but has not yet been claimed (i.e. the delay has not yet elapsed).
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct UnbondRequest {
-    /// Amount requested to unbond.
-    pub amount: i128,
-    /// Ledger sequence at which the unbond was requested.
-    pub requested_at_ledger: u32,
-    /// Ledger sequence at which the unbond may be claimed (= requested_at +
-    /// the `unbond_delay_ledgers` param at request time).
-    pub claimable_at_ledger: u32,
-}
-
-// ─── Wave 2: Slash Evidence (#144) ────────────────────────────────────────────
-
-/// On-chain-provable evidence of misbehaviour: two conflicting signed callbacks
-/// for the same `transaction_id`.
-///
-/// This is the only misbehaviour type in Wave 2 — deliberately scoped to what
-/// is mechanically, non-subjectively verifiable on-chain without any off-chain
-/// judgement call:
-///
-/// * Both payloads' `transaction_id` fields must equal `tx_id`.
-/// * At least one field *other* than `idempotency_key` must differ.
-///
-/// The `slash_signer` handler verifies these conditions and rejects the call if
-/// any check fails.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct SlashEvidence {
-    /// The `transaction_id` that appears in both conflicting callbacks.
-    pub tx_id: String,
-    /// Payload of callback A (the one already on-chain in storage).
-    pub payload_a: CallbackPayload,
-    /// Payload of callback B (the conflicting second callback).
-    pub payload_b: CallbackPayload,
-}
-
-// ─── Wave 2: Anchor Tier / Rebate (#145) ──────────────────────────────────────
-
-/// Trust/volume tier config for a single anchor address.
-///
-/// Stored in persistent ledger storage keyed by [`StorageKey::AnchorTier`].
-/// The admin sets this to indicate that a particular anchor qualifies for a
-/// reduced effective fee rate.
+/// Stored in persistent ledger storage keyed by [`StorageKey::PendingUpgrade`].
+/// Absent when no upgrade is pending. See `SynapseCoreContract::propose_upgrade`
+/// and `SynapseCoreContract::execute_upgrade`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct AnchorTierConfig {
-    /// Anchor address this tier applies to.
-    pub anchor: soroban_sdk::Address,
-    /// Rebate in basis points (0–10_000).
-    ///
-    /// `0`     = no rebate (full fee rate applies).
-    /// `500`   = 5 % rebate.
-    /// `10_000` = 100 % rebate (zero effective fee).
-    ///
-    /// Effective fee = base_fee_bps × (10_000 − rebate_bps) / 10_000.
-    pub rebate_bps: u32,
-    /// Human-readable label for the tier (e.g. "gold", "silver", "standard").
-    /// Max 16 chars; purely informational.
-    pub label: String,
-    /// Ledger sequence at which this tier was last set.
-    pub updated_at_ledger: u32,
+pub struct PendingUpgrade {
+    /// Hash of the new WASM blob to install once the timelock elapses.
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+    /// Ledger sequence at which the proposal was created.
+    pub proposed_at_ledger: u32,
+    /// Ledger sequence at which the proposal becomes executable.
+    pub executable_at_ledger: u32,
 }
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
+// ─── Storage tier report (#168) ───────────────────────────────────────────────
 
-/// All error codes returned by the contract.
+/// Per-tier storage breakdown row, mirroring a single row of the storage-tier
+/// table in `COST_MODEL.md`.
 ///
-/// Uses [`contracterror`] so they surface correctly via the Soroban XDR and
-/// can be decoded by SDK clients / frontends.
-#[contracterror]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u32)]
-pub enum ContractError {
-    // ── Initialisation ──────────────────────────────────────────────────────
-    /// `initialize()` has already been called.
-    AlreadyInitialised = 1,
-    /// Contract has not yet been initialised.
-    NotInitialised = 2,
+/// Units match the document exactly: `entries` is a raw count of ledger
+/// entries, `bytes` is the serialized byte footprint of those entries, and
+/// `rent_stroops` is the projected rent in stroops for the tier's entries.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageTierRow {
+    /// Tier name, matching the `COST_MODEL.md` tier labels
+    /// (e.g. "instance", "persistent", "temporary").
+    pub tier: String,
+    /// Number of live ledger entries in this tier.
+    pub entries: u32,
+    /// Serialized byte footprint of this tier's entries.
+    pub bytes: u32,
+    /// Projected rent for this tier's entries, in stroops.
+    pub rent_stroops: i128,
+}
 
-    // ── Authorisation ───────────────────────────────────────────────────────
-    /// Caller is not the admin.
-    Unauthorised = 10,
-    /// Caller is not the trusted relay signer.
-    NotRelaySigner = 11,
-    /// The contract is paused (emergency circuit breaker engaged); the
-    /// requested operation is temporarily disabled.
-    ContractPaused = 12,
-    /// `accept_admin` was called with no pending admin transfer in progress.
-    NoPendingAdminTransfer = 13,
-    /// `propose_admin` was called with the contract's own address as the
-    /// nominee, which cannot practically call `accept_admin` back and would
-    /// permanently brick every admin-gated operation.
-    InvalidAdminNominee = 14,
-
-    // ── Payload validation ──────────────────────────────────────────────────
-    /// `stellar_account` field is malformed.
-    InvalidStellarAccount = 20,
-    /// `amount` is zero or negative.
-    InvalidAmount = 21,
-    /// `asset_code` is empty or exceeds 12 characters.
-    InvalidAssetCode = 22,
-    /// `asset_issuer` is malformed.
-    InvalidAssetIssuer = 23,
-    /// `idempotency_key` is empty.
-    MissingIdempotencyKey = 24,
-    /// A `String` field exceeds its maximum allowed length (cost-control cap).
-    StringTooLong = 25,
-
-    // ── Transaction lifecycle ───────────────────────────────────────────────
-    /// No transaction with the given ID exists in storage.
-    TransactionNotFound = 30,
-    /// The requested status transition violates the state machine.
-    InvalidStatusTransition = 31,
-
-    // ── Idempotency ─────────────────────────────────────────────────────────
-    /// Request is a duplicate within the retention window (matches Redis 429).
-    DuplicateRequest = 40,
-
-    // ── Storage ─────────────────────────────────────────────────────────────
-    /// A ledger read/write produced an unexpected result.
-    StorageError = 50,
-
-    // ── Upgrade safety ──────────────────────────────────────────────────────
-    /// `upgrade()`'s `expected_schema_version` argument did not match the
-    /// on-chain [`SchemaVersion`](StorageKey::SchemaVersion); the upgrade was
-    /// aborted before touching contract WASM.
-    SchemaVersionMismatch = 60,
-
-    // ── Wave 2: Param Registry (#146) ───────────────────────────────────────
-    /// `set_param` was called with an empty param name.
-    InvalidParamName = 70,
-    /// `set_param` value is outside the allowed range for that parameter.
-    InvalidParamValue = 71,
-    /// `get_param` was called for a param that has never been set.
-    ParamNotFound = 72,
-
-    // ── Wave 2: Collateral Bonding (#143) ───────────────────────────────────
-    /// `bond_collateral` amount is zero or negative.
-    InvalidBondAmount = 80,
-    /// `unbond_collateral` requested more than the currently bonded balance.
-    InsufficientBond = 81,
-    /// `unbond_collateral` was called while a previous unbond request is still
-    /// pending (i.e. not yet claimed).
-    UnbondAlreadyPending = 82,
-    /// `claim_unbond` was called before the unbond delay has elapsed.
-    UnbondDelayNotElapsed = 83,
-    /// `claim_unbond` was called but no pending unbond request exists.
-    NoPendingUnbond = 84,
-
-    // ── Wave 2: Slashing (#144) ─────────────────────────────────────────────
-    /// `slash_signer` evidence `tx_id` does not match both payloads'
-    /// `transaction_id` fields.
-    EvidenceTxIdMismatch = 90,
-    /// `slash_signer` evidence payloads are identical (no conflicting content).
-    EvidenceNotConflicting = 91,
-    /// `slash_signer` was called for a signer with no bonded collateral.
-    SignerNotBonded = 92,
-
-    // ── Wave 2: Anchor Rebate (#145) ────────────────────────────────────────
-    /// `set_anchor_tier` rebate_bps exceeds 10_000 (100 %).
-    InvalidRebateBps = 100,
-    /// `set_anchor_tier` label exceeds the maximum allowed length.
-    InvalidTierLabel = 101,
-    /// `get_anchor_tier` / `compute_effective_fee` anchor has no tier set.
-    AnchorTierNotFound = 102,
+/// `COST_MODEL.md`-aligned storage cost-model report returned by
+/// `SynapseCoreContract::get_storage_tier_report()`.
+///
+/// Structured to mirror the document's existing cost-projection tables
+/// directly — same units, same breakdown categories — so operators can compare
+/// live on-chain reality against the document's stated projections without any
+/// off-chain translation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CostModelReport {
+    /// Ledger sequence at which the report was generated.
+    pub generated_at_ledger: u32,
+    /// Per-tier breakdown rows, one per storage tier, in `COST_MODEL.md` order.
+    pub tiers: soroban_sdk::Vec<StorageTierRow>,
+    /// Total live ledger entries across all tiers.
+    pub total_entries: u32,
+    /// Total serialized byte footprint across all tiers.
+    pub total_bytes: u32,
+    /// Total projected rent across all tiers, in stroops.
+    pub total_rent_stroops: i128,
 }

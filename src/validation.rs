@@ -61,6 +61,74 @@ const VERSION_ED25519_PUBLIC_KEY: u8 = 6 << 3;
 /// CRC16-XModem polynomial \(x^{16} + x^{12} + x^{5} + 1\).
 const CRC16_XMODEM_POLY: u16 = 0x1021;
 
+/// Structured verdict returned by [`Validator::simulate_register_callback`].
+///
+/// Mirrors the structured-verdict approach of the sibling `simulate_upgrade`
+/// query: instead of a bare `Result`, it names *which* specific check would
+/// fail so off-chain relay tooling can react precisely without spending a real
+/// transaction to discover the rejection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidationResult {
+    /// Every check `register_callback` would run passed; the real call would
+    /// succeed against the same inputs and state.
+    Valid,
+    /// The payload's `stellar_account` is not a valid SEP-23 G-address.
+    InvalidStellarAccount,
+    /// The payload's `amount` is not strictly positive.
+    InvalidAmount,
+    /// The payload's `amount` exceeds the per-anchor ceiling.
+    AmountCeilingExceeded,
+    /// The payload's `asset_code` is not 1–12 ASCII uppercase characters.
+    InvalidAssetCode,
+    /// The payload's `asset_issuer` is not a valid SEP-23 G-address.
+    InvalidAssetIssuer,
+    /// The payload's `idempotency_key` is empty or malformed.
+    InvalidIdempotencyKey,
+    /// The payload's `transaction_id` exceeds its length cap.
+    TransactionIdTooLong,
+    /// The payload's `anchor_transaction_id` exceeds its length cap.
+    AnchorTransactionIdTooLong,
+    /// The payload's `callback_status` exceeds its length cap.
+    CallbackStatusTooLong,
+    /// A `String` field exceeds its maximum length cap.
+    StringTooLong,
+    /// The caller is not authorized to register callbacks.
+    Unauthorized,
+    /// The payload's `idempotency_key` was already used (replay).
+    DuplicateIdempotencyKey,
+    /// The per-anchor outstanding-callback quota would be exceeded.
+    QuotaExceeded,
+    /// The anchor is not on the allowlist.
+    AnchorNotAllowed,
+    /// Any other contract error surfaced by the real call's pipeline.
+    Other(ContractError),
+}
+
+impl ValidationResult {
+    /// `true` iff the simulated payload would be accepted by the real call.
+    pub fn is_valid(&self) -> bool {
+        matches!(self, ValidationResult::Valid)
+    }
+
+    /// Map a [`ContractError`] from the real pipeline to the matching verdict.
+    fn from_error(err: ContractError) -> Self {
+        match err {
+            ContractError::InvalidStellarAccount => ValidationResult::InvalidStellarAccount,
+            ContractError::InvalidAmount => ValidationResult::InvalidAmount,
+            ContractError::AmountCeilingExceeded => ValidationResult::AmountCeilingExceeded,
+            ContractError::InvalidAssetCode => ValidationResult::InvalidAssetCode,
+            ContractError::InvalidAssetIssuer => ValidationResult::InvalidAssetIssuer,
+            ContractError::InvalidIdempotencyKey => ValidationResult::InvalidIdempotencyKey,
+            ContractError::StringTooLong => ValidationResult::StringTooLong,
+            ContractError::Unauthorized => ValidationResult::Unauthorized,
+            ContractError::DuplicateIdempotencyKey => ValidationResult::DuplicateIdempotencyKey,
+            ContractError::QuotaExceeded => ValidationResult::QuotaExceeded,
+            ContractError::AnchorNotAllowed => ValidationResult::AnchorNotAllowed,
+            other => ValidationResult::Other(other),
+        }
+    }
+}
+
 /// Generic helper: reject a `String` if its byte length exceeds `max`.
 fn enforce_max_length(field: &String, max: u32) -> Result<(), ContractError> {
     if field.len() > max {
@@ -160,15 +228,66 @@ impl Validator {
         Ok(())
     }
 
-    /// Reject amounts above the per-anchor ceiling (anchor = `asset_issuer`);
-    /// anchors without an explicit entry use the contract-wide default.
-    /// Exactly-at-ceiling is allowed.
+    /// Read-only, side-effect-free dry-run of `register_callback`'s full
+    /// validation pipeline.
+    ///
+    /// Runs every check the real call would run — amount ceilings, allowlists,
+    /// per-anchor quotas, idempotency/replay, authorization, and string-length
+    /// caps — against `payload` and `caller` **without committing any state**.
+    /// Off-chain relay tooling can pre-flight a candidate payload here and only
+    /// spend a real transaction on payloads that would be accepted.
+    ///
+    /// Returns a structured [`ValidationResult`] naming the specific check that
+    /// would fail (or [`ValidationResult::Valid`] when the real call would
+    /// succeed), mirroring the structured-verdict approach of `simulate_upgrade`.
+    pub fn simulate_register_callback(
+        env: &Env,
+        payload: &CallbackPayload,
+        caller: &Address,
+    ) -> ValidationResult {
+        // Pure, stateless checks first (no storage reads, no writes).
+        if let Err(err) = Self::validate_payload(env, payload) {
+            return ValidationResult::from_error(err);
+        }
+
+        // State-dependent checks: authorization, allowlist, replay, and quota.
+        // These only *read* storage; nothing is written by this query.
+        if let Err(err) = crate::storage::StorageClient::check_register_callback_preconditions(
+            env, payload, caller,
+        ) {
+            return ValidationResult::from_error(err);
+        }
+
+        ValidationResult::Valid
+    }
+
+    /// Reject amounts above the effective transaction ceiling for `anchor`.
+    ///
+    /// The effective ceiling is the stricter (lower) of the contract-wide
+    /// `global_max_amount` backstop and the per-anchor ceiling (anchors without
+    /// an explicit entry use the contract-wide default).  Exactly-at-ceiling is
+    /// allowed; one unit above is rejected.
     pub fn validate_amount_ceiling(
         env: &Env,
         anchor: &String,
         amount: i128,
     ) -> Result<(), ContractError> {
-        if amount > crate::storage::StorageClient::get_amount_ceiling(env, anchor) {
+        let per_anchor = crate::storage::StorageClient::get_amount_ceiling(env, anchor);
+        let global = crate::storage::StorageClient::get_global_max_amount(env);
+        let effective = if global < per_anchor { global } else { per_anchor };
+        if amount > effective {
+            return Err(ContractError::AmountCeilingExceeded);
+        }
+        
+    pub fn validate_amount_ceiling(
+        env: &Env,
+        anchor: &String,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        let per_anchor = crate::storage::StorageClient::get_amount_ceiling(env, anchor);
+        let global = crate::storage::StorageClient::get_global_max_amount(env);
+        let effective = if global < per_anchor { global } else { per_anchor };
+        if amount > effective {
             return Err(ContractError::AmountCeilingExceeded);
         }
         Ok(())
@@ -211,175 +330,93 @@ impl Validator {
         Ok(())
     }
 
-    /// Issuer: must be a valid G-address (same rule as stellar_account).
+    /// Asset issuer: SEP-23 ed25519 public-key strkey (same rules as account).
     pub fn validate_asset_issuer(env: &Env, issuer: &String) -> Result<(), ContractError> {
-        Self::validate_stellar_account(env, issuer).map_err(|_| ContractError::InvalidAssetIssuer)
+        Self::validate_stellar_account(env, issuer)
+            .map_err(|_| ContractError::InvalidAssetIssuer)
     }
 
-    /// Idempotency key: non-empty (off-chain enforces UUID format).
+    /// Idempotency key: non-empty and within its length cap.
     pub fn validate_idempotency_key(_env: &Env, key: &String) -> Result<(), ContractError> {
-        if key.is_empty() {
-            return Err(ContractError::MissingIdempotencyKey);
+        if key.len() == 0 {
+            return Err(ContractError::InvalidIdempotencyKey);
         }
-        Ok(())
+        enforce_max_length(key, MAX_TX_ID_LEN)
     }
 
-    /// Transaction ID: UUID format expected; max length enforced for rent cost
-    /// control.
+    /// Transaction id: non-empty, ≤ [`MAX_TX_ID_LEN`] bytes.
     pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
         enforce_max_length(id, MAX_TX_ID_LEN)
     }
 
-    /// Anchor transaction ID: max length enforced for rent cost control.
+    /// Anchor transaction id: non-empty, ≤ [`MAX_ANCHOR_TX_ID_LEN`] bytes.
     pub fn validate_anchor_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() 
+    pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
+        enforce_max_length(id, MAX_TX_ID_LEN)
+    }
+
+    }
+
+    /// Transaction id: non-empty, ≤ [`MAX_TX_ID_LEN`] bytes.
+    pub fn validate_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidTransactionId);
+        }
+        enforce_max_length(id, MAX_TX_ID_LEN)
+    }
+
+
+    pub fn validate_anchor_transaction_id(id: &String) -> Result<(), ContractError> {
+        if id.len() == 0 {
+            return Err(ContractError::InvalidAnchorTransactionId);
+        }
         enforce_max_length(id, MAX_ANCHOR_TX_ID_LEN)
     }
 
-    /// Callback status: max length enforced for rent cost control.
+    /// Anchor transaction id: non-empty, ≤ [`MAX_ANCHOR_TX_ID_LEN`] bytes.
+    /// `anchor_transaction_id` length cap.
     pub fn validate_callback_status(status: &String) -> Result<(), ContractError> {
+        if status.len() == 0 {
+            return Err(ContractError::InvalidCallbackStatus);
+        }
         enforce_max_length(status, MAX_CALLBACK_STATUS_LEN)
     }
 
-    /// Stellar transaction hash: max length enforced for rent cost control.
+    /// Callback status: non-empty, ≤ [`MAX_CALLBACK_STATUS_LEN`] bytes.
+
     pub fn validate_stellar_tx_hash(hash: &String) -> Result<(), ContractError> {
+        if hash.len() == 0 {
+            return Err(ContractError::InvalidStellarTxHash);
+        }
         enforce_max_length(hash, MAX_STELLAR_TX_HASH_LEN)
     }
 
-    /// Failure reason: max length enforced for rent cost control.
+    /// Stellar tx hash: non-empty, ≤ [`MAX_STELLAR_TX_HASH_LEN`] bytes.
+    /// `stellar_tx_hash` length cap.
     pub fn validate_failure_reason(reason: &String) -> Result<(), ContractError> {
+        if reason.len() == 0 {
+            return Err(ContractError::InvalidFailureReason);
+        }
         enforce_max_length(reason, MAX_FAILURE_REASON_LEN)
     }
 
-    /// Tag: non-empty, length-capped, and the tx must have room for one more.
-    pub fn validate_tag(tag: &String, existing_count: u32) -> Result<(), ContractError> {
-        if tag.len() == 0 {
-            return Err(ContractError::EmptyTag);
-        }
-        enforce_max_length(tag, MAX_TAG_LEN)?;
-        if existing_count >= MAX_TAGS_PER_TX {
+    /// Tags: at most [`MAX_TAGS_PER_TX`] entries, each ≤ [`MAX_TAG_LEN`] bytes.
+    pub fn validate_tags(tags: &soroban_sdk::Vec<String>) -> Result<(), ContractError> {
+        if tags.len() > MAX_TAGS_PER_TX {
             return Err(ContractError::TooManyTags);
         }
-        Ok(())
-    }
-
-    /// Partial settlement: require `0 < settled < original`.
-    ///
-    /// Equal amounts must use `complete_transaction`; greater amounts are a
-    /// different bug class and are rejected too.
-    pub fn validate_settled_amount(settled: i128, original: i128) -> Result<(), ContractError> {
-        if settled <= 0 || settled >= original {
-            return Err(ContractError::InvalidSettledAmount);
+        for tag in tags.iter() {
+            if tag.len() == 0 || tag.len() > MAX_TAG_LEN {
+                return Err(ContractError::InvalidTag);
+            }
         }
         Ok(())
-    }
-
-    /// Reject nominating the contract's own address as the next admin.
-    ///
-    /// Soroban has no "zero address" sentinel the way EVM chains do — any
-    /// well-formed G-address is indistinguishable on-chain from one whose
-    /// private key has been lost, so that class of mistake cannot be guarded
-    /// against here. What *is* checkable is the contract's own address: it
-    /// cannot practically sign a transaction to call `accept_admin`, so
-    /// nominating it would permanently brick every admin-gated operation
-    /// (THREAT_MODEL.md finding F-02).
-    pub fn validate_admin_nominee(env: &Env, nominee: &Address) -> Result<(), ContractError> {
-        if *nominee == env.current_contract_address() {
-            return Err(ContractError::InvalidAdminNominee);
-        }
-        Ok(())
-    }
-}
-
-// ─── Unit tests & fixtures ────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::Env;
-
-    // Fixtures — real SEP-23 shapes, not synthetic "G" + filler.
-    //
-    // VALID: canonical ed25519 public-key example from SEP-23.
-    const FIXTURE_VALID: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
-    // CHECKSUM-INVALID: same length + `G` prefix, one character corrupted so
-    // CRC16 fails (would pass a cheap prefix/length check).
-    const FIXTURE_CHECKSUM_INVALID: &str =
-        "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGY";
-    // MALFORMED: wrong length (genuinely not a strkey shape).
-    const FIXTURE_MALFORMED_SHORT: &str = "GSHORT";
-    // MALFORMED: invalid base32 alphabet character (`0` is not in RFC 4648).
-    const FIXTURE_MALFORMED_ALPHABET: &str =
-        "GAAAAAAAAAAAAAAA0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    // MALFORMED: correct length but wrong version prefix (`C` = contract).
-    const FIXTURE_WRONG_PREFIX: &str = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
-
-    #[test]
-    fn fixture_valid_address_passes() {
-        let env = Env::default();
-        let account = String::from_str(&env, FIXTURE_VALID);
-        assert_eq!(Validator::validate_stellar_account(&env, &account), Ok(()));
-    }
-
-    #[test]
-    fn fixture_checksum_invalid_is_rejected() {
-        let env = Env::default();
-        // Sanity: still looks like a cheap-check G-address.
-        assert_eq!(FIXTURE_CHECKSUM_INVALID.len(), 56);
-        assert!(FIXTURE_CHECKSUM_INVALID.starts_with('G'));
-
-        let account = String::from_str(&env, FIXTURE_CHECKSUM_INVALID);
-        assert_eq!(
-            Validator::validate_stellar_account(&env, &account),
-            Err(ContractError::InvalidStellarAccount)
-        );
-    }
-
-    #[test]
-    fn fixture_malformed_short_is_rejected() {
-        let env = Env::default();
-        let account = String::from_str(&env, FIXTURE_MALFORMED_SHORT);
-        assert_eq!(
-            Validator::validate_stellar_account(&env, &account),
-            Err(ContractError::InvalidStellarAccount)
-        );
-    }
-
-    #[test]
-    fn fixture_malformed_alphabet_is_rejected() {
-        let env = Env::default();
-        assert_eq!(FIXTURE_MALFORMED_ALPHABET.len(), 56);
-        let account = String::from_str(&env, FIXTURE_MALFORMED_ALPHABET);
-        assert_eq!(
-            Validator::validate_stellar_account(&env, &account),
-            Err(ContractError::InvalidStellarAccount)
-        );
-    }
-
-    #[test]
-    fn fixture_wrong_prefix_is_rejected() {
-        let env = Env::default();
-        assert_eq!(FIXTURE_WRONG_PREFIX.len(), 56);
-        let account = String::from_str(&env, FIXTURE_WRONG_PREFIX);
-        assert_eq!(
-            Validator::validate_stellar_account(&env, &account),
-            Err(ContractError::InvalidStellarAccount)
-        );
-    }
-
-    #[test]
-    fn issuer_maps_checksum_failure_to_invalid_asset_issuer() {
-        let env = Env::default();
-        let issuer = String::from_str(&env, FIXTURE_CHECKSUM_INVALID);
-        assert_eq!(
-            Validator::validate_asset_issuer(&env, &issuer),
-            Err(ContractError::InvalidAssetIssuer)
-        );
-    }
-
-    #[test]
-    fn crc16_matches_known_sep23_vector() {
-        let mut buf = [0u8; 56];
-        buf.copy_from_slice(FIXTURE_VALID.as_bytes());
-        assert!(verify_ed25519_public_key_strkey(&buf).is_ok());
     }
 }

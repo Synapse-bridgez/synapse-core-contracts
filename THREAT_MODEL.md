@@ -214,13 +214,29 @@ per-invocation fee metering mitigates this.
 | Status transitions proceeding while paused (draining is intentional) | `start_processing`, `complete_transaction`, `fail_transaction` are deliberately not gated by pause | ✅ By design — documented in `lib.rs` |
 | Attacker forcing a DoS via pause (requires admin-key compromise) | Mitigated by multisig admin requirement | ⚠️ Residual risk — requires admin compromise |
 
-### 4.7 Read-Only Queries (`get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`, `admin`, `relay_signer`)
+### 4.7 Read-Only Queries (`get_transaction`, `get_status`, `is_duplicate`, `is_paused`, `health`, `version`, `admin`, `relay_signer`, `treasury_balance`, `treasury_config`, `pending_withdrawal`)
 
 | Threat | Mitigation | Status |
 |--------|-----------|--------|
 | Unauthenticated reads leaking sensitive data | Transaction data is public on-chain by nature; no PII expected in stored fields | ✅ Acceptable — Stellar ledger is public |
 | `get_transaction`, `get_status`, `is_duplicate` correctness | All three are implemented and covered by tests (`tests::test_get_transaction_rejects_unknown_id`, `tests::test_is_duplicate_reflects_idempotency_state`, full-lifecycle tests) | ✅ Implemented — **F-06 fixed** |
 | TTL extension in `get_transaction` allowing an attacker to indefinitely extend storage rent on a record | TTL extension is bounded and is the intended behaviour for active records; not exploitable beyond keeping legitimate data alive | ✅ Acceptable |
+
+### 4.8 Fee & treasury (`propose_withdrawal`, `authorize_withdrawal`, fee accrual in `complete_transaction`, and the `base_fee_bps` / `treasury_epoch_cap` / `treasury_epoch_length` params)
+
+Design rationale: [ADR-0008](./docs/adr/0008-fee-accrual-and-treasury-withdrawal.md).
+The treasury is an accounting balance; the contract holds no tokens.
+
+| Threat | Mitigation | Status |
+|--------|-----------|--------|
+| Fee or treasury arithmetic overflow corrupting accounting | Fee computed overflow-free as `q*bps + r*bps/10_000` (exact for every positive `i128`); treasury, epoch counter, and debit use `checked_*`, failing with `ArithmeticOverflow` and rolling back the call. Covered by `test_fee_treasury::test_compute_fee_exact_at_i128_max`, `test_treasury_overflow_is_rejected_not_wrapped` | ✅ Implemented |
+| Fee-rate change retroactively altering accrued fees | Rate is read at completion time; only the running balance is stored. Covered by `test_fee_rate_change_only_affects_future_completions` | ✅ Implemented |
+| Non-admin changing fee rate or treasury limits | They are registry params; `set_param` calls `AdminClient::require_admin()` | ✅ Implemented |
+| Out-of-range fee rate or treasury limits (e.g. 200 % fee, zero-length epoch) | `set_param` range-checks `base_fee_bps` (0–10 000), `treasury_epoch_cap` (> 0), `treasury_epoch_length` (1–`u32::MAX`) → `InvalidParamValue` | ✅ Implemented |
+| Single key draining the treasury | Admin proposes; only the relay signer can execute (`WithdrawalNotRelaySigner` otherwise) | ✅ Implemented — see **R-06** |
+| Admin swapping the proposal after relay review (bait-and-switch) | Relay's `authorize_withdrawal(caller, amount, destination)` must restate the pending proposal, and those args are covered by its `require_auth()`; mismatch → `WithdrawalProposalMismatch` | ✅ Implemented |
+| Colluding / doubly-compromised admin + relay | Per-epoch cap (`WithdrawalCapExceeded`), distinct from `InsufficientTreasuryBalance` | ✅ Implemented — bounded, not prevented |
+| Compromised admin raising the epoch cap | Every change emits a `param` event; each withdrawal still needs relay co-signature | ⚠️ Follow-up — minimum-notice delay for parameter changes (#150) |
 
 ---
 
@@ -427,6 +443,47 @@ by design for emergencies; operational policy should restrict its use.
 
 ---
 
+### R-06: Treasury withdrawal is two-party, not N-of-M
+
+**Risk:** Treasury withdrawals are authorised by the admin (propose) plus the
+relay signer (execute) rather than a dedicated N-of-M signer quorum. The
+relay signer is a hot key (R-01), so an admin-key compromise combined with a
+relay compromise can move treasury value.
+
+**Compensating controls:**
+- (a) The admin alone can only propose; execution requires the relay signer.
+- (b) The relay alone can neither propose nor execute without a proposal.
+- (c) A per-epoch withdrawal cap bounds what even a colluding admin + relay
+  can move per `epoch_length` ledgers.
+- (d) The relay's co-signature names the exact `amount` and `destination`, so
+  a compromised admin cannot substitute the proposal after relay review.
+- `wprop` / `wexec` events make every proposal and execution observable.
+
+**Residual risk:** Medium. Accepted until the access-control bucket supplies
+an N-of-M primitive; see [ADR-0008](./docs/adr/0008-fee-accrual-and-treasury-withdrawal.md).
+
+---
+
+### Executable evidence for §8
+
+Every compensating control above is backed by a dedicated test in
+[`src/test_accepted_risks.rs`](./src/test_accepted_risks.rs), named
+`rNN_<control>` and commented with the risk ID it verifies (R-01 … R-06).
+
+**Not yet executable:** the R-02 admin rate limit (#75) and safe renounce (#76)
+and the R-05 timelock controls (`propose_upgrade` / `finalize_upgrade`,
+`set_upgrade_delay`) are described above, but their entry points are
+missing from `src/lib.rs` on `main` after the #176–#197 squash merges
+(tracked in #199). Their tests belong with that restoration. The R-05 tests
+here cover the controls on the immediate `upgrade()` path, which remains
+live.
+The on-chain controls were mutation-checked: removing the relay-signer check,
+the epoch cap, the proposal binding, admin auth on `propose_withdrawal`, the
+F-07 persistent-ID guard, or the pause guard from `src/lib.rs` each makes the
+corresponding test fail.
+
+---
+
 ## 9. Self-Review Findings
 
 The following findings were identified during this self-review. Each is either
@@ -483,6 +540,10 @@ deployment.
       transitions, boundary-length caps).
 - [x] `test_pause.rs` full suite passes (10 tests, plus 7 more embedded in
       `validation.rs` — 68 total across the crate, all passing ✅).
+- [x] Every §8 accepted risk (R-01 … R-06) has executable compensating-control
+      tests in `src/test_accepted_risks.rs` — see "Executable evidence for §8".
+- [x] Fee accrual and treasury withdrawal suite `src/test_fee_treasury.rs`
+      (checked-arithmetic edges, epoch-cap boundary, two-party auth).
 - [ ] Test coverage report generated and reviewed. Target: 100% of public
       entry points covered by at least one positive and one negative test.
 - [ ] Fuzz targets or property-based tests exist for `validation.rs` input
@@ -521,6 +582,9 @@ deployment.
       `complete_transaction` transaction on Horizon.
 - [ ] List of all open findings from this self-review (section 9) with their
       resolution status.
+- [x] Portable test vectors ([`test-vectors.json`](./test-vectors.json)) for
+      independent replay with the auditor's own tooling; format and replay
+      procedure in [`docs/test-vectors.md`](./docs/test-vectors.md).
 
 ### 10.6 Audit Scope Guidance for Auditor
 

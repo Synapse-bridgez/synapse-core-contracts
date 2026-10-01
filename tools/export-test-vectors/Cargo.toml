@@ -1,0 +1,13 @@
+[package]
+name = "export-test-vectors"
+version = "0.1.0"
+edition = "2021"
+description = "Generates a language-agnostic JSON test-vector file for the synapse-core-contract, for use by external auditors."
+
+[[bin]]
+name = "export-test-vectors"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }

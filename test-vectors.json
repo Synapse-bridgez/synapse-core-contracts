@@ -1,0 +1,1129 @@
+{
+  "schema_version": 1,
+  "contract_version": "0.1.0",
+  "description": "Language-agnostic test vectors for synapse-core-contract. Each vector specifies entry-point inputs, required pre-state, expected result, expected events, and expected post-state. An external auditor can replay these against a deployed contract instance using any tooling that can invoke Soroban contract methods and read ledger state/events.",
+  "reference_docs": [
+    "THREAT_MODEL.md",
+    "EVENTS.md",
+    "docs/adr/0001-relay-signer-trust-model.md",
+    "docs/adr/0002-two-step-admin-transfer.md",
+    "docs/adr/0003-upgrade-schema-version-guard.md",
+    "docs/adr/0008-fee-accrual-and-treasury-withdrawal.md",
+    "docs/test-vectors.md"
+  ],
+  "vectors": [
+    {
+      "id": "init-001",
+      "description": "initialize() with valid admin and relay — succeeds and sets state",
+      "category": "initialisation",
+      "entry_point": "initialize",
+      "inputs": {
+        "admin": "<admin_address>",
+        "relay_signer": "<relay_address>"
+      },
+      "pre_state": {
+        "initialized": false
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "init"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "admin": "<admin_address>",
+        "initialized": true,
+        "paused": false,
+        "relay_signer": "<relay_address>",
+        "schema_version": 1
+      },
+      "notes": [
+        "THREAT_MODEL §4.1: double-init guard enforced",
+        "I-08: contract must be initialised before state-mutating calls"
+      ]
+    },
+    {
+      "id": "init-002",
+      "description": "initialize() called twice — returns AlreadyInitialised",
+      "category": "initialisation",
+      "entry_point": "initialize",
+      "inputs": {
+        "admin": "<admin_address>",
+        "relay_signer": "<relay_address>"
+      },
+      "pre_state": {
+        "initialized": true
+      },
+      "expected_result": "err:AlreadyInitialised",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "init"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {},
+      "notes": [
+        "ContractError::AlreadyInitialised = 1"
+      ]
+    },
+    {
+      "id": "reg-001",
+      "description": "register_callback() with valid payload — creates Pending transaction",
+      "category": "lifecycle",
+      "entry_point": "register_callback",
+      "inputs": {
+        "amount": "1000000",
+        "anchor_transaction_id": "anchor-001",
+        "asset_code": "USDC",
+        "asset_issuer": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+        "callback_status": "pending_external",
+        "callback_type": "Deposit",
+        "idempotency_key": "idem-001",
+        "stellar_account": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+        "transaction_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "idempotency_known": false,
+        "initialized": true,
+        "paused": false,
+        "transaction_exists": false
+      },
+      "expected_result": "ok:\"tx-uuid-001\"",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "reg"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "idempotency_key_recorded": true,
+        "transaction.failure_reason": "",
+        "transaction.status": "Pending",
+        "transaction.stellar_tx_hash": ""
+      },
+      "notes": [
+        "I-01: transaction created in Pending state",
+        "I-10: stellar_tx_hash empty until Completed",
+        "I-11: failure_reason empty until Failed"
+      ]
+    },
+    {
+      "id": "reg-002",
+      "description": "register_callback() duplicate idempotency_key within TTL — idempotent return, no write",
+      "category": "idempotency",
+      "entry_point": "register_callback",
+      "inputs": {
+        "idempotency_key": "idem-001",
+        "transaction_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "idempotency_known": true
+      },
+      "expected_result": "ok:\"tx-uuid-001\"",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "reg"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {},
+      "notes": [
+        "R-04: idempotency window finite — within window, deduplication works",
+        "No second write occurs"
+      ]
+    },
+    {
+      "id": "reg-003",
+      "description": "register_callback() same transaction_id after idempotency TTL expiry — DuplicateRequest (F-07)",
+      "category": "idempotency",
+      "entry_point": "register_callback",
+      "inputs": {
+        "idempotency_key": "idem-fresh-new-key",
+        "transaction_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "idempotency_known": false,
+        "transaction_exists": true
+      },
+      "expected_result": "err:DuplicateRequest",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "reg"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {},
+      "notes": [
+        "F-07 fixed: persistent transaction_id guard, independent of idempotency TTL",
+        "R-04 compensating control",
+        "ContractError::DuplicateRequest = 40"
+      ]
+    },
+    {
+      "id": "reg-004",
+      "description": "register_callback() while paused — ContractPaused",
+      "category": "pause",
+      "entry_point": "register_callback",
+      "inputs": {
+        "transaction_id": "tx-any"
+      },
+      "pre_state": {
+        "paused": true
+      },
+      "expected_result": "err:ContractPaused",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "ContractError::ContractPaused = 12",
+        "R-01 compensating control: pause halts new ingestion"
+      ]
+    },
+    {
+      "id": "reg-005",
+      "description": "register_callback() with invalid stellar_account — InvalidStellarAccount",
+      "category": "validation",
+      "entry_point": "register_callback",
+      "inputs": {
+        "stellar_account": "GSHORT"
+      },
+      "pre_state": {
+        "initialized": true,
+        "paused": false
+      },
+      "expected_result": "err:InvalidStellarAccount",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "F-01 fixed: full SEP-23 base32 + CRC16 validation",
+        "ContractError::InvalidStellarAccount = 20"
+      ]
+    },
+    {
+      "id": "reg-006",
+      "description": "register_callback() with zero amount — InvalidAmount",
+      "category": "validation",
+      "entry_point": "register_callback",
+      "inputs": {
+        "amount": "0"
+      },
+      "pre_state": {
+        "initialized": true,
+        "paused": false
+      },
+      "expected_result": "err:InvalidAmount",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "ContractError::InvalidAmount = 21"
+      ]
+    },
+    {
+      "id": "reg-007",
+      "description": "register_callback() transaction_id over 64-byte cap — StringTooLong",
+      "category": "validation",
+      "entry_point": "register_callback",
+      "inputs": {
+        "transaction_id": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+      },
+      "pre_state": {
+        "initialized": true,
+        "paused": false
+      },
+      "expected_result": "err:StringTooLong",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "MAX_TX_ID_LEN = 64",
+        "ContractError::StringTooLong = 25"
+      ]
+    },
+    {
+      "id": "proc-001",
+      "description": "start_processing() on Pending transaction — transitions to Processing",
+      "category": "lifecycle",
+      "entry_point": "start_processing",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "transaction.status": "Pending"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "status"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "transaction.status": "Processing"
+      },
+      "notes": [
+        "I-02: only Pending→Processing is valid here"
+      ]
+    },
+    {
+      "id": "proc-002",
+      "description": "start_processing() on Completed transaction — InvalidStatusTransition",
+      "category": "lifecycle",
+      "entry_point": "start_processing",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "transaction.status": "Completed"
+      },
+      "expected_result": "err:InvalidStatusTransition",
+      "expected_events": [],
+      "expected_state": {
+        "transaction.status": "Completed"
+      },
+      "notes": [
+        "I-05: Completed is terminal",
+        "ContractError::InvalidStatusTransition = 31"
+      ]
+    },
+    {
+      "id": "proc-003",
+      "description": "start_processing() by non-admin/non-relay — Unauthorised",
+      "category": "auth",
+      "entry_point": "start_processing",
+      "inputs": {
+        "caller": "<attacker_address>",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "caller_is_admin": false,
+        "caller_is_relay": false,
+        "transaction.status": "Pending"
+      },
+      "expected_result": "err:Unauthorised",
+      "expected_events": [],
+      "expected_state": {
+        "transaction.status": "Pending"
+      },
+      "notes": [
+        "ContractError::Unauthorised = 10"
+      ]
+    },
+    {
+      "id": "comp-001",
+      "description": "complete_transaction() on Processing — Completed, fee accrued (100 bps on 1_000_000)",
+      "category": "lifecycle",
+      "entry_point": "complete_transaction",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "stellar_tx_hash": "abc123stellarhash",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "param.base_fee_bps": "100",
+        "transaction.amount": "1000000",
+        "transaction.status": "Processing",
+        "treasury_balance": "0"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "status"
+          ],
+          "present": true
+        },
+        {
+          "topics": [
+            "synapse",
+            "done"
+          ],
+          "present": true
+        },
+        {
+          "topics": [
+            "synapse",
+            "fee"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "transaction.status": "Completed",
+        "transaction.stellar_tx_hash": "abc123stellarhash",
+        "treasury_balance": "10000"
+      },
+      "notes": [
+        "I-03: Processing→Completed is the only valid transition",
+        "I-10: stellar_tx_hash set at Completed",
+        "fee = floor(1_000_000 * 100 / 10_000) = 10_000 stroops",
+        "#141 fee accrual",
+        "Events emitted in order: status, done, fee"
+      ]
+    },
+    {
+      "id": "comp-002",
+      "description": "complete_transaction() with base_fee_bps=0 — Completed, no fee event",
+      "category": "fee",
+      "entry_point": "complete_transaction",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "stellar_tx_hash": "abc123stellarhash",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "param.base_fee_bps": "0",
+        "transaction.status": "Processing",
+        "treasury_balance": "0"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "status"
+          ],
+          "present": true
+        },
+        {
+          "topics": [
+            "synapse",
+            "done"
+          ],
+          "present": true
+        },
+        {
+          "topics": [
+            "synapse",
+            "fee"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {
+        "transaction.status": "Completed",
+        "treasury_balance": "0"
+      },
+      "notes": [
+        "With base_fee_bps=0 (or unset), no fee is accrued and no fee event is emitted",
+        "Events emitted: exactly 2 (status, done)"
+      ]
+    },
+    {
+      "id": "comp-003",
+      "description": "complete_transaction() on Pending (skipping Processing) — InvalidStatusTransition",
+      "category": "lifecycle",
+      "entry_point": "complete_transaction",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "stellar_tx_hash": "abc123stellarhash",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "transaction.status": "Pending"
+      },
+      "expected_result": "err:InvalidStatusTransition",
+      "expected_events": [],
+      "expected_state": {
+        "transaction.status": "Pending"
+      },
+      "notes": [
+        "State machine strictly enforced: Pending→Completed is not a valid transition"
+      ]
+    },
+    {
+      "id": "fail-001",
+      "description": "fail_transaction() on Pending — Failed, no fee accrued",
+      "category": "lifecycle",
+      "entry_point": "fail_transaction",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "reason": "horizon_timeout",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "param.base_fee_bps": "100",
+        "transaction.status": "Pending",
+        "treasury_balance": "0"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "status"
+          ],
+          "present": true
+        },
+        {
+          "topics": [
+            "synapse",
+            "fail"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "transaction.failure_reason": "horizon_timeout",
+        "transaction.status": "Failed",
+        "treasury_balance": "0"
+      },
+      "notes": [
+        "I-04: Pending→Failed is valid",
+        "I-11: failure_reason set at Failed",
+        "No fee accrual on Failed — fees only on Completed"
+      ]
+    },
+    {
+      "id": "fail-002",
+      "description": "fail_transaction() on Completed — InvalidStatusTransition",
+      "category": "lifecycle",
+      "entry_point": "fail_transaction",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "reason": "late-fail",
+        "tx_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "transaction.status": "Completed"
+      },
+      "expected_result": "err:InvalidStatusTransition",
+      "expected_events": [],
+      "expected_state": {
+        "transaction.status": "Completed"
+      },
+      "notes": [
+        "I-05: Completed is terminal — cannot be failed after completion"
+      ]
+    },
+    {
+      "id": "fee-001",
+      "description": "set_param(base_fee_bps, 200) by admin — updates fee rate, emits param event",
+      "category": "fee",
+      "entry_point": "set_param",
+      "inputs": {
+        "name": "base_fee_bps",
+        "value": "200"
+      },
+      "pre_state": {
+        "caller_is_admin": true,
+        "param.base_fee_bps": "100"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "param"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "param.base_fee_bps": "200"
+      },
+      "notes": [
+        "#141: fee rate is the base_fee_bps registry param; applies to future completions only"
+      ]
+    },
+    {
+      "id": "fee-002",
+      "description": "set_param(base_fee_bps, 10_001) — InvalidParamValue",
+      "category": "fee",
+      "entry_point": "set_param",
+      "inputs": {
+        "name": "base_fee_bps",
+        "value": "10001"
+      },
+      "pre_state": {
+        "caller_is_admin": true,
+        "param.base_fee_bps": "100"
+      },
+      "expected_result": "err:InvalidParamValue",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "param"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {
+        "param.base_fee_bps": "100"
+      },
+      "notes": [
+        "ContractError::InvalidParamValue = 71",
+        "Valid range 0..=10_000"
+      ]
+    },
+    {
+      "id": "fee-003",
+      "description": "set_param(base_fee_bps) by non-admin — auth error",
+      "category": "fee",
+      "entry_point": "set_param",
+      "inputs": {
+        "name": "base_fee_bps",
+        "value": "200"
+      },
+      "pre_state": {
+        "caller_is_admin": false
+      },
+      "expected_result": "err:auth_error",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "R-02: all admin operations require admin auth"
+      ]
+    },
+    {
+      "id": "fee-004",
+      "description": "complete_transaction() with amount = i128::MAX at 1 bps — exact fee, no overflow",
+      "category": "fee",
+      "entry_point": "complete_transaction",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "stellar_tx_hash": "abc123stellarhash",
+        "tx_id": "tx-uuid-max"
+      },
+      "pre_state": {
+        "param.base_fee_bps": "1",
+        "transaction.amount": "170141183460469231731687303715884105727",
+        "transaction.status": "Processing",
+        "treasury_balance": "0"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "status"
+          ],
+          "present": true
+        },
+        {
+          "topics": [
+            "synapse",
+            "done"
+          ],
+          "present": true
+        },
+        {
+          "topics": [
+            "synapse",
+            "fee"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "transaction.status": "Completed",
+        "treasury_balance": "17014118346046923173168730371588410"
+      },
+      "notes": [
+        "fee = floor(amount * base_fee_bps / 10_000), computed without an intermediate overflow",
+        "#141: checked arithmetic; see docs/adr/0008-fee-accrual-and-treasury-withdrawal.md"
+      ]
+    },
+    {
+      "id": "fee-005",
+      "description": "complete_transaction() whose fee would overflow the treasury — ArithmeticOverflow, call rolled back",
+      "category": "fee",
+      "entry_point": "complete_transaction",
+      "inputs": {
+        "caller": "<relay_or_admin_address>",
+        "stellar_tx_hash": "abc123stellarhash",
+        "tx_id": "tx-uuid-002"
+      },
+      "pre_state": {
+        "param.base_fee_bps": "10000",
+        "transaction.amount": "1",
+        "transaction.status": "Processing",
+        "treasury_balance": "170141183460469231731687303715884105727"
+      },
+      "expected_result": "err:ArithmeticOverflow",
+      "expected_events": [],
+      "expected_state": {
+        "transaction.status": "Processing",
+        "treasury_balance": "170141183460469231731687303715884105727"
+      },
+      "notes": [
+        "ContractError::ArithmeticOverflow = 116",
+        "#141: treasury accounting must never wrap"
+      ]
+    },
+    {
+      "id": "wdraw-001",
+      "description": "propose_withdrawal() by admin — creates PendingWithdrawal, emits wprop",
+      "category": "treasury",
+      "entry_point": "propose_withdrawal",
+      "inputs": {
+        "amount": "5000",
+        "destination": "<destination_address>"
+      },
+      "pre_state": {
+        "caller_is_admin": true,
+        "param.treasury_epoch_cap": "1000000",
+        "param.treasury_epoch_length": "1000",
+        "pending_withdrawal": null,
+        "treasury_balance": "10000"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "wprop"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "pending_withdrawal.amount": "5000",
+        "pending_withdrawal.destination": "<destination_address>"
+      },
+      "notes": [
+        "#142 step 1 of 2: admin proposes, relay must co-authorize"
+      ]
+    },
+    {
+      "id": "wdraw-002",
+      "description": "propose_withdrawal() amount > treasury balance — InsufficientTreasuryBalance",
+      "category": "treasury",
+      "entry_point": "propose_withdrawal",
+      "inputs": {
+        "amount": "10001"
+      },
+      "pre_state": {
+        "caller_is_admin": true,
+        "param.treasury_epoch_cap": "1000000",
+        "param.treasury_epoch_length": "1000",
+        "treasury_balance": "10000"
+      },
+      "expected_result": "err:InsufficientTreasuryBalance",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "ContractError::InsufficientTreasuryBalance = 114"
+      ]
+    },
+    {
+      "id": "wdraw-003",
+      "description": "propose_withdrawal() when treasury not configured — TreasuryNotConfigured",
+      "category": "treasury",
+      "entry_point": "propose_withdrawal",
+      "inputs": {
+        "amount": "1"
+      },
+      "pre_state": {
+        "caller_is_admin": true,
+        "param.treasury_epoch_cap": null
+      },
+      "expected_result": "err:TreasuryNotConfigured",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "ContractError::TreasuryNotConfigured = 115"
+      ]
+    },
+    {
+      "id": "wdraw-004",
+      "description": "authorize_withdrawal() by relay signer — executes withdrawal, emits wexec",
+      "category": "treasury",
+      "entry_point": "authorize_withdrawal",
+      "inputs": {
+        "amount": "5000",
+        "caller": "<relay_address>",
+        "destination": "<destination_address>"
+      },
+      "pre_state": {
+        "caller_is_relay": true,
+        "epoch_withdrawn": "0",
+        "param.treasury_epoch_cap": "1000000",
+        "pending_withdrawal.amount": "5000",
+        "treasury_balance": "10000"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "wexec"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "epoch_withdrawn": "5000",
+        "pending_withdrawal": null,
+        "treasury_balance": "5000"
+      },
+      "notes": [
+        "#142 step 2 of 2: relay co-authorizes and executes",
+        "Two-party authorization: admin proposes, relay authorizes",
+        "Treasury balance reduced by withdrawal amount"
+      ]
+    },
+    {
+      "id": "wdraw-005",
+      "description": "authorize_withdrawal() by admin (not relay) — WithdrawalNotRelaySigner",
+      "category": "treasury",
+      "entry_point": "authorize_withdrawal",
+      "inputs": {
+        "amount": "5000",
+        "caller": "<admin_address>",
+        "destination": "<destination_address>"
+      },
+      "pre_state": {
+        "caller_is_admin": true,
+        "caller_is_relay": false,
+        "pending_withdrawal.amount": "5000"
+      },
+      "expected_result": "err:WithdrawalNotRelaySigner",
+      "expected_events": [],
+      "expected_state": {
+        "pending_withdrawal_still_present": true,
+        "treasury_balance_unchanged": true
+      },
+      "notes": [
+        "ContractError::WithdrawalNotRelaySigner = 113",
+        "#142: admin cannot unilaterally execute its own proposal",
+        "R-02 compensating control: two-party authorization prevents single-key drainage"
+      ]
+    },
+    {
+      "id": "wdraw-006",
+      "description": "authorize_withdrawal() exceeds per-epoch cap — WithdrawalCapExceeded",
+      "category": "treasury",
+      "entry_point": "authorize_withdrawal",
+      "inputs": {
+        "amount": "1",
+        "caller": "<relay_address>",
+        "destination": "<destination_address>"
+      },
+      "pre_state": {
+        "caller_is_relay": true,
+        "epoch_withdrawn": "1000000",
+        "param.treasury_epoch_cap": "1000000",
+        "pending_withdrawal.amount": "1"
+      },
+      "expected_result": "err:WithdrawalCapExceeded",
+      "expected_events": [],
+      "expected_state": {},
+      "notes": [
+        "ContractError::WithdrawalCapExceeded = 111",
+        "epoch_withdrawn + amount > epoch_cap triggers rejection"
+      ]
+    },
+    {
+      "id": "wdraw-007",
+      "description": "authorize_withdrawal() after epoch reset — cap resets, withdrawal succeeds",
+      "category": "treasury",
+      "entry_point": "authorize_withdrawal",
+      "inputs": {
+        "amount": "1",
+        "caller": "<relay_address>",
+        "destination": "<destination_address>"
+      },
+      "pre_state": {
+        "caller_is_relay": true,
+        "epoch_withdrawn": "1000000",
+        "ledger_sequence": ">= epoch_start + treasury_epoch_length",
+        "param.treasury_epoch_cap": "1000000",
+        "pending_withdrawal.amount": "1"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "wexec"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "epoch_withdrawn": "1"
+      },
+      "notes": [
+        "Epoch resets automatically when now >= epoch_start + treasury_epoch_length",
+        "epoch_withdrawn counter starts at 0 in new epoch"
+      ]
+    },
+    {
+      "id": "wdraw-008",
+      "description": "set_param(treasury_epoch_length, 0) — InvalidParamValue",
+      "category": "treasury",
+      "entry_point": "set_param",
+      "inputs": {
+        "name": "treasury_epoch_length",
+        "value": "0"
+      },
+      "pre_state": {
+        "caller_is_admin": true
+      },
+      "expected_result": "err:InvalidParamValue",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "param"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {},
+      "notes": [
+        "ContractError::InvalidParamValue = 71",
+        "A zero-length epoch would reset the cap on every call, defeating it"
+      ]
+    },
+    {
+      "id": "wdraw-009",
+      "description": "authorize_withdrawal() naming a different amount/destination than the pending proposal — WithdrawalProposalMismatch",
+      "category": "treasury",
+      "entry_point": "authorize_withdrawal",
+      "inputs": {
+        "amount": "500",
+        "caller": "<relay_address>",
+        "destination": "<destination_address>"
+      },
+      "pre_state": {
+        "caller_is_relay": true,
+        "pending_withdrawal.amount": "1000",
+        "pending_withdrawal.destination": "<attacker_address>",
+        "treasury_balance": "5000"
+      },
+      "expected_result": "err:WithdrawalProposalMismatch",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "wexec"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {
+        "pending_withdrawal_still_present": true,
+        "treasury_balance": "5000"
+      },
+      "notes": [
+        "ContractError::WithdrawalProposalMismatch = 117",
+        "R-06 control (d): the relay co-signs one specific (amount, destination); an admin-side proposal swap after relay review cannot execute"
+      ]
+    },
+    {
+      "id": "pause-001",
+      "description": "pause() by admin — blocks register_callback, emits pause event",
+      "category": "pause",
+      "entry_point": "pause",
+      "inputs": {},
+      "pre_state": {
+        "caller_is_admin": true,
+        "paused": false
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "pause"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "paused": true
+      },
+      "notes": [
+        "R-01 compensating control: pause halts new ingestion",
+        "Status transitions intentionally still work while paused (draining in-flight work)"
+      ]
+    },
+    {
+      "id": "pause-002",
+      "description": "unpause() by admin — resumes register_callback, emits pause event",
+      "category": "pause",
+      "entry_point": "unpause",
+      "inputs": {},
+      "pre_state": {
+        "caller_is_admin": true,
+        "paused": true
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "pause"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "paused": false
+      },
+      "notes": []
+    },
+    {
+      "id": "pause-003",
+      "description": "pause() by non-admin — auth error, contract stays unpaused",
+      "category": "pause",
+      "entry_point": "pause",
+      "inputs": {},
+      "pre_state": {
+        "caller_is_admin": false,
+        "paused": false
+      },
+      "expected_result": "err:auth_error",
+      "expected_events": [],
+      "expected_state": {
+        "paused": false
+      },
+      "notes": [
+        "R-02: pause gated by admin auth"
+      ]
+    },
+    {
+      "id": "admin-001",
+      "description": "propose_admin() — nominates new_admin without transferring yet",
+      "category": "admin",
+      "entry_point": "propose_admin",
+      "inputs": {
+        "new_admin": "<new_admin_address>"
+      },
+      "pre_state": {
+        "caller_is_admin": true
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "propose"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "admin": "<old_admin_address>",
+        "pending_admin": "<new_admin_address>"
+      },
+      "notes": [
+        "F-03 fixed: two-step transfer — propose alone does not transfer admin"
+      ]
+    },
+    {
+      "id": "admin-002",
+      "description": "accept_admin() by nominee — completes transfer, emits admin event",
+      "category": "admin",
+      "entry_point": "accept_admin",
+      "inputs": {
+        "caller": "<new_admin_address>"
+      },
+      "pre_state": {
+        "pending_admin": "<new_admin_address>"
+      },
+      "expected_result": "ok",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "admin"
+          ],
+          "present": true
+        }
+      ],
+      "expected_state": {
+        "admin": "<new_admin_address>",
+        "pending_admin": null
+      },
+      "notes": [
+        "R-02 compensating control (c): nominee must prove key control"
+      ]
+    },
+    {
+      "id": "upg-001",
+      "description": "upgrade() with wrong expected_schema_version — SchemaVersionMismatch, WASM unchanged",
+      "category": "upgrade",
+      "entry_point": "upgrade",
+      "inputs": {
+        "expected_schema_version": 999,
+        "new_wasm_hash": "<32-byte WASM hash>"
+      },
+      "pre_state": {
+        "caller_is_admin": true,
+        "schema_version": 1
+      },
+      "expected_result": "err:SchemaVersionMismatch",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "upgrade"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {
+        "wasm_unchanged": true
+      },
+      "notes": [
+        "F-04 fixed: schema version guard fires before update_current_contract_wasm",
+        "R-05 compensating control (c)",
+        "ContractError::SchemaVersionMismatch = 60"
+      ]
+    },
+    {
+      "id": "upg-002",
+      "description": "upgrade() by non-admin — auth error, WASM unchanged",
+      "category": "upgrade",
+      "entry_point": "upgrade",
+      "inputs": {
+        "expected_schema_version": 1,
+        "new_wasm_hash": "<32-byte WASM hash>"
+      },
+      "pre_state": {
+        "caller_is_admin": false,
+        "schema_version": 1
+      },
+      "expected_result": "err:auth_error",
+      "expected_events": [
+        {
+          "topics": [
+            "synapse",
+            "upgrade"
+          ],
+          "present": false
+        }
+      ],
+      "expected_state": {
+        "wasm_unchanged": true
+      },
+      "notes": [
+        "R-05 compensating control (a): upgrade requires admin auth",
+        "R-02: admin operations are auth-gated"
+      ]
+    }
+  ]
+}
