@@ -1,6 +1,6 @@
 name: Resource gate
 
-# Resource-usage regression gate (#119).
+# Resource-usage regression gate (#119) and release-WASM size gate (#122).
 #
 # Builds the release WASM, meters every hot entry point under Soroban's budget
 # (src/bench_resources.rs) and fails if any scenario's cpu_insns / mem_bytes
@@ -8,8 +8,24 @@ name: Resource gate
 #
 # Soroban metering is deterministic, so runner noise does not matter — but the
 # numbers depend on the exact WASM, and therefore on the rustc that built it.
-# RUST_TOOLCHAIN is pinned to the version resource_baseline.toml was generated
-# with; bump both together (see COST_MODEL.md §12).
+# RUST_TOOLCHAIN is pinned to the version resource_baseline.toml and
+# wasm_size.toml were generated wit
+#
+# Builds the release WASM, meters every hot entry point under Soroban's budget
+# (src/bench_resources.rs) and fails if any scenario's cpu_insns / mem_bytes
+# exceeds resource_baseline.toml by more than its threshold_pct.
+#
+# Soroban metering is deterministic, so runner noise does not matter — but the
+# numbers depend on the exact WASM, and therefore on the rustc that built it.
+# RUST_TOOLCHAIN is pinned to the version resource_baseline.toml and
+# wasm_size.toml were generated with; bump them together (COST_MODEL.md §12–13).
+#
+# Builds the release WASM, meters every hot entry point under Soroban's budget
+# (src/bench_resources.rs) and fails if any scenario's cpu_insns / mem_bytes
+# exceeds resource_baseline.toml by more than its threshold_pct.
+#
+# Soroban metering is deterministic, so runner noise does not matter — but the
+# numbers depend on the exact WASM, and therefore on the rustc that built it.
 
 on:
   push:
@@ -58,3 +74,23 @@ jobs:
 
       - name: Gate self-test — injected +10% (under threshold) must pass
         run: scripts/check_resource_budget.sh --inject register_callback:10
+
+      # ── WASM binary-size gate (#122) ──────────────────────────────────────
+      # Measures the same `make wasm` artefact (release profile: opt-level z,
+      # lto, strip) that DEPLOYMENT.md uploads.
+      - name: WASM size gate
+        run: scripts/check_wasm_size.sh
+
+      # Negative fixtures: a build with a deliberately bloated dummy export
+      # (+16 KiB, src/size_gate_fixture.rs) must trip the growth check, and
+      # the real WASM must trip an artificially low ceiling.
+      - name: Size gate self-test — bloated fixture build must fail
+        run: |
+          CARGO_TARGET_DIR=target/size-fixture \
+            cargo build --target wasm32-unknown-unknown --release --features size-gate-fixture
+          scripts/check_wasm_size.sh \
+            --wasm target/size-fixture/wasm32-unknown-unknown/release/synapse_core_contract.wasm \
+            --expect-fail
+
+      - name: Size gate self-test — ceiling below current size must fail
+        run: scripts/check_wasm_size.sh --ceiling 50000 --expect-fail
