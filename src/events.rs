@@ -228,6 +228,13 @@ pub struct EventSlashed {
 
 /// Emitted when a dispute is raised against a transaction.
 ///
+/// A dispute may be raised more than once over a transaction's lifetime if
+/// the dispute state machine permits re-disputing after a prior resolution.
+/// Subscribers correlate raised/resolved pairs via the shared `tx_id` field.
+///
+/// Downstream support tooling and admin dashboards subscribe to this event
+/// to surface disputes in real time without polling ledger state.
+///
 /// Subscribers correlate this with the following [`EventDisputeResolved`] for
 /// the same `tx_id` to reconstruct the full dispute lifecycle.
 #[contracttype]

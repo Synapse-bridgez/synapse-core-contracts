@@ -33,9 +33,9 @@ lto = true
 inherits = "release"
 debug-assertions = true
 
-[lints.rust]
 # `cfg(quarantine)` gates tests for entry points removed by #197 until they
 # are restored; never set in CI. See QUARANTINE.md.
+[lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(quarantine)"] }
 
 # ── Clippy (#175) ─────────────────────────────────────────────────────────────

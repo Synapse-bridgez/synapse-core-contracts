@@ -439,6 +439,9 @@ fn invariant_pause_unpause_does_not_affect_counts() {
 /// Exercises varied operation orderings to catch any state-bookkeeping bug
 /// that only appears after specific sequences.
 #[test]
+// Parallel indexing into `TX_IDS`, `IDEM_IDS`, `ids` and `statuses` reads
+// clearer as a range loop than as nested zips.
+#[allow(clippy::needless_range_loop)]
 fn invariant_pseudorandom_operation_sequences() {
     // (seed, offset into TX_IDS/IDEM_IDS) — 12 txs per seed, 5 seeds = 60 total.
     // We stagger offsets so each seed uses a disjoint set of IDs within the 30

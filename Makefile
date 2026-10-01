@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build bench setup mutants
+.PHONY: check fmt clippy test wasm build bench resource-gate setup mutants
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
@@ -34,6 +34,14 @@ build:
 ## Grep-friendly: all cost lines are prefixed with "[bench]".
 bench:
 	cargo test bench_ -- --nocapture 2>&1 | grep -E '^\[bench\]|^test bench_'
+
+## Resource-usage regression gate (#119): meter every hot entry point of the
+## release WASM and compare against resource_baseline.toml. CI runs this with
+## a pinned toolchain (.github/workflows/resource-gate.yml); numbers depend on
+## the exact WASM, so a different local rustc may show small drift.
+## To accept an intended change: scripts/check_resource_budget.sh --update
+resource-gate: wasm
+	scripts/check_resource_budget.sh
 
 ## One-time contributor setup: install the pre-commit hook.
 setup:
