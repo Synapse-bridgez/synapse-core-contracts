@@ -269,6 +269,12 @@ wired.
 <!-- handsoff-issue-109 -->
 - #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
 
+<!-- handsoff-issue-160 -->
+- #160: [High] Add rate-limited guards on unbounded-pagination read-only queries
+
+<!-- handsoff-issue-162 -->
+- #162: [High] Implement `verify_transaction_proof()` producing a Merkle-style inclusion proof
+
 <!-- handsoff-issue-164 -->
 - #164: [High] Add `get_fee_schedule()`/`get_parameter_registry()` read-only queries
 

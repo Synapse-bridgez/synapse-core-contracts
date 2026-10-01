@@ -19,8 +19,16 @@ test:
 	cargo test --verbose
 
 ## Build the release wasm artefact (confirms the cdylib target compiles).
+##
+## The git commit hash is injected at compile time so that the on-chain
+## `contract_metadata()` query reports the exact deployed revision. The build
+## script (build.rs) reads `GIT_COMMIT_HASH` first, falling back to
+## `git rev-parse HEAD`, and finally to "unknown" for non-git source trees.
+## CI sets `GIT_COMMIT_HASH` explicitly (see .github/workflows/) so the value
+## baked into a released artefact always reflects the real deployed commit.
 wasm:
-	cargo build --target wasm32-unknown-unknown --release
+	GIT_COMMIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo unknown) \
+		cargo build --target wasm32-unknown-unknown --release
 
 ## Plain debug build (quick sanity check).
 build:

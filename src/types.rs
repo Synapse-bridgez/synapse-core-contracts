@@ -17,6 +17,16 @@ use soroban_sdk::{contracterror, contracttype, String};
 /// or an unexpected on-chain state, not against an incompatible new binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Build/commit-hash identifier baked in at compile time.
+///
+/// CI sets the `SYNAPSE_BUILD_COMMIT` environment variable to the real git
+/// commit hash before invoking `cargo build`; the `build.rs` build script
+/// forwards it to the compiler via `cargo:rustc-env`, so the value is
+/// embedded directly into the deployed WASM. Local dev builds that do not set
+/// the variable fall back to `"unknown"` — a genuine CI-built artifact will
+/// always carry the real deployed commit hash.
+pub const BUILD_COMMIT: &str = env!("SYNAPSE_BUILD_COMMIT");
+
 // ─── Structured error diagnostics (#167) ──────────────────────────────────────
 
 /// Off-chain handling guidance for a [`ContractError`] variant.
@@ -180,6 +190,47 @@ pub struct CallbackPayload {
     pub callback_status: String,
 }
 
+// ─── Bundled deployment metadata (#159) ───────────────────────────────────────
+
+/// Bundled deployment identity returned by
+/// [`crate::SynapseCoreContract::contract_metadata`].
+///
+/// Convenience aggregate of the individual read-only queries so support
+/// tooling and dashboards can fetch the full "what exactly is deployed right
+/// now" picture in a single round-trip, avoiding inconsistent reads from
+/// separate calls made at slightly different times. Each field mirrors the
+/// value returned by its corresponding individual query exactly.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractMetadata {
+    /// Contract crate version — mirrors `version()`.
+    pub version: String,
+    /// On-chain storage schema version — mirrors `schema_version()`.
+    pub schema_version: u32,
+    /// Locked event schema version — mirrors `events_version()`.
+    pub events_version: u32,
+    /// Git commit hash baked in at compile time — see [`BUILD_COMMIT`].
+    pub build_commit: String,
+}
+
+// ─── Relay signer set (#161) ──────────────────────────────────────────────────
+
+/// Current relay-signer roster and quorum threshold returned by
+/// [`crate::SynapseCoreContract::get_relay_signer_set`].
+///
+/// Roster/threshold only — deliberately carries no per-signer state (liveness,
+/// quarantine, etc.); that belongs to the separate heartbeat query. The
+/// `signers` vector is the authoritative current membership and `threshold` is
+/// the number of signers that must agree to authorize a relay action.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySignerSet {
+    /// Current relay-signer roster.
+    pub signers: soroban_sdk::Vec<soroban_sdk::Address>,
+    /// Number of signers required to authorize a relay action.
+    pub threshold: u32,
+}
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 /// Discriminants used as ledger storage keys.
@@ -216,12 +267,7 @@ pub enum StorageKey {
     /// Per-parameter record keyed by param name string.
     Param(String),
 
-    // ── Wave 2: Collateral Bonding (#143) ────────────────────────────────────
-    /// Per-signer bond record keyed by the signer address.
-    BondRecord(soroban_sdk::Address),
-    /// Per-signer unbond request keyed by the signer address.
-    /// Absent when no unbond is pending.
-    UnbondRequest(soroban_sdk::Address),
+    // ── Wave 2: Collateral Bonding (#143) ────
 
     // ── Wave 2: Anchor Rebate (#145) ─────────────────────────────────────────
     /// Per-anchor tier config keyed by the anchor address.
@@ -251,16 +297,6 @@ pub struct ParamEntry {
     /// Address that last set this param (always the admin).
     pub updated_by: soroban_sdk::Address,
 }
-
-// ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
-
-/// In-flight timelocked upgrade proposal.
-///
-/// Stored in persistent ledger storage keyed by [`StorageKey::BondRecord`].
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BondRecord {
-    /// The signer whose collateral is bonde
 
 // ─── Timelocked Upgrade (#163) ────────────────────────────────────────────────
 
