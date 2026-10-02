@@ -291,3 +291,5 @@ wired.
 
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling
+
+<!-- Updated documentation references -->
