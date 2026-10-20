@@ -14,7 +14,9 @@ mod storage;
 mod types;
 mod validation;
 
-use soroban_sdk::{contract, contractimpl};
+use soroban_sdk::{contract, contractimpl, Address, Env};
+
+use crate::types::ContractError;
 
 /// The contract type that all entry points are implemented on.
 #[contract]
@@ -23,4 +25,32 @@ pub struct Contract;
 /// Entry-point scaffolding. Intentionally empty for now; later issues add
 /// `pub fn` entry points here rather than rewriting this file.
 #[contractimpl]
-impl Contract {}
+impl Contract {
+    /// One-time contract initialization.
+    ///
+    /// Stores `admin` and `relay_signer` into instance storage (hot-path tier
+    /// per `README.md`) and emits `EventContractInitialized` exactly once.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` - The administrative address for the contract.
+    /// * `relay_signer` - The address authorized to sign relayed operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::AlreadyInitialized`] if the contract has
+    /// already been initialized, regardless of the arguments supplied.
+    pub fn initialize(env: Env, admin: Address, relay_signer: Address) -> Result<(), ContractError> {
+        if storage::is_initialized(&env) {
+            return Err(ContractError::AlreadyInitialized);
+        }
+
+        storage::set_admin(&env, &admin);
+        storage::set_relay_signer(&env, &relay_signer);
+        storage::set_initialized(&env);
+
+        events::emit_contract_initialized(&env, &admin, &relay_signer);
+
+        Ok(())
+    }
+}
