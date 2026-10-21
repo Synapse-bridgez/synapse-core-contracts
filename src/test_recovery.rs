@@ -2,7 +2,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
@@ -211,4 +211,52 @@ fn immediate_rotation_closed_when_delay_set() {
             .unwrap(),
         ContractError::TimelockRequired
     );
+}
+
+// ─── #301 quorum isolation: relay-call approvals vs. rotation finalization ────
+
+/// A signer's `approve_relay_call` approval for a `call_id` must not count
+/// toward any pending rotation-finalization quorum, and a rotation proposal
+/// must not satisfy a relay-call quorum. Both mechanisms are exercised
+/// concurrently to confirm their storage namespaces stay isolated.
+#[test]
+fn relay_call_and_rotation_quorums_are_isolated() {
+    let (env, client, _admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    let primary = client.relay_signer();
+    let s2 = Address::generate(&env);
+    client.add_relay_signer(&s2);
+    client.set_relay_threshold(&2);
+
+    // s2 is both a relay-call approver and mid-rotation-proposal.
+    let new_signer = Address::generate(&env);
+    client.set_relay_signer_delay(&10);
+    client.propose_relay_signer(&new_signer);
+
+    // A relay-call approval for `a` must not advance the rotation quorum.
+    client.approve_relay_call(&s2);
+    assert_eq!(
+        client.try_finalize_relay_signer().unwrap_err().unwrap(),
+        ContractError::TimelockNotElapsed
+    );
+
+    // The relay-call quorum is satisfied independently of the rotation.
+    client.start_processing(&a, &primary);
+    assert_eq!(client.get_status(&a), TransactionStatus::Processing);
+
+    // A pending rotation proposal does not satisfy a fresh relay-call quorum.
+    let b = reg(&env, &client, "tx-b");
+    assert_eq!(
+        client
+            .try_start_processing(&b, &primary)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::QuorumNotMet
+    );
+
+    // Rotation finalizes on its own timeline, unaffected by relay approvals.
+    let start = env.ledger().sequence();
+    env.ledger().with_mut(|l| l.sequence_number = start + 10);
+    client.finalize_relay_signer();
+    assert_eq!(client.relay_signer(), new_signer);
 }
