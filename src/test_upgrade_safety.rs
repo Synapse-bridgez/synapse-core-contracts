@@ -228,6 +228,6 @@ fn test_upgrade_rollback_history_round_trip() {
     assert!(!client.last_upgrade_migrated());
 
     // Rollback guard path is clear; attempting the swap
-    // (missing WASM) fails at the host level and rolls back.
-    let _ = client.try_rollback_upgrade();
-}
+
+
+/* … truncated 107 chars — edit only what you need near the top … */
