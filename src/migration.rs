@@ -65,6 +65,18 @@ impl MigrationRegistry {
         }
     }
 
+    /// Validate that `migration_id` is a known routine without executing it.
+    ///
+    /// Used by [`crate::SynapseCoreContract::upgrade_and_migrate`] to fail
+    /// closed on [`ContractError::UnknownMigration`] *before* committing the
+    /// WASM swap, so an unknown id never leaves the contract on the new WASM.
+    pub fn validate(migration_id: u32) -> Result<(), ContractError> {
+        match migration_id {
+            MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
+            _ => Err(ContractError::UnknownMigration),
+        }
+    }
+
     fn assert_within_bound(planned_touches: u32) -> Result<(), ContractError> {
         if planned_touches > MAX_MIGRATION_STORAGE_TOUCHES {
             return Err(ContractError::MigrationFailed);
