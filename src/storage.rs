@@ -6,7 +6,16 @@
 use soroban_sdk::{Address, Env, Vec};
 
 use crate::events;
-use crate::types::{DataKey, Error};
+use crate::types::{DataKey, Error, Transaction, TransactionStatus};
+
+/// Maximum number of transactions a single `get_transactions_by_status` page
+/// may return. Requests with `limit == 0` or `limit > MAX_STATUS_PAGE_LIMIT`
+/// are rejected with [`Error::InvalidLimit`].
+///
+/// Bounding the page size keeps the read O(page-size) against the slot-based
+/// status index (issue #24) and prevents callers from forcing an unbounded
+/// scan of the index in a single invocation.
+pub const MAX_STATUS_PAGE_LIMIT: u32 = 100;
 
 /// Returns the current relay-signer set.
 ///
@@ -149,4 +158,75 @@ pub fn approve_relay_call(
     }
 
     Ok(quorum_met)
+}
+
+/// Returns the slot-based status index for `status` (issue #24).
+///
+/// The index is a `Vec<u64>` of transaction ids in insertion order, stored
+/// under [`DataKey::StatusIndex`]. Reading it is O(1) in the number of
+/// transactions; only the requested page is materialised.
+fn get_status_index(env: &Env, status: &TransactionStatus) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StatusIndex(status.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Returns a page of transactions currently in `status`, unauthenticated.
+///
+/// Reads directly from the slot-based status index (issue #24) so the cost is
+/// O(page-size) rather than O(total-transactions): only the `limit` ids in
+/// `[offset, offset + limit)` are resolved to full [`Transaction`] records.
+///
+/// # Pagination and consistency
+///
+/// The index is append-ordered and each call re-reads the current index, so
+/// the guaranteed consistency level is **eventually-consistent-per-ledger**:
+/// within a single ledger the page is a consistent snapshot, but a transaction
+/// that transitions out of `status` between two paginated calls may be absent
+/// from (or shifted within) a later page. Callers that need a stable snapshot
+/// across pages should pin to a ledger sequence and re-query on mismatch.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidLimit`] when `limit == 0` or
+/// `limit > MAX_STATUS_PAGE_LIMIT`, per
+/// `test_get_transactions_by_status_rejects_bad_limit`.
+pub fn get_transactions_by_status(
+    env: &Env,
+    status: &TransactionStatus,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<Transaction>, Error> {
+    if limit == 0 || limit > MAX_STATUS_PAGE_LIMIT {
+        return Err(Error::InvalidLimit);
+    }
+
+    let index = get_status_index(env, status);
+    let total = index.len();
+
+    let mut page = Vec::new(env);
+    if offset >= total {
+        return Ok(page);
+    }
+
+    let end = offset.saturating_add(limit).min(total);
+    let mut i = offset;
+    while i < end {
+        let tx_id = index.get_unchecked(i);
+        if let Some(tx) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Transaction>(&DataKey::Transaction(tx_id))
+        {
+            // Skip entries that have transitioned out of `status` since the
+            // index was last compacted; the index is eventually consistent.
+            if tx.status == *status {
+                page.push_back(tx);
+            }
+        }
+        i += 1;
+    }
+
+    Ok(page)
 }
