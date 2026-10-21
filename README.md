@@ -291,3 +291,6 @@ wired.
 
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling
+
+<!-- handsoff-issue-277 -->
+- #277: Restore `dispute_transaction` / `resolve_dispute` / `is_disputed`
