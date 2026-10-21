@@ -8,6 +8,8 @@ pub enum DataKey {
     Param(String),
     /// The N-of-M relay-signer approval threshold.
     RelayThreshold,
+    /// The ledger-count delay enforced by the timelocked relay-signer rotation.
+    RelaySignerDelay,
     /// The pending (proposed) relay signer awaiting timelock finalization.
     PendingRelaySigner,
     /// The ledger sequence at which the pending relay-signer change finalizes.
@@ -16,6 +18,18 @@ pub enum DataKey {
 
 /// Maximum length, in bytes, of a parameter name.
 pub const MAX_PARAM_NAME_LEN: u32 = 32;
+
+/// Minimum allowed value, in ledgers, for the relay-signer rotation delay.
+///
+/// A zero (or near-zero) delay would defeat the timelock's purpose entirely,
+/// so the smallest accepted delay is one ledger.
+pub const MIN_RELAY_SIGNER_DELAY: u32 = 1;
+
+/// Maximum allowed value, in ledgers, for the relay-signer rotation delay.
+///
+/// Bounds the delay to roughly one year of ledgers (~5s each) so a misconfigured
+/// value cannot lock the rotation flow out indefinitely.
+pub const MAX_RELAY_SIGNER_DELAY: u32 = 6_307_200;
 
 /// Reads a parameter from persistent storage.
 ///
@@ -89,6 +103,33 @@ pub fn has_relay_threshold(env: &Env) -> bool {
 /// Removes the configured relay-signer threshold, if present.
 pub fn remove_relay_threshold(env: &Env) {
     env.storage().persistent().remove(&DataKey::RelayThreshold);
+}
+
+/// Reads the configured relay-signer rotation delay, in ledgers.
+///
+/// Returns `None` when no delay has been configured yet.
+pub fn get_relay_signer_delay(env: &Env) -> Option<u32> {
+    env.storage().persistent().get(&DataKey::RelaySignerDelay)
+}
+
+/// Persists the relay-signer rotation delay, in ledgers.
+///
+/// Callers are responsible for validating `delay_ledgers` against
+/// [`MIN_RELAY_SIGNER_DELAY`] and [`MAX_RELAY_SIGNER_DELAY`] before writing.
+pub fn set_relay_signer_delay(env: &Env, delay_ledgers: u32) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::RelaySignerDelay, &delay_ledgers);
+}
+
+/// Returns `true` when a relay-signer rotation delay has been configured.
+pub fn has_relay_signer_delay(env: &Env) -> bool {
+    env.storage().persistent().has(&DataKey::RelaySignerDelay)
+}
+
+/// Removes the configured relay-signer rotation delay, if present.
+pub fn remove_relay_signer_delay(env: &Env) {
+    env.storage().persistent().remove(&DataKey::RelaySignerDelay);
 }
 
 /// Reads the pending relay signer awaiting timelock finalization.

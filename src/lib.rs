@@ -13,8 +13,50 @@ use crate::events;
 use crate::storage;
 use crate::{Contract, ContractArgs, ContractClient, Error};
 
+/// Minimum allowed relay-signer rotation delay, in ledgers.
+///
+/// A zero (or near-zero) delay would defeat the timelock's purpose entirely,
+/// so the configured delay must be at least this many ledgers.
+pub const MIN_RELAY_SIGNER_DELAY: u32 = 1;
+
+/// Maximum allowed relay-signer rotation delay, in ledgers.
+///
+/// Bounds the delay to a sane value so a misconfiguration cannot lock the
+/// rotation flow out for an unreasonable amount of time.
+pub const MAX_RELAY_SIGNER_DELAY: u32 = 17_280; // ~1 day at 5s ledgers
+
 #[contractimpl]
 impl Contract {
+    /// Configure the relay-signer rotation timelock delay, in ledgers.
+    ///
+    /// Gated to the admin (per `docs/adr/0004-relay-signer-set.md`). The value
+    /// is stored as a sibling config value to the relay-signer threshold and
+    /// is consulted by `propose_relay_signer` to derive the finalization
+    /// boundary. The delay must be within
+    /// [`MIN_RELAY_SIGNER_DELAY`]..=[`MAX_RELAY_SIGNER_DELAY`]; zero-delay is
+    /// rejected because it would defeat the timelock.
+    ///
+    /// Changing the delay only affects proposals created afterwards; an
+    /// already-pending proposal keeps the boundary computed at propose time.
+    pub fn set_relay_signer_delay(
+        env: Env,
+        delay_ledgers: u32,
+        caller: Address,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        let admin = storage::get_admin(&env)?;
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+
+        if delay_ledgers < MIN_RELAY_SIGNER_DELAY || delay_ledgers > MAX_RELAY_SIGNER_DELAY {
+            return Err(Error::InvalidDelay);
+        }
+
+        storage::set_relay_signer_delay(&env, delay_ledgers);
+        Ok(())
+    }
+
     /// Propose a new relay signer, starting the timelock.
     ///
     /// Gated to the admin (per `docs/adr/0004-relay-signer-set.md`). The
