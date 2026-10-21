@@ -294,3 +294,6 @@ wired.
 
 <!-- handsoff-issue-309 -->
 - #309: Restore `post_upgrade_self_check` entry point and `SelfCheckFailed`
+
+<!-- handsoff-issue-311 -->
+- #311: Restore bounded `get_upgrade_history` end-to-end (integration pass)
