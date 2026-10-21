@@ -10,6 +10,7 @@ mod admin;
 mod callbacks;
 mod errors;
 mod events;
+mod migration;
 mod multisig;
 mod recovery;
 mod storage;
@@ -33,6 +34,7 @@ mod test_treasury;
 mod test_upgrade_safety;
 
 pub use errors::Error;
+pub use migration::UpgradeSnapshot;
 pub use types::{
     Callback, Config, Proposal, ProposalStatus, Signer, SignerKind, Transaction, TxStatus,
 };
@@ -142,5 +144,18 @@ impl VaultContract {
     /// Unpause the contract.
     pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
         admin::unpause(&env, admin)
+    }
+
+    /// Capture a pre-upgrade `UpgradeSnapshot` immediately before the WASM is
+    /// swapped (issue #308). The snapshot is persisted in instance storage so
+    /// it survives the upgrade and can be consumed by
+    /// `post_upgrade_self_check` (#26/#97) and `rollback_upgrade` (#102).
+    pub fn capture_upgrade_snapshot(env: Env, admin: Address) -> Result<UpgradeSnapshot, Error> {
+        migration::capture_upgrade_snapshot(&env, admin)
+    }
+
+    /// Return the most recently captured `UpgradeSnapshot`, if any.
+    pub fn get_upgrade_snapshot(env: Env) -> Option<UpgradeSnapshot> {
+        migration::get_upgrade_snapshot(&env)
     }
 }
