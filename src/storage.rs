@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Env, String, Symbol};
+use soroban_sdk::{contracttype, Address, Env, String, Symbol};
 
 /// Storage keys for the parameter registry.
 #[contracttype]
@@ -8,6 +8,10 @@ pub enum DataKey {
     Param(String),
     /// The N-of-M relay-signer approval threshold.
     RelayThreshold,
+    /// The pending (proposed) relay signer awaiting timelock finalization.
+    PendingRelaySigner,
+    /// The ledger sequence at which the pending relay-signer change finalizes.
+    RelaySignerFinalizeAt,
 }
 
 /// Maximum length, in bytes, of a parameter name.
@@ -85,4 +89,50 @@ pub fn has_relay_threshold(env: &Env) -> bool {
 /// Removes the configured relay-signer threshold, if present.
 pub fn remove_relay_threshold(env: &Env) {
     env.storage().persistent().remove(&DataKey::RelayThreshold);
+}
+
+/// Reads the pending relay signer awaiting timelock finalization.
+///
+/// Returns `None` when no rotation is currently proposed.
+pub fn get_pending_relay_signer(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::PendingRelaySigner)
+}
+
+/// Persists the pending relay signer and the ledger sequence at which the
+/// timelocked rotation becomes finalizable.
+///
+/// Callers are responsible for computing `finalize_at` from the configured
+/// `set_relay_signer_delay` (issue #88) before writing.
+pub fn set_pending_relay_signer(env: &Env, signer: &Address, finalize_at: u32) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingRelaySigner, signer);
+    env.storage()
+        .persistent()
+        .set(&DataKey::RelaySignerFinalizeAt, &finalize_at);
+}
+
+/// Returns the ledger sequence at which the pending relay-signer change
+/// finalizes, or `None` when no rotation is pending.
+pub fn get_relay_signer_finalize_at(env: &Env) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::RelaySignerFinalizeAt)
+}
+
+/// Returns `true` when a relay-signer rotation is currently pending.
+pub fn has_pending_relay_signer(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::PendingRelaySigner)
+}
+
+/// Clears any pending relay-signer rotation (used on finalize and cancel).
+pub fn remove_pending_relay_signer(env: &Env) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingRelaySigner);
+    env.storage()
+        .persistent()
+        .remove(&DataKey::RelaySignerFinalizeAt);
 }
