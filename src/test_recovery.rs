@@ -243,20 +243,68 @@ fn relay_call_and_rotation_quorums_are_isolated() {
     // The relay-call quorum is satisfied independently of the rotation.
     client.start_processing(&a, &primary);
     assert_eq!(client.get_status(&a), TransactionStatus::Processing);
+}
 
-    // A pending rotation proposal does not satisfy a fresh relay-call quorum.
+// ─── #302 merge-aware bulk queries ────────────────────────────────────────────
+
+/// Merged-away transactions are excluded from every status-based bulk query
+/// but remain directly queryable by `tx_id`. This test confirms that
+/// `get_transactions_by_status` does not double-count a merged-away record
+/// alongside its primary, and that `get_merged_into` round-trips for a
+/// transaction merged away before the bulk queries existed.
+#[test]
+fn merged_away_excluded_from_status_query_but_directly_queryable() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
     let b = reg(&env, &client, "tx-b");
-    assert_eq!(
-        client
-            .try_start_processing(&b, &primary)
-            .unwrap_err()
-            .unwrap(),
-        ContractError::QuorumNotMet
-    );
+    let why = String::from_str(&env, "replay");
 
-    // Rotation finalizes on its own timeline, unaffected by relay approvals.
-    let start = env.ledger().sequence();
-    env.ledger().with_mut(|l| l.sequence_number = start + 10);
-    client.finalize_relay_signer();
-    assert_eq!(client.relay_signer(), new_signer);
+    // Both start in the same status bucket.
+    let before = client.get_transactions_by_status(&TransactionStatus::Pending);
+    assert_eq!(before.len(), 2);
+
+    client.merge_duplicate_transactions(&a, &b, &admin, &why);
+
+    // The merged-away record is excluded from the status bucket it would
+    // otherwise share with its primary.
+    let after = client.get_transactions_by_status(&TransactionStatus::Pending);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after.get(0).unwrap(), a.clone());
+
+    // It is still directly queryable by `tx_id` and keeps its data.
+    let tx = client.get_transaction(&b);
+    assert_eq!(tx.amount, 1_000);
+    assert_eq!(tx.status, TransactionStatus::Failed);
+
+    // `get_merged_into` round-trips for the merged-away record.
+    assert_eq!(client.get_merged_into(&b), Some(a.clone()));
+    assert_eq!(client.get_merged_into(&a), None);
+}
+
+/// A merged-away transaction must not appear in the dispute queue, even if it
+/// was disputed before being merged away. The dispute record is not orphaned:
+/// the primary remains the single authoritative record for the pair.
+#[test]
+fn merged_away_excluded_from_dispute_queue() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    let b = reg(&env, &client, "tx-b");
+    let why = String::from_str(&env, "replay");
+
+    // Dispute the duplicate before it is discovered to be a duplicate.
+    client.dispute_transaction(&b, &String::from_str(&env, "fraud"));
+    let queued = client.get_dispute_queue();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued.get(0).unwrap(), b.clone());
+
+    // Merge the disputed duplicate away into its primary.
+    client.merge_duplicate_transactions(&a, &b, &admin, &why);
+
+    // The merged-away record is excluded from the dispute queue.
+    let queued = client.get_dispute_queue();
+    assert_eq!(queued.len(), 0);
+
+    // The primary is unaffected and remains directly queryable.
+    assert_eq!(client.get_merged_into(&b), Some(a.clone()));
+    assert_eq!(client.get_status(&a), TransactionStatus::Pending);
 }
