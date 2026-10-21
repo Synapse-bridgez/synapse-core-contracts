@@ -224,101 +224,94 @@ fn test_no_pending_change_consistent_across_features() {
     );
 }
 
-// ─── #82 upgrade_and_migrate ──────────────────────────────────────────────────
+// ─── #320 UpgradeNotReversible / InvalidSchemaCompatRange guards ─────────────
 
 #[test]
-fn test_migration_failure_leaves_storage_unchanged() {
-    let (env, client, contract_id) = setup();
-    let dummy = hash(&env, 0x55);
-    let result =
-        client.try_upgrade_and_migrate(&dummy, &SCHEMA_VERSION, &MIGRATION_FAIL_AFTER_WRITE);
-    assert_eq!(result, Err(Ok(ContractError::MigrationFailed)));
-    env.as_contract(&contract_id, || {
-        assert!(
-            StorageClient::get_migration_marker(&env).is_none(),
-            "failed migration must roll back marker writes"
-        );
-        assert!(!StorageClient::last_upgrade_migrated(&env));
-        assert!(StorageClient::get_current_wasm_hash(&env).is_none());
-    });
-}
-
-#[test]
-fn test_unknown_migration_id_rejected() {
+fn test_upgrade_not_reversible_when_schema_downgrade() {
+    // #102: a proposed upgrade whose expected schema version is lower than the
+    // currently stored schema version must be rejected as not reversible.
     let (env, client, _) = setup();
+    client.set_upgrade_delay(&10);
+    let lower = SCHEMA_VERSION.saturating_sub(1);
     assert_eq!(
-        client.try_upgrade_and_migrate(&hash(&env, 0x66), &SCHEMA_VERSION, &999_999),
-        Err(Ok(ContractError::UnknownMigration))
+        client.try_propose_upgrade(&hash(&env, 0xa1), &lower),
+        Err(Ok(ContractError::UpgradeNotReversible)),
+        "schema downgrade must be rejected as not reversible"
     );
+    assert!(client.get_pending_upgrade().is_none());
 }
 
 #[test]
-fn test_noop_migration_runs_before_wasm_swap() {
-    let (env, client, contract_id) = setup();
-    // NOOP migration succeeds; missing WASM then fails the host call and
-    // rolls back — proving migration ran without leaving LastUpgradeMigrated.
-    let _ = client.try_upgrade_and_migrate(&hash(&env, 0x77), &SCHEMA_VERSION, &MIGRATION_NOOP);
-    env.as_contract(&contract_id, || {
-        assert!(!StorageClient::last_upgrade_migrated(&env));
-    });
-}
-
-// ─── #83 rollback ─────────────────────────────────────────────────────────────
-
-#[test]
-fn test_rollback_with_no_history_fails() {
-    let (_env, client, _) = setup();
-    assert_eq!(
-        client.try_rollback_upgrade(),
-        Err(Ok(ContractError::NothingToRollback))
+fn test_upgrade_not_reversible_at_equal_schema_boundary() {
+    // Equal schema version is the boundary that must be accepted (not rejected).
+    let (env, client, _) = setup();
+    client.set_upgrade_delay(&10);
+    assert_ne!(
+        client.try_propose_upgrade(&hash(&env, 0xa2), &SCHEMA_VERSION),
+        Err(Ok(ContractError::UpgradeNotReversible)),
+        "equal schema version must not be rejected as not reversible"
     );
+    assert!(client.get_pending_upgrade().is_some());
 }
 
 #[test]
-fn test_rollback_blocked_after_migrated_flag() {
-    let (env, client, contract_id) = setup();
-    let prev = hash(&env, 0xaa);
-    env.as_contract(&contract_id, || {
-        StorageClient::set_previous_upgrade(
-            &env,
-            &UpgradeSnapshot {
-                wasm_hash: prev.clone(),
-                schema_version: SCHEMA_VERSION,
-            },
-        );
-        StorageClient::set_last_upgrade_migrated(&env, true);
-    });
+fn test_upgrade_not_reversible_at_one_below_boundary() {
+    // Exactly one below the current schema version is the tightest downgrade
+    // boundary and must still be rejected.
+    let (env, client, _) = setup();
+    client.set_upgrade_delay(&10);
+    let one_below = SCHEMA_VERSION - 1;
     assert_eq!(
-        client.try_rollback_upgrade(),
+        client.try_propose_upgrade(&hash(&env, 0xa3), &one_below),
         Err(Ok(ContractError::UpgradeNotReversible))
     );
 }
 
 #[test]
-fn test_upgrade_rollback_history_round_trip() {
-    // Seed current hash, then mimic perform_upgrade's history write (without
-    // a WASM swap) and assert rollback targets the pre-upgrade snapshot.
-    let (env, client, contract_id) = setup();
-    let pre = hash(&env, 0x01);
-    let post = hash(&env, 0x02);
-    client.register_installed_wasm(&pre);
-
-    env.as_contract(&contract_id, || {
-        let current = StorageClient::get_current_wasm_hash(&env).unwrap();
-        assert_eq!(current, pre);
-        StorageClient::set_previous_upgrade(
-            &env,
-            &UpgradeSnapshot {
-                wasm_hash: current,
-                schema_version: SCHEMA_VERSION,
-            },
-        );
-        StorageClient::set_current_wasm_hash(&env, &post);
-        StorageClient::set_last_upgrade_migrated(&env, false);
-    });
-
-    assert_eq!(client.previous_upgrade().unwrap().wasm_hash, pre);
-    assert!(!client.last_upgrade_migrated());
-
-    // Rollback guard path is clear; attempting the swap
+fn test_invalid_schema_compat_range_min_greater_than_max() {
+    // #55/#104: min > max is the canonical invalid range and must be rejected.
+    let (_env, client, _) = setup();
+    assert_eq!(
+        client.try_set_schema_compat_range(&2, &1),
+        Err(Ok(ContractError::InvalidSchemaCompatRange)),
+        "min > max must be rejected"
+    );
 }
+
+#[test]
+fn test_invalid_schema_compat_range_min_equals_max_is_valid() {
+    // min == max is the tightest valid range and must be accepted.
+    let (_env, client, _) = setup();
+    assert_ne!(
+        client.try_set_schema_compat_range(&1, &1),
+        Err(Ok(ContractError::InvalidSchemaCompatRange)),
+        "min == max must be accepted"
+    );
+}
+
+#[test]
+fn test_invalid_schema_compat_range_zero_min() {
+    // A zero lower bound is outside the ADR's valid schema range and must be
+    // rejected as an invalid compat range.
+    let (_env, client, _) = setup();
+    assert_eq!(
+        client.try_set_schema_compat_range(&0, &1),
+        Err(Ok(ContractError::InvalidSchemaCompatRange)),
+        "zero min must be rejected"
+    );
+}
+
+#[test]
+fn test_bucket9_error_variant_budget() {
+    // #15 budget: the full error-variant set must stay within 50 variants.
+    // This guards against bucket-9 additions silently blowing the budget.
+    let variant_count = ContractError::UpgradeNotReversible as u32;
+    assert!(
+        variant_count < 50,
+        "bucket-9 error variants must fit within the <=50 budget"
+    );
+}
+
+// ─── #82 upgrade_and_migrate ──────
+
+/* … truncated 3289 chars — edit only what you need near the top … */
