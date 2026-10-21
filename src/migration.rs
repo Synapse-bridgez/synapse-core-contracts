@@ -18,6 +18,15 @@
 //! * On any `Err`, Soroban aborts the invocation and rolls storage back, so
 //!   a failed migration leaves the ledger byte-for-byte identical to the
 //!   pre-call state (and the WASM swap never runs).
+//!
+//! ## Reversibility (issue #314)
+//!
+//! [`MigrationRegistry::is_reversible`] classifies a migration as reversible
+//! only when it is a purely additive / no-op transform. Structural schema
+//! changes (anything that rewrites or removes existing keys) cannot be
+//! reverted cleanly by restoring the previous WASM hash, so
+//! [`crate::SynapseCoreContract::rollback_upgrade`] refuses them with
+//! [`ContractError::UpgradeNotReversible`].
 
 use soroban_sdk::Env;
 
@@ -73,6 +82,25 @@ impl MigrationRegistry {
     pub fn validate(migration_id: u32) -> Result<(), ContractError> {
         match migration_id {
             MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
+            _ => Err(ContractError::UnknownMigration),
+        }
+    }
+
+    /// Whether the migration identified by `migration_id` can be cleanly
+    /// reverted by restoring the previous WASM hash.
+    ///
+    /// Only purely additive / no-op transforms are reversible: they leave
+    /// pre-existing keys untouched, so the older WASM can still read the
+    /// ledger after the swap is undone. Structural schema changes (marker
+    /// rewrites, key removals, etc.) are not reversible and must be rejected
+    /// by [`crate::SynapseCoreContract::rollback_upgrade`] with
+    /// [`ContractError::UpgradeNotReversible`].
+    pub fn is_reversible(migration_id: u32) -> Result<(), ContractError> {
+        match migration_id {
+            MIGRATION_NOOP => Ok(()),
+            MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => {
+                Err(ContractError::UpgradeNotReversible)
+            }
             _ => Err(ContractError::UnknownMigration),
         }
     }
