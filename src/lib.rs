@@ -29,6 +29,8 @@ mod test_recovery;
 mod test_rotation_chaos;
 #[cfg(test)]
 mod test_treasury;
+#[cfg(test)]
+mod test_upgrade_safety;
 
 pub use errors::Error;
 pub use types::{
