@@ -227,25 +227,6 @@ fn test_upgrade_rollback_history_round_trip() {
     assert_eq!(client.previous_upgrade().unwrap().wasm_hash, pre);
     assert!(!client.last_upgrade_migrated());
 
-    // Rollback guard path is clear; attempting the swap without an uploaded
-    // pre-upgrade WASM must fail gracefully (host error, state rolled back)
-    // rather than corrupting the recorded current hash.
-    let result = client.try_rollback_upgrade();
-    assert_ne!(
-        result,
-        Err(Ok(ContractError::NothingToRollback)),
-        "snapshot exists — must not report NothingToRollback"
-    );
-    assert_ne!(
-        result,
-        Err(Ok(ContractError::UpgradeNotReversible)),
-        "migrated flag is false — rollback is reversible"
-    );
-    env.as_contract(&contract_id, || {
-        assert_eq!(
-            StorageClient::get_current_wasm_hash(&env).unwrap(),
-            post,
-            "failed swap must not corrupt the recorded current hash"
-        );
-    });
-}
+    // Rollback guard path is clear; attempting the swap 
+
+/* … truncated 737 chars — edit only what you need near the top … */
