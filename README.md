@@ -294,3 +294,6 @@ wired.
 
 <!-- handsoff-issue-281 -->
 - #281: Restore `slash_signer` for provable relay-signer misbehavior
+
+<!-- handsoff-issue-282 -->
+- #282: Restore `set_anchor_tier` / `get_anchor_tier` / `compute_effective_fee`
