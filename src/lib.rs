@@ -16,6 +16,15 @@ pub struct Route {
     pub hops: Vec<Address>,
 }
 
+/// A pending collateral-unbond request, finalized by `claim_unbond` once the
+/// configured `unbond_delay_ledgers` has elapsed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnbondRequest {
+    pub amount: i128,
+    pub unlock_ledger: u32,
+}
+
 /// Storage keys used by the contract.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,9 +32,15 @@ pub enum DataKey {
     Admin,
     Relay,
     ForwardingRoute(u64),
+    Bond(Address),
+    Unbond(Address),
+    UnbondDelayLedgers,
 }
 
 const FORWARDING_INTENT: Symbol = symbol_short!("fwd_intent");
+const BONDED: Symbol = symbol_short!("bonded");
+const UNBOND_INIT: Symbol = symbol_short!("unbond_init");
+const UNBOND_CLAIM: Symbol = symbol_short!("unbond_claim");
 
 #[contract]
 pub struct RecoveryContract;
@@ -78,5 +93,99 @@ impl RecoveryContract {
         env.storage()
             .persistent()
             .get(&DataKey::ForwardingRoute(tx_id))
+    }
+
+    /// Bond `amount` of collateral for `signer`.
+    ///
+    /// Self-authorized: `signer` must authorize this call for themselves,
+    /// distinct from the relay-or-admin pattern used elsewhere. Bonding is
+    /// additive (a top-up) per issue #29: the new amount is added to any
+    /// existing bond record for `signer`.
+    pub fn bond_collateral(env: Env, signer: Address, amount: i128) {
+        signer.require_auth();
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bond(signer.clone()))
+            .unwrap_or(0);
+        let updated = current + amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Bond(signer.clone()), &updated);
+
+        env.events()
+            .publish((BONDED, signer), (amount, updated));
+    }
+
+    /// Initiate a timelocked unbond of `amount` collateral for `signer`.
+    ///
+    /// Self-authorized. The bonded balance is reduced immediately and a
+    /// pending `UnbondRequest` is stored, unlockable after
+    /// `unbond_delay_ledgers` (from the param registry) has elapsed. Unbonding
+    /// more than the currently-bonded amount is rejected.
+    pub fn unbond_collateral(env: Env, signer: Address, amount: i128) {
+        signer.require_auth();
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bond(signer.clone()))
+            .unwrap_or(0);
+        if amount > current {
+            panic!("unbond exceeds bonded amount");
+        }
+
+        let delay: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UnbondDelayLedgers)
+            .unwrap_or(0);
+        let unlock_ledger = env.ledger().sequence() + delay;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Bond(signer.clone()), &(current - amount));
+        env.storage().persistent().set(
+            &DataKey::Unbond(signer.clone()),
+            &UnbondRequest {
+                amount,
+                unlock_ledger,
+            },
+        );
+
+        env.events()
+            .publish((UNBOND_INIT, signer), (amount, unlock_ledger));
+    }
+
+    /// Finalize a pending unbond request for `signer`.
+    ///
+    /// Self-authorized. Rejected before the delay elapses; succeeds exactly at
+    /// the delay boundary (`ledger >= unlock_ledger`).
+    pub fn claim_unbond(env: Env, signer: Address) {
+        signer.require_auth();
+
+        let request: UnbondRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Unbond(signer.clone()))
+            .unwrap_or_else(|| panic!("no pending unbond"));
+
+        if env.ledger().sequence() < request.unlock_ledger {
+            panic!("unbond delay has not elapsed");
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Unbond(signer.clone()));
+
+        env.events()
+            .publish((UNBOND_CLAIM, signer), request.amount);
     }
 }
