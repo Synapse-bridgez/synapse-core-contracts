@@ -6,6 +6,8 @@ use soroban_sdk::{contracttype, Env, String, Symbol};
 pub enum DataKey {
     /// A single parameter value keyed by its name.
     Param(String),
+    /// The N-of-M relay-signer approval threshold.
+    RelayThreshold,
 }
 
 /// Maximum length, in bytes, of a parameter name.
@@ -56,4 +58,31 @@ pub fn is_valid_param_name(name: &String) -> bool {
 /// Emits a symbol used for parameter-related events.
 pub fn param_event_symbol(env: &Env) -> Symbol {
     Symbol::new(env, "param")
+}
+
+/// Reads the configured N-of-M relay-signer approval threshold.
+///
+/// Returns `None` when no threshold has been configured yet.
+pub fn get_relay_threshold(env: &Env) -> Option<u32> {
+    env.storage().persistent().get(&DataKey::RelayThreshold)
+}
+
+/// Persists the N-of-M relay-signer approval threshold.
+///
+/// Callers are responsible for validating `threshold` against the current
+/// signer set (see issue #93's bounds check) before writing.
+pub fn set_relay_threshold(env: &Env, threshold: u32) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::RelayThreshold, &threshold);
+}
+
+/// Returns `true` when a relay-signer threshold has been configured.
+pub fn has_relay_threshold(env: &Env) -> bool {
+    env.storage().persistent().has(&DataKey::RelayThreshold)
+}
+
+/// Removes the configured relay-signer threshold, if present.
+pub fn remove_relay_threshold(env: &Env) {
+    env.storage().persistent().remove(&DataKey::RelayThreshold);
 }
