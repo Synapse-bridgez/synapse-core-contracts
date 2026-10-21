@@ -297,3 +297,6 @@ wired.
 
 <!-- handsoff-issue-282 -->
 - #282: Restore `set_anchor_tier` / `get_anchor_tier` / `compute_effective_fee`
+
+<!-- handsoff-issue-283 -->
+- #283: Restore `set_param` / `get_param` on-chain parameter registry
