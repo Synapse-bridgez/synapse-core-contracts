@@ -65,6 +65,20 @@ impl MigrationRegistry {
         }
     }
 
+    /// Read-only check that `migration_id` is a registered routine shipped in
+    /// this WASM. Performs no storage writes and emits no events, so it is
+    /// safe to call from dry-run surfaces such as
+    /// [`crate::SynapseCoreContract::simulate_upgrade`].
+    ///
+    /// Returns `Ok(())` when the id is known, otherwise
+    /// [`ContractError::UnknownMigration`].
+    pub fn is_registered(migration_id: u32) -> Result<(), ContractError> {
+        match migration_id {
+            MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
+            _ => Err(ContractError::UnknownMigration),
+        }
+    }
+
     fn assert_within_bound(planned_touches: u32) -> Result<(), ContractError> {
         if planned_touches > MAX_MIGRATION_STORAGE_TOUCHES {
             return Err(ContractError::MigrationFailed);
