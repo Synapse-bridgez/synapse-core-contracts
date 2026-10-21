@@ -10,6 +10,9 @@ pub enum DataKey {
     Tx(u64),
     Dispute(u64),
     DisputeQueue,
+    RelaySigner,
+    RelaySignerSet,
+    RelayThreshold,
 }
 
 /// Returns the next transaction id and increments the counter.
@@ -119,4 +122,64 @@ pub fn get_forwarding_route(env: &Env, tx_id: u64) -> Option<Address> {
             tx.forwarding_route
         }
     })
+}
+
+/// Returns the explicit N-of-M signer set, if it has been initialized.
+///
+/// Returns `None` when the contract predates the N-of-M feature (issue #28)
+/// and only ever stored a single `relay_signer` (issue #23). Callers must
+/// fall back to [`relay_signer_set`] to obtain the implicit one-of-one view.
+pub fn get_relay_signer_set(env: &Env) -> Option<Vec<Address>> {
+    env.storage().instance().get(&DataKey::RelaySignerSet)
+}
+
+/// Returns the explicit N-of-M approval threshold, if initialized.
+pub fn get_relay_threshold(env: &Env) -> Option<u32> {
+    env.storage().instance().get(&DataKey::RelayThreshold)
+}
+
+/// Returns the single-signer baseline `relay_signer`, if present.
+///
+/// This is the pre-N-of-M storage written by the original initialization
+/// (issue #2/#23). It is only consulted as a backward-compatibility fallback
+/// when the explicit N-of-M storage was never initialized.
+pub fn get_relay_signer(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::RelaySigner)
+}
+
+/// Returns the effective relay signer set, applying the one-of-one fallback.
+///
+/// Decision (issue #304): a contract initialized before the N-of-M feature
+/// existed must be representable as a valid one-of-one signer set without a
+/// disruptive migration step. If the explicit N-of-M storage was never
+/// initialized, this derives the equivalent one-of-one view from the
+/// single-signer baseline instead of erroring. Once `add_relay_signer`
+/// (issue #74) writes the explicit set, the fallback is no longer consulted.
+pub fn relay_signer_set(env: &Env) -> Vec<Address> {
+    if let Some(set) = get_relay_signer_set(env) {
+        return set;
+    }
+    let mut out = Vec::new(env);
+    if let Some(signer) = get_relay_signer(env) {
+        out.push_back(signer);
+    }
+    out
+}
+
+/// Returns the effective relay approval threshold, applying the one-of-one
+/// fallback.
+///
+/// Decision (issue #304): when the explicit N-of-M threshold was never
+/// initialized, a single-signer-only contract is treated as an implicit
+/// one-of-one set with threshold `1`. Once the explicit N-of-M storage is
+/// written, the stored threshold is authoritative.
+pub fn relay_threshold(env: &Env) -> u32 {
+    if let Some(threshold) = get_relay_threshold(env) {
+        return threshold;
+    }
+    if get_relay_signer(env).is_some() {
+        1
+    } else {
+        0
+    }
 }
