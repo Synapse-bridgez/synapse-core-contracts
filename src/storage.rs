@@ -12,6 +12,8 @@ pub enum DataKey {
     TransactionStatus(BytesN<32>),
     /// Redirect from a merged-away tx id to its surviving tx id.
     MergedInto(BytesN<32>),
+    /// Temporary idempotency key recorded by `register_callback` (issue #22).
+    IdempotencyKey(BytesN<32>),
 }
 
 /// Persist a transaction record and its status index.
@@ -61,4 +63,16 @@ pub fn get_status(env: &Env, tx_id: &BytesN<32>) -> Result<TransactionStatus, Co
         .persistent()
         .get::<_, TransactionStatus>(&DataKey::TransactionStatus(resolved))
         .ok_or(ContractError::TransactionNotFound)
+}
+
+/// Check whether an idempotency key is currently recorded (issue #22).
+///
+/// This is a pure read of the temporary idempotency-key entry: it never
+/// writes, never creates a key that did not already exist, and never extends
+/// the key's TTL. Callers can therefore probe idempotency state before
+/// submitting a `register_callback` call without side effects.
+pub fn is_duplicate(env: &Env, key: &BytesN<32>) -> bool {
+    env.storage()
+        .temporary()
+        .has(&DataKey::IdempotencyKey(key.clone()))
 }
