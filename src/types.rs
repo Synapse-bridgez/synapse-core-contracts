@@ -11,6 +11,12 @@ pub enum TransactionStatus {
     Cancelled,
 }
 
+/// Maximum number of tags that may be attached to a single transaction.
+///
+/// Enforced by `add_transaction_tag`; once a transaction holds this many tags
+/// further additions are rejected. See issue #51.
+pub const MAX_TAGS_PER_TRANSACTION: u32 = 10;
+
 /// A transaction record stored on-chain.
 ///
 /// `amount` is the originally requested amount and is preserved for audit even
@@ -19,6 +25,10 @@ pub enum TransactionStatus {
 /// and is `Some(value)` once completed. When `settled_amount` is `Some(v)` and
 /// `v != amount`, the transaction was partially completed via
 /// `partial_complete_transaction`; when `v == amount` it was fully completed.
+///
+/// `tags` holds additive operational metadata (e.g. marking a transaction for
+/// manual review) managed via `add_transaction_tag` / `get_transaction_tags`.
+/// Tags never affect `status` or any other entry point's behavior.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transaction {
