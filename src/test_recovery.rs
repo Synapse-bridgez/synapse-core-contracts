@@ -2,7 +2,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
