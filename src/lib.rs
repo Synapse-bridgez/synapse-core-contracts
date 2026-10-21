@@ -6,11 +6,11 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, Address, Env};
+use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 
 mod storage;
 
-use storage::{TreasuryConfig, Withdrawal};
+use storage::{Dispute, TreasuryConfig, Withdrawal};
 
 #[contract]
 pub struct TreasuryContract;
@@ -39,5 +39,23 @@ impl TreasuryContract {
     /// erroring, so callers can poll this query safely.
     pub fn pending_withdrawal(env: Env) -> Option<Withdrawal> {
         storage::get_pending_withdrawal(&env)
+    }
+
+    /// Returns the dispute record for `tx_id`, if one exists.
+    ///
+    /// Unauthenticated read-only query. Returns `None` cleanly when `tx_id`
+    /// has never been disputed rather than erroring, so callers can poll this
+    /// query safely.
+    pub fn get_dispute(env: Env, tx_id: u64) -> Option<Dispute> {
+        storage::get_dispute(&env, tx_id)
+    }
+
+    /// Returns all currently-unresolved disputes.
+    ///
+    /// Unauthenticated read-only bulk query intended for reviewer/admin
+    /// dashboards polling for work. Disputes cleared by `resolve_dispute` are
+    /// excluded, so the result only ever contains unresolved disputes.
+    pub fn get_dispute_queue(env: Env) -> Vec<Dispute> {
+        storage::get_dispute_queue(&env)
     }
 }

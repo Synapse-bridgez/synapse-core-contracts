@@ -1,6 +1,6 @@
 use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
 
-use crate::types::{ContractError, Transaction, TransactionStatus};
+use crate::types::{ContractError, Dispute, Transaction, TransactionStatus};
 
 /// Storage key namespace for transaction records.
 #[contracttype]
@@ -20,6 +20,10 @@ pub enum DataKey {
     TreasuryConfig,
     /// In-flight two-party withdrawal proposal, if any (issue #72).
     PendingWithdrawal,
+    /// Dispute record keyed by the disputed tx id (issue #20).
+    Dispute(BytesN<32>),
+    /// Index of currently-unresolved disputed tx ids (issue #292).
+    DisputeQueue,
 }
 
 /// Persist a transaction record and its status index.
@@ -112,4 +116,34 @@ pub fn get_pending_withdrawal(env: &Env) -> Option<crate::types::Withdrawal> {
     env.storage()
         .persistent()
         .get::<_, crate::types::Withdrawal>(&DataKey::PendingWithdrawal)
+}
+
+/// Read the dispute record for a tx id (issue #292).
+///
+/// Returns `None` cleanly when the tx id was never disputed, rather than an
+/// error, so callers can probe dispute state without special-casing.
+pub fn get_dispute(env: &Env, tx_id: &BytesN<32>) -> Option<Dispute> {
+    env.storage()
+        .persistent()
+        .get::<_, Dispute>(&DataKey::Dispute(tx_id.clone()))
+}
+
+/// Read the queue of currently-unresolved disputes (issue #292).
+///
+/// Returns the full `Dispute` records for every tx id still present in the
+/// unresolved index. Disputes cleared by `resolve_dispute` (issue #65) are
+/// removed from the index and therefore drop out of this result.
+pub fn get_dispute_queue(env: &Env) -> Vec<Dispute> {
+    let ids = env
+        .storage()
+        .persistent()
+        .get::<_, Vec<BytesN<32>>>(&DataKey::DisputeQueue)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut disputes = Vec::new(env);
+    for id in ids.iter() {
+        if let Some(dispute) = get_dispute(env, &id) {
+            disputes.push_back(dispute);
+        }
+    }
+    disputes
 }
