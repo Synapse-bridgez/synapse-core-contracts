@@ -41,11 +41,21 @@ pub const MIGRATION_WRITE_MARKER: u32 = 1;
 /// revert leaves storage unchanged.
 pub const MIGRATION_FAIL_AFTER_WRITE: u32 = 2;
 
+/// Registry of on-chain migration routines keyed by `migration_id`.
+///
+/// Callers (notably [`crate::SynapseCoreContract::upgrade_and_migrate`]) must
+/// invoke [`MigrationRegistry::run`] **before** committing the WASM swap so a
+/// failing migration aborts the whole invocation and leaves the pre-call
+/// state (and the old WASM) intact.
 pub struct MigrationRegistry;
 
 impl MigrationRegistry {
     /// Dispatch `migration_id` to its routine. Returns the number of storage
     /// touches performed (for audit / events).
+    ///
+    /// Returns [`ContractError::UnknownMigration`] for an unregistered id and
+    /// [`ContractError::MigrationFailed`] for a registered migration whose
+    /// body fails (or that would exceed [`MAX_MIGRATION_STORAGE_TOUCHES`]).
     pub fn run(env: &Env, migration_id: u32) -> Result<u32, ContractError> {
         match migration_id {
             MIGRATION_NOOP => Ok(0),
