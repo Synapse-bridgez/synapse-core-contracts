@@ -294,3 +294,6 @@ wired.
 
 <!-- handsoff-issue-273 -->
 - #273: Restore `retry_transaction(tx_id, caller)` with a bounded retry counter
+
+<!-- handsoff-issue-274 -->
+- #274: Restore `batch_register_callback` with the `MAX_BATCH_SIZE = 7` budget
