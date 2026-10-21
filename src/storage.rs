@@ -14,6 +14,12 @@ pub enum DataKey {
     MergedInto(BytesN<32>),
     /// Temporary idempotency key recorded by `register_callback` (issue #22).
     IdempotencyKey(BytesN<32>),
+    /// Current accrued-and-unwithdrawn treasury balance (issue #30).
+    TreasuryBalance,
+    /// Treasury configuration: fee bps, epoch cap, epoch length (issue #30).
+    TreasuryConfig,
+    /// In-flight two-party withdrawal proposal, if any (issue #72).
+    PendingWithdrawal,
 }
 
 /// Persist a transaction record and its status index.
@@ -75,4 +81,35 @@ pub fn is_duplicate(env: &Env, key: &BytesN<32>) -> bool {
     env.storage()
         .temporary()
         .has(&DataKey::IdempotencyKey(key.clone()))
+}
+
+/// Read the current accrued-and-unwithdrawn treasury balance (issue #291).
+///
+/// Pure passthrough read of the balance written by the fee accrual path
+/// (issue #30). Returns `0` when nothing has accrued yet.
+pub fn get_treasury_balance(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get::<_, i128>(&DataKey::TreasuryBalance)
+        .unwrap_or(0)
+}
+
+/// Read the treasury configuration (issue #291).
+///
+/// Pure passthrough read of the config written by the treasury setup path
+/// (issue #30). Returns `None` when the treasury has not been configured.
+pub fn get_treasury_config(env: &Env) -> Option<crate::types::TreasuryConfig> {
+    env.storage()
+        .persistent()
+        .get::<_, crate::types::TreasuryConfig>(&DataKey::TreasuryConfig)
+}
+
+/// Read the current in-flight two-party withdrawal proposal (issue #291).
+///
+/// Pure passthrough read of the proposal written by the withdrawal flow
+/// (issue #72). Returns `None` cleanly when there is no in-flight proposal.
+pub fn get_pending_withdrawal(env: &Env) -> Option<crate::types::Withdrawal> {
+    env.storage()
+        .persistent()
+        .get::<_, crate::types::Withdrawal>(&DataKey::PendingWithdrawal)
 }
