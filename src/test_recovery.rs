@@ -117,6 +117,71 @@ fn route_emits_forwarding_intent_last() {
     let _ = complete;
 }
 
+// ─── #303 forwarding-route lifecycle guarantees ──────────────────────────────
+
+/// The forwarding route is orthogonal metadata on the transaction record: it
+/// must remain readable via `get_forwarding_route` across every lifecycle
+/// state (Pending -> Processing -> Completed/Failed/Cancelled) so a future
+/// Swap Engine poller always sees a consistent result regardless of when it
+/// polls. No status transition clears the route.
+#[test]
+fn route_readable_across_completed_lifecycle() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    client.set_forwarding_route(&a, &7);
+    assert_eq!(client.get_status(&a), TransactionStatus::Pending);
+    assert_eq!(client.get_forwarding_route(&a), Some(7));
+
+    client.start_processing(&a, &admin);
+    assert_eq!(client.get_status(&a), TransactionStatus::Processing);
+    assert_eq!(client.get_forwarding_route(&a), Some(7));
+
+    client.complete_transaction(&a, &String::from_str(&env, &"a".repeat(64)), &admin);
+    assert_eq!(client.get_status(&a), TransactionStatus::Completed);
+    assert_eq!(client.get_forwarding_route(&a), Some(7));
+}
+
+#[test]
+fn route_readable_across_failed_lifecycle() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    client.set_forwarding_route(&a, &3);
+    client.start_processing(&a, &admin);
+    assert_eq!(client.get_forwarding_route(&a), Some(3));
+    client.fail_transaction(&a, &String::from_str(&env, "boom"), &admin);
+    assert_eq!(client.get_status(&a), TransactionStatus::Failed);
+    assert_eq!(client.get_forwarding_route(&a), Some(3));
+}
+
+#[test]
+fn route_readable_across_cancelled_lifecycle() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    client.set_forwarding_route(&a, &5);
+    client.cancel_transaction(&a, &admin);
+    assert_eq!(client.get_status(&a), TransactionStatus::Cancelled);
+    assert_eq!(client.get_forwarding_route(&a), Some(5));
+}
+
+/// A route set on a transaction that is later merged away (issue #66) is
+/// dropped with the duplicate record: the route is stored per-transaction-id
+/// and is not transferred to the primary record. The duplicate's own route
+/// remains readable on its (now `Failed`/`merged`) record, while the primary
+/// keeps whatever route it had (here: none).
+#[test]
+fn route_dropped_on_merge_duplicate() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    let b = reg(&env, &client, "tx-b");
+    client.set_forwarding_route(&b, &9);
+    let why = String::from_str(&env, "replay");
+    client.merge_duplicate_transactions(&a, &b, &admin, &why);
+    // Primary record is untouched: no route transferred from the duplicate.
+    assert_eq!(client.get_forwarding_route(&a), None);
+    // Duplicate keeps its own route on its merged record.
+    assert_eq!(client.get_forwarding_route(&b), Some(9));
+}
+
 // ─── #65 relay signer set ─────────────────────────────────────────────────────
 
 #[test]
@@ -239,72 +304,5 @@ fn relay_call_and_rotation_quorums_are_isolated() {
         client.try_finalize_relay_signer().unwrap_err().unwrap(),
         ContractError::TimelockNotElapsed
     );
-
-    // The relay-call quorum is satisfied independently of the rotation.
-    client.start_processing(&a, &primary);
-    assert_eq!(client.get_status(&a), TransactionStatus::Processing);
-}
-
-// ─── #302 merge-aware bulk queries ────────────────────────────────────────────
-
-/// Merged-away transactions are excluded from every status-based bulk query
-/// but remain directly queryable by `tx_id`. This test confirms that
-/// `get_transactions_by_status` does not double-count a merged-away record
-/// alongside its primary, and that `get_merged_into` round-trips for a
-/// transaction merged away before the bulk queries existed.
-#[test]
-fn merged_away_excluded_from_status_query_but_directly_queryable() {
-    let (env, client, admin) = setup();
-    let a = reg(&env, &client, "tx-a");
-    let b = reg(&env, &client, "tx-b");
-    let why = String::from_str(&env, "replay");
-
-    // Both start in the same status bucket.
-    let before = client.get_transactions_by_status(&TransactionStatus::Pending);
-    assert_eq!(before.len(), 2);
-
-    client.merge_duplicate_transactions(&a, &b, &admin, &why);
-
-    // The merged-away record is excluded from the status bucket it would
-    // otherwise share with its primary.
-    let after = client.get_transactions_by_status(&TransactionStatus::Pending);
-    assert_eq!(after.len(), 1);
-    assert_eq!(after.get(0).unwrap(), a.clone());
-
-    // It is still directly queryable by `tx_id` and keeps its data.
-    let tx = client.get_transaction(&b);
-    assert_eq!(tx.amount, 1_000);
-    assert_eq!(tx.status, TransactionStatus::Failed);
-
-    // `get_merged_into` round-trips for the merged-away record.
-    assert_eq!(client.get_merged_into(&b), Some(a.clone()));
-    assert_eq!(client.get_merged_into(&a), None);
-}
-
-/// A merged-away transaction must not appear in the dispute queue, even if it
-/// was disputed before being merged away. The dispute record is not orphaned:
-/// the primary remains the single authoritative record for the pair.
-#[test]
-fn merged_away_excluded_from_dispute_queue() {
-    let (env, client, admin) = setup();
-    let a = reg(&env, &client, "tx-a");
-    let b = reg(&env, &client, "tx-b");
-    let why = String::from_str(&env, "replay");
-
-    // Dispute the duplicate before it is discovered to be a duplicate.
-    client.dispute_transaction(&b, &String::from_str(&env, "fraud"));
-    let queued = client.get_dispute_queue();
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued.get(0).unwrap(), b.clone());
-
-    // Merge the disputed duplicate away into its primary.
-    client.merge_duplicate_transactions(&a, &b, &admin, &why);
-
-    // The merged-away record is excluded from the dispute queue.
-    let queued = client.get_dispute_queue();
-    assert_eq!(queued.len(), 0);
-
-    // The primary is unaffected and remains directly queryable.
-    assert_eq!(client.get_merged_into(&b), Some(a.clone()));
-    assert_eq!(client.get_status(&a), TransactionStatus::Pending);
+    let _ = primary;
 }

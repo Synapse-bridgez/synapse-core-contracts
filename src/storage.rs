@@ -98,3 +98,25 @@ pub fn get_dispute_queue(env: &Env) -> Vec<DisputeRecord> {
 pub fn get_merged_into(env: &Env, tx_id: u64) -> Option<u64> {
     load_tx(env, tx_id).and_then(|tx| tx.merged_into)
 }
+
+/// Returns the forwarding route stored on `tx_id`, if any.
+///
+/// Decision (issue #303): the forwarding route is orthogonal metadata on the
+/// transaction record. It is never cleared or rewritten by a status
+/// transition (Pending -> Processing -> Completed/Failed/Cancelled), so a
+/// future Swap Engine polling `get_forwarding_route` always observes the same
+/// route regardless of when it polls. When a transaction is merged away
+/// (issue #66) the route is *dropped* from the merged-away record's read
+/// surface: callers resolving through [`get_merged_into`] to the primary
+/// observe the primary's own route, and the merged-away record's route is not
+/// transferred. This keeps a single authoritative route per logical
+/// transaction and avoids two records advertising conflicting routes.
+pub fn get_forwarding_route(env: &Env, tx_id: u64) -> Option<Address> {
+    load_tx(env, tx_id).and_then(|tx| {
+        if is_merged_away(&tx) {
+            None
+        } else {
+            tx.forwarding_route
+        }
+    })
+}
