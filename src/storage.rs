@@ -66,3 +66,87 @@ pub fn add_relay_signer(
 
     Ok(())
 }
+
+/// Returns the quorum threshold for relay-call approvals.
+///
+/// Defaults to `1` when no threshold has been configured via
+/// `set_relay_threshold`, matching the single-relay-signer baseline where one
+/// approval is sufficient.
+pub fn get_relay_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RelayThreshold)
+        .unwrap_or(1)
+}
+
+/// Returns the set of signers that have approved `call_id` so far.
+///
+/// Approvals live in `temporary` storage per the README's storage-tier table
+/// ("Relay approvals"), so they are cheap to write and are consumed once the
+/// quorum threshold is met.
+pub fn get_relay_approvals(env: &Env, call_id: u64) -> Vec<Address> {
+    env.storage()
+        .temporary()
+        .get(&DataKey::RelayApprovals(call_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Records `caller`'s approval of `call_id` and reports whether quorum is met.
+///
+/// `caller` must be a member of the current relay-signer set; otherwise
+/// [`Error::Unauthorized`] is returned. A signer approving the same `call_id`
+/// twice does not double-count toward quorum: the duplicate is a no-op and the
+/// current approval count is re-evaluated against the threshold.
+///
+/// Returns `true` exactly when the number of distinct approvals reaches the
+/// threshold set via `set_relay_threshold` (exactly-at-threshold succeeds,
+/// threshold-minus-one does not). When quorum is met the approval set is
+/// consumed from `temporary` storage so the call cannot be replayed.
+pub fn approve_relay_call(
+    env: &Env,
+    call_id: u64,
+    caller: &Address,
+) -> Result<bool, Error> {
+    caller.require_auth();
+
+    let signers = get_relay_signers(env);
+    let mut is_signer = false;
+    for signer in signers.iter() {
+        if &signer == caller {
+            is_signer = true;
+            break;
+        }
+    }
+    if !is_signer {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut approvals = get_relay_approvals(env, call_id);
+
+    let mut already_approved = false;
+    for approved in approvals.iter() {
+        if &approved == caller {
+            already_approved = true;
+            break;
+        }
+    }
+    if !already_approved {
+        approvals.push_back(caller.clone());
+    }
+
+    let threshold = get_relay_threshold(env);
+    let quorum_met = approvals.len() >= threshold;
+
+    if quorum_met {
+        // Consume the approval set once quorum is reached.
+        env.storage()
+            .temporary()
+            .remove(&DataKey::RelayApprovals(call_id));
+    } else {
+        env.storage()
+            .temporary()
+            .set(&DataKey::RelayApprovals(call_id), &approvals);
+    }
+
+    Ok(quorum_met)
+}
