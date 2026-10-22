@@ -1,0 +1,339 @@
+//! Storage helpers for the contract.
+//!
+//! Centralises the storage keys and accessors used across the contract so
+//! that the auth, upgrade, and migration flows all read/write the same
+//! locations. See `docs/adr/0004-timelocked-upgrade.md` for the timelocked
+//! upgrade state machine.
+//!
+//! This module also owns the pack/unpack conversion between the public
+//! [`Transaction`] type and the packed [`StoredTransaction`] form persisted to
+//! ledger storage, and centralises the storage keys and small read/write
+//! helpers used by the contract entry points.
+
+use crate::types::{CallbackType, StoredTransaction, Transaction, TransactionStatus};
+use soroban_sdk::{contracttype, Address, BytesN, Env};
+
+/// Bit offset of the `status` field within `StoredTransaction::packed`.
+const STATUS_SHIFT: u32 = 0;
+/// Bit mask for the `status` field (4 bits).
+const STATUS_MASK: u32 = 0xF;
+
+/// Bit offset of the `callback_type` field within `StoredTransaction::packed`.
+const CALLBACK_SHIFT: u32 = 4;
+/// Bit mask for the `callback_type` field (4 bits).
+const CALLBACK_MASK: u32 = 0xF;
+
+/// Bit offset of the `retry_count` field within `StoredTransaction::packed`.
+const RETRY_SHIFT: u32 = 8;
+/// Bit mask for the `retry_count` field (4 bits).
+///
+/// Sized generously (4 bits, max 15) relative to the original wave 9 design
+/// intent of a max-retry constant of 3, so a future increase does not require
+/// a breaking re-pack of the stored representation.
+const RETRY_MASK: u32 = 0xF;
+
+/// Storage keys used by the contract.
+///
+/// Kept as a single enum so that every entry point shares one namespaced key
+/// space and later issues can extend it without touching `lib.rs`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    /// Contract administrator address.
+    Admin,
+    /// Pending admin transfer proposal (issue #5).
+    PendingAdmin,
+    /// Pending relay-signer rotation proposal (issue #87).
+    PendingRelaySigner,
+    /// Pending timelocked upgrade proposal (issue #312).
+    PendingUpgrade,
+    /// Ledger timestamp at which the pending upgrade becomes finalizable.
+    UpgradeReadyAt,
+    /// Current schema version of 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    /// Contract administrator address.
+    Admin,
+    /// Pending admin transfer proposal (issue #5).
+    PendingAdmin,
+    /// Pending relay-signer rotation proposal (issue #87).
+    PendingRelaySigner,
+    /// Pending timelocked upgrade proposal (issue #312).
+    PendingUpgrade,
+    /// Ledger timestamp at which the pending upgrade becomes finalizable.
+    UpgradeReadyAt,
+    /// Current schema version of the stored contract state.
+    SchemaVersion,
+    /// Relay signer address authorised to submit relayed operations.
+    RelaySigner,
+    /// Whether the contract has been initialised.
+    Initialized,
+}
+
+/// A pending timelocked upgrade proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    /// The new WASM hash to install on finalize.
+    pub new_wasm_hash: BytesN<32>,
+    /// The schema version the new WASM is expected to produce.
+    pub expected_schema_version: u32,
+}
+
+/// Map a `u32` discriminant back to a [`TransactionStatus`].
+fn status_from_u32(value: u32) -> TransactionStatus {
+    match value {
+        1 => TransactionStatus::Completed,
+        2 => TransactionStatus::Failed,
+        3 => TransactionStatus::Retrying,
+        4 => TransactionStatus::Cancelled,
+        _ => TransactionStatus::Pending,
+    }
+}
+
+/// Map a `u32` discriminant back to a [`CallbackType`].
+fn callback_from_u32(value: u32) -> CallbackType {
+    match value {
+        1 => CallbackType::OnSuccess,
+        2 => CallbackType::OnFailure,
+        3 => CallbackType::OnComplete,
+        _ => CallbackType::None,
+    }
+}
+
+/// Pack a [`Transaction`] into its on-ledger [`StoredTransaction`] form.
+pub fn pack(tx: &Transaction) -> StoredTransaction {
+    let packed = ((tx.status as u32 & STATUS_MASK) << STATUS_SHIFT)
+        | ((tx.callback_type as u32 & CALLBACK_MASK) << CALLBACK_SHIFT)
+        | ((tx.retry_count & RETRY_MASK) << RETRY_SHIFT);
+
+    StoredTransaction {
+        tx_id: tx.tx_id.clone(),
+        packed,
+        amount: tx.amount,
+        stellar_account: tx.stellar_account.clone(),
+        asset_code: tx.asset_code.clone(),
+        asset_issuer: tx.asset_issuer.clone(),
+        tags: tx.tags.clone(),
+    }
+}
+
+/// Unpack a [`StoredTransaction`] back into the public [`Transaction`] form.
+pub fn unpack(stored: &StoredTransaction) -> Transaction {
+    let status = status_from_u32((stored.packed >> STATUS_SHIFT) & STATUS_MASK);
+    let callback_type = callback_from_u32((stored.packed >> CALLBACK_SHIFT) & CALLBACK_MASK);
+    let retry_count = (stored.packed >> RETRY_SHIFT) & RETRY_MASK;
+
+    Transaction {
+        tx_id: stored.tx_id.clone(),
+        status,
+        callback_type,
+        amount: stored.amount,
+        stellar_account: stored.stellar_account.clone(),
+        asset_code: stored.asset_code.clone(),
+        asset_issuer: stored.asset_issuer.clone(),
+        retry_count,
+        tags: stored.tags.clone(),
+    }
+}
+
+/// Returns the configured upgrade delay in seconds (issue #84/#105).
+pub fn upgrade_delay(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::UpgradeDelay)
+        .unwrap_or(0)
+}
+
+/// Stores a pending upgrade proposal and starts the timelock.
+///
+/// The proposal becomes finalizable once `upgrade_delay()` seconds have
+/// elapsed from the current ledger timestamp.
+pub fn set_pending_upgrade(env: &Env, proposal: &PendingUpgrade) {
+    let ready_at = env.ledger().timestamp().saturating_add(upgrade_delay(env));
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingUpgrade, proposal);
+    env.storage()
+        .instance()
+        .set(&DataKey::UpgradeReadyAt, &ready_at);
+}
+
+/// Returns the pending upgrade proposal, if any.
+pub fn get_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+/// Returns the ledger timestamp at which the pending upgrade becomes
+/// finalizable, if a proposal is pending.
+pub fn get_upgrade_ready_at(env: &Env) -> Option<u64> {
+    env.storage().instance().get(&DataKey::UpgradeReadyAt)
+}
+
+/// Clears any pending upgrade proposal and its timelock.
+pub fn clear_pending_upgrade(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingUpgrade);
+    env.storage().instance().remove(&DataKey::UpgradeReadyAt);
+}
+
+/// Returns the current schema version of the stored contract state.
+pub fn get_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::SchemaVersion)
+        .unwrap_or(0)
+}
+
+/// Persists the schema version of the stored contract state.
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
+}
+
+/// Returns whether the contract has been initialised.
+///
+/// # Arguments
+///
+/// * `env` - The Soroban environment.
+///
+/// # Returns
+///
+/// `true` if the `Initialized` flag is set in instance storage.
+#[must_use]
+pub fn is_initialized(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Initialized)
+        .unwrap_or(false)
+}
+
+/// Marks the contract as initialised in instance storage.
+///
+/// # Arguments
+///
+/// * `env` - The Soroban environment.
+pub fn set_initialized(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&DataKey::Initialized, &true);
+}
+
+/// Stores the contract administrator address in instance storage.
+///
+/// # Arguments
+///
+/// * `env` - The Soroban environment.
+/// * `admin` - The administrator address to persist.
+pub fn set_admin(env: &Env, admin: &Address) {
+    env.storage().instance().set(&DataKey::Admin, admin);
+}
+
+/// Returns the stored contract administrator address, if any.
+///
+/// # Arguments
+///
+/// * `env` - The Soroban environment.
+///
+/// # Returns
+///
+/// `Some(admin)` when the contract has been initialised, otherwise `None`.
+#[must_use]
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Admin)
+}
+
+/// Stores the relay signer address in instance storage.
+///
+/// # Arguments
+///
+/// * `env` - The Soroban environment.
+/// * `relay_signer` - The relay signer address to persist.
+pub fn set_relay_signer(env: &Env, relay_signer: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::RelaySigner, relay_signer);
+}
+
+/// Returns the stored relay signer address, if any.
+///
+/// # Arguments
+///
+/// * `env` - The Soroban environment.
+///
+/// # Returns
+///
+/// `Some(relay_signer)` when the contract has been initialised, otherwise `None`.
+#[must_use]
+pub fn get_relay_signer(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::RelaySigner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{Address, Bytes, Env, String, Vec};
+
+    #[test]
+    fn round_trip_preserves_every_field() {
+        let env = Env::default();
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[1, 2, 3, 4]),
+            status: TransactionStatus::Retrying,
+            callback_type: CallbackType::OnFailure,
+            amount: 1_000_000,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "USDC"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 3,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        let restored = unpack(&stored);
+
+        assert_eq!(restored, tx);
+    }
+
+    #[test]
+    fn retry_count_defaults_to_zero_and_round_trips() {
+        let env = Env::default();
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[9, 9]),
+            status: TransactionStatus::Pending,
+            callback_type: CallbackType::None,
+            amount: 0,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "XLM"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 0,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0);
+        assert_eq!(unpack(&stored).retry_count, 0);
+    }
+
+    #[test]
+    fn retry_count_is_masked_to_four_bits() {
+        let env = Env::default();
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[7]),
+            status: TransactionStatus::Retrying,
+            callback_type: CallbackType::OnComplete,
+            amount: 5,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "USDC"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 0xF,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0xF);
+        assert_eq!(unpack(&stored).retry_count, 0xF);
+    }
+}
+}

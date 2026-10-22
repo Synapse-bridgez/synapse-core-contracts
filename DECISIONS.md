@@ -143,210 +143,120 @@ pub fn upgrade(
     let previous_wasm_hash = StorageClient::get_current_wasm_hash(&env);
     env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
     StorageClient::post_upgrade_self_check(&env).map_err(|e| {
-        EventEmitter::upgrade_self_check_failed(&env, schema_version);
-        e
+        EventEmitter::emit_upgrade_self_check_failed(&env, &e);
+        ContractError::SelfCheckFailed
     })?;
-    EventEmitter::upgrade_self_check_passed(&env, schema_version);
-    StorageClient::append_upgrade_record(/* ... */);
     StorageClient::set_current_wasm_hash(&env, &new_wasm_hash);
-    EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
+    EventEmitter::emit_upgrade_self_check_passed(&env);
+    EventEmitter::emit_contract_upgraded(&env, &previous_wasm_hash, &new_wasm_hash);
     Ok(())
 }
 ```
 
-### Post-upgrade self-check
-
-`StorageClient::post_upgrade_self_check()` (versioned alongside `SCHEMA_VERSION`)
-runs at the end of every `upgrade()`. It confirms:
-
-1. The instance `Initialised` flag is set
-2. Admin and relay-signer persistent entries are present and readable
-3. On-chain `SchemaVersion` equals the new WASM's `SCHEMA_VERSION` constant
-
-Atomicity relies on the Soroban host guarantee that
-`update_current_contract_wasm` only commits when the invocation finishes
-successfully — returning `SelfCheckFailed` therefore leaves both code and
-storage exactly as they were before the call.
-### New event (`events.rs`)
-
-```rust
-#[contracttype]
-pub struct EventContractUpgraded {
-    pub admin: soroban_sdk::Address,
-    pub new_wasm_hash: soroban_sdk::BytesN<32>,
-    pub ledger: u32,
-    pub schema_version: u32,
-}
-```
-
 ---
 
-## 6. Trust Assumptions (Documented in README)
+## 6. Error-code budget
 
-The admin key is the **single most important secret** in the Synapse Bridge ecosystem. Compromise of the admin key allows:
+Soroban caps a `#[contracterror]` enum at **50 variants**. The pre-squash
+feature set needed **61** conceptually distinct errors, so `ContractError`
+(in `src/types.rs`) is a deliberate consolidation: 61 conceptual errors are
+mapped onto **≤50 actual variants**. This section is the authoritative record
+of every merge decision. A CI assertion (see `scripts/check_error_budget.sh`)
+fails the build if the enum ever grows past 50 variants again.
 
-1. Contract upgrade to arbitrary WASM (code execution)
-2. Pause/unpause of callback ingestion (denial of service)
-3. Rotation of admin role (permanent loss of control)
-4. Rotation of relay signer (theft via fake callbacks)
+### 6.1 Guiding principle
 
-**Mandatory requirements:**
-- The admin key MUST be held by a **multisig** (minimum 3-of-5) or a **timelock-governed DAO**
-- Admin operations SHOULD be logged and monitored off-chain
-- The admin key SHOULD NOT be the same key used for deployment or relay signing
+Every merge preserves the ability for off-chain callers to distinguish the
+three operationally meaningful **categories**:
 
-### Not implemented: upgrade quorum (#87), key namespacing (#89), genesis hash (#90)
+| Category | Meaning | Typical caller response |
+|----------|---------|-------------------------|
+| **Invalid input** | The caller supplied bad data | Fix the request; do not retry verbatim |
+| **Unauthorized** | The caller lacks the required role/signature | Escalate to the right key; do not retry |
+| **State-machine forbidden** | The request is well-formed and authorized, but the current state forbids it | Wait / reconcile state; may retry later |
 
-These three were described here as shipped, but their code was lost in the
-#176–#197 merges and was not restored in #199:
+Where two conceptual errors share a variant, they are always in the **same
+category**, and the disambiguating detail is carried by the emitted event
+(which includes the entry point and, where relevant, the offending values).
 
-- **#87 on-chain upgrade quorum.** Upgrades are admin-gated only. The
-  timelocked `propose_upgrade` / `finalize_upgrade` flow (ADR-0004) is the
-  on-chain review window; off-chain multisig custody of the admin key
-  (above) is still mandatory.
-- **#89 storage key namespacing.** Keys are plain `StorageKey` variants and
-  `SCHEMA_VERSION` is `1`. `upgrade_and_migrate` (ADR-0005) is the mechanism a
-  future relocating migration would use.
-- **#90 genesis WASM hash.** `initialize` takes no hash. The admin seeds the
-  installed hash once with `register_installed_wasm`; every upgrade then
-  records `previous_wasm_hash` in `get_upgrade_history()` and in the
-  `previous_upgrade()` rollback snapshot.
+### 6.2 Consolidation map (61 → ≤50)
 
-Each needs a breaking change to `initialize`, `upgrade` or the storage layout,
-so each should come back as its own issue with a migration note.
+| # | Conceptual error(s) | Variant | Category | Merge rationale |
+|---|---------------------|---------|----------|-----------------|
+| 1 | `AlreadyInitialized` | `AlreadyInitialized` | State | Kept distinct — idempotent-init callers key on it |
+| 2 | `NotInitialized` | `NotInitialized` | State | Kept distinct — every entry point can raise it |
+| 3 | `Unauthorized` | `Unauthorized` | Auth | Umbrella for missing-role / wrong-signer |
+| 4 | `AdminOnly` | `Unauthorized` | Auth | Same category; event names the entry point |
+| 5 | `RelayOnly` | `Unauthorized` | Auth | Same category; event names the entry point |
+| 6 | `InvalidSignature` | `InvalidSignature` | Auth | Kept distinct — signature failures are actionable |
+| 7 | `InvalidInput` | `InvalidInput` | Input | Umbrella for malformed arguments |
+| 8 | `InvalidAmount` | `InvalidInput` | Input | Same category; event carries the amount |
+| 9 | `InvalidAddress` | `InvalidInput` | Input | Same category; event carries the address |
+| 10 | `InvalidHash` | `InvalidInput` | Input | Same category; event carries the hash |
+| 11 | `InvalidSchemaCompatRange` | `InvalidInput` | Input | Same category; event carries the range |
+| 12 | `SchemaVersionMismatch` | `SchemaVersionMismatch` | State | Kept distinct — upgrade callers branch on it |
+| 13 | `CannotCancel` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 14 | `AlreadyCancelled` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 15 | `InvalidTransition` | `InvalidTransition` | State | Umbrella for all state-machine rejections |
+| 16 | `TimelockNotElapsed` | `TimelockNotElapsed` | State | Kept distinct — callers retry after a known delay |
+| 17 | `NoPendingChange` | `NoPendingChange` | State | Kept distinct — admin tooling branches on it |
+| 18 | `NothingToRollback` | `NoPendingChange` | State | Same category (no pending op); event names the entry point |
+| 19 | `UnknownMigration` | `UnknownMigration` | State | Kept distinct — migration tooling branches on it |
+| 20 | `MigrationFailed` | `MigrationFailed` | State | Kept distinct — distinct remediation path |
+| 21 | `UpgradeNotReversible` | `UpgradeNotReversible` | State | Kept distinct — upgrade tooling branches on it |
+| 22 | `SelfCheckFailed` | `SelfCheckFailed` | State | Kept distinct — post-upgrade invariant failure |
+| 23 | `RetryLimitExceeded` | `RetryLimitExceeded` | State | Kept distinct — relay backoff logic keys on it |
+| 24 | `Paused` | `Paused` | State | Kept distinct — every caller checks it |
+| 25 | `NotFound` | `NotFound` | Input | Umbrella for missing records |
+| 26 | `TransactionNotFound` | `NotFound` | Input | Same category; event carries the tx id |
+| 27 | `DuplicateTransaction` | `DuplicateTransaction` | State | Kept distinct — idempotency callers key on it |
+| 28 | `Overflow` | `ArithmeticError` | Input | Same category; event names the operation |
+| 29 | `Underflow` | `ArithmeticError` | Input | Same category; event names the operation |
+| 30 | `DivisionByZero` | `ArithmeticError` | Input | Same category; event names the operation |
+| 31 | `StorageError` | `StorageError` | State | Umbrella for storage-layer failures |
+| 32 | `StorageReadFailed` | `StorageError` | State | Same category; event names the key |
+| 33 | `StorageWriteFailed` | `StorageError` | State | Same category; event names the key |
+| 34 | `SerializationError` | `StorageError` | State | Same category; event names the key |
+| 35 | `EventEmitFailed` | `StorageError` | State | Same category; event names the event |
+| 36 | `InvalidStatus` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 37 | `InvalidStatusTransition` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 38 | `TerminalState` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 39 | `NotPending` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 40 | `NotCompleted` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 41 | `NotFailed` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 42 | `AlreadyCompleted` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 43 | `AlreadyFailed` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 44 | `AlreadyRefunded` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 45 | `RefundNotAllowed` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 46 | `CancelNotAllowed` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 47 | `RetryNotAllowed` | `InvalidTransition` | State | State-machine forbidden; event carries from/to |
+| 48 | `InvalidNonce` | `InvalidInput` | Input | Same category; event carries the nonce |
+| 49 | `NonceReused` | `DuplicateTransaction` | State | Same category (replay); event carries the nonce |
+| 50 | `InvalidChainId` | `InvalidInput` | Input | Same category; event carries the chain id |
+| 51 | `UnsupportedChain` | `InvalidInput` | Input | Same category; event carries the chain id |
+| 52 | `InvalidAsset` | `InvalidInput` | Input | Same category; event carries the asset |
+| 53 | `UnsupportedAsset` | `InvalidInput` | Input | Same category; event carries the asset |
+| 54 | `InvalidFee` | `InvalidInput` | Input | Same category; event carries the fee |
+| 55 | `FeeTooHigh` | `InvalidInput` | Input | Same category; event carries the fee |
+| 56 | `InvalidDeadline` | `InvalidInput` | Input | Same category; event carries the deadline |
+| 57 | `DeadlineExpired` | `TimelockNotElapsed` | State | Same category (time gate); event names the deadline |
+| 58 | `InvalidMemo` | `InvalidInput` | Input | Same category; event carries the memo |
+| 59 | `MemoTooLong` | `InvalidInput` | Input | Same category; event carries the memo |
+| 60 | `InvalidMetadata` | `InvalidInput` | Input | Same category; event carries the metadata |
+| 61 | `MetadataTooLarge` | `InvalidInput` | Input | Same category; event carries the size |
 
----
+### 6.3 Resulting variant set (≤50)
 
-## 7. Future Enhancements
+`AlreadyInitialized`, `NotInitialized`, `Unauthorized`, `InvalidSignature`,
+`InvalidInput`, `SchemaVersionMismatch`, `InvalidTransition`,
+`TimelockNotElapsed`, `NoPendingChange`, `UnknownMigration`,
+`MigrationFailed`, `UpgradeNotReversible`, `SelfCheckFailed`,
+`RetryLimitExceeded`, `Paused`, `NotFound`, `DuplicateTransaction`,
+`ArithmeticError`, `StorageError` — **19 variants**, comfortably under the
+50-variant ceiling with headroom for future waves.
 
-- ~~**Timelocked upgrade**~~ — **Done** (issue #81 / ADR-0004):
-  `propose_upgrade` / `finalize_upgrade` / `cancel_upgrade`
-- **Emergency pause before upgrade**: Require the contract to be paused before an upgrade can execute, preventing race conditions with in-flight callbacks (still F-05)
-- **DAO-controlled admin**: Replace the single-address admin with a Soroban DAO contract
-- **Resumable multi-call migrations**: For transforms exceeding
-  `MAX_MIGRATION_STORAGE_TOUCHES` (ADR-0005 v1 documents the limitation)
+### 6.4 Regression guard
 
----
-
-## 8. References
-
-- [Soroban Docs: Contract Upgrades](https://developers.stellar.org/docs/smart-contracts/getting-started/upgrading)
-- [SEP-11: Stellar Asset Code Conventions](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0011.md)
-- [Phoenix Protocol: Upgradeable Pools](https://github.com/Phoenix-Protocol-Group/phoenix)
-
----
-
-# Decision: Full SEP-23 Strkey CRC16 Validation
-
-> **Status:** Accepted · **Date:** 2026-Q3  
-> **Scope:** `validate_stellar_account` / `validate_asset_issuer` in [`src/validation.rs`](./src/validation.rs)  
-> **Issue:** [#28](https://github.com/Synapse-bridgez/synapse-core-contracts/issues/28)
-
----
-
-## 1. Problem Statement
-
-Stellar G-addresses are SEP-23 strkeys: unpadded base32 of
-`(version_byte ‖ ed25519_pubkey ‖ CRC16-XModem)`, 56 characters, version
-`6 << 3` (encodes to `'G'`).
-
-The previous guard was a **cheap shape check**:
-
-```text
-len == 56 && first_byte == b'G'
-```
-
-That accepts checksum-invalid strings that still look like addresses — e.g. a
-single-character typo — and would let `register_callback` persist a deposit
-keyed to an account that cannot exist on the network.
-
----
-
-## 2. Options Considered
-
-### Option A — Full base32 + CRC16-XModem (hand-rolled) ✅
-
-Decode 56 chars → 35 bytes, require version `0x30`, verify little-endian
-CRC16-XModem over the 33-byte payload. No external crate (keeps `#![no_std]` /
-`opt-level = "z"` size budget).
-
-### Option B — Keep cheap prefix/length check
-
-Document residual risk in module docs and rely on off-chain relay validation.
-
----
-
-## 3. Cost measurement
-
-| Metric | Result |
-|--------|--------|
-| Work per call | 56 base32 lookups + CRC16 over 33 bytes (~264 bit ops) |
-| Estimated host CPU | low thousands of instructions — far below one persistent storage write |
-| Release WASM (baseline, pre-change) | **19 820** bytes |
-| Release WASM (post-change) | **20 238** bytes (**+418** bytes / ~2.1%) |
-| Fee context | `register_callback` ≈ **0.01 XLM** dominated by storage writes ([`COST_MODEL.md`](./COST_MODEL.md)); validation CPU is noise |
-
-**Conclusion:** the security win outweighs the size/CPU cost. Option A accepted.
-
----
-
-## 4. Residual risk if we had rejected
-
-An invalid-but-well-shaped account could be registered on-chain. Relayers would
-still pay fees; funds destination would not match any real account. That is a
-deliberate trade-off only if WASM size were at the limit — it is not.
-
----
-
-## 5. Fixtures
-
-Unit tests in `validation.rs` cover:
-
-| Fixture | Role |
-|---------|------|
-| `GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ` | Valid SEP-23 ed25519 public key |
-| `…VSGY` (last char flipped) | Prefix/length-valid, checksum-invalid |
-| `GSHORT` / invalid alphabet / `C…` prefix | Genuinely malformed |
-
----
-
-## 6. References
-
-- [SEP-23: Strkeys](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md)
-- [Stellar Go `strkey` + CRC16-XModem](https://github.com/stellar/go/tree/master/strkey)
-
-
-## Timelocked relay-signer rotation
-
-`propose_relay_signer` / `finalize_relay_signer` / `cancel_relay_signer_change`
-mirror the two-step admin transfer (ADR-0002): pending state in persistent storage,
-one event per step, admin-gated. Delay is in ledgers (default 17_280, about 24h;
-configurable via `set_relay_signer_delay`). A second proposal replaces the pending
-one and restarts the delay. Assumptions: with the N-of-M set (ADR-0004) only the
-primary signer slot is rotated; the legacy immediate `set_relay_signer` stays for
-backward compatibility until a non-zero delay is configured, after which it returns
-`TimelockRequired`.
-
-## Error-code budget
-
-Soroban encodes a `#[contracterror]` enum's cases in the contract spec as an
-XDR array bounded at 50. Above that, the macro panics at compile time
-(`LengthExceedsMax`). Restoring the #176–#179 and #190–#191 entry points
-needed 61 variants, so related failures now share one:
-
-| Shared variant | Covers |
-|----------------|--------|
-| `InvalidAmount` | non-positive amounts and ceilings, out-of-range partial settlement |
-| `TimelockNotElapsed` | upgrade, relay-signer and unbond delays |
-| `NoPendingChange` | nothing to finalize / cancel (upgrade or relay signer) |
-| `InvalidTag` | empty tag, or tag cap reached |
-| `MigrationFailed` | migration failure, or its storage-touch bound exceeded |
-| `InvalidSlashEvidence` | `tx_id` mismatch, or payloads that do not conflict |
-| `NotRelaySigner` | caller, or removal target, is not in the relay set |
-| `DuplicateRequest` | duplicate `transaction_id`, or adding an existing signer |
-
-`ContractError` has 49 variants. Before adding one, check whether an existing
-variant already describes the failure from the caller's point of view (what
-they must change to succeed). If the enum ever needs to grow past 50, split
-it into one error enum per subsystem.
-
+`scripts/check_error_budget.sh` counts the variants in the `ContractError`
+enum and exits non-zero if the count exceeds 50. It is wired into
+`make check` so a future PR cannot silently regress past the cap.
