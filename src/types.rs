@@ -1,14 +1,20 @@
-use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
+//! Shared types for the transaction recovery contract.
+//!
+//! These types describe the on-chain transaction records and the auxiliary
+//! markers used by the manual recovery tooling (e.g. duplicate merging).
 
-/// Lifecycle state of a transaction registered with the contract.
+use soroban_sdk::{contracttype, Address, BytesN, Env, String, Vec};
+
+/// Lifecycle status of a transaction record.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TransactionStatus {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxStatus {
+    /// Record created but not yet finalized.
     Pending,
-    Processing,
+    /// Record finalized/settled; immutable for recovery purposes.
     Completed,
-    Failed,
-    Cancelled,
+    /// Record was merged into another record (see [`MergedInto`]).
+    Merged,
 }
 
 /// Maximum number of tags that may be attached to a single transaction.
@@ -17,28 +23,70 @@ pub enum TransactionStatus {
 /// further additions are rejected. See issue #51.
 pub const MAX_TAGS_PER_TRANSACTION: u32 = 10;
 
-/// A transaction record stored on-chain.
+/// A single transaction record.
 ///
-/// `amount` is the originally requested amount and is preserved for audit even
-/// when the transaction settles for a different value. `settled_amount` records
-/// the amount actually settled: it is `None` until the transaction completes,
-/// and is `Some(value)` once completed. When `settled_amount` is `Some(v)` and
-/// `v != amount`, the transaction was partially completed via
-/// `partial_complete_transaction`; when `v == amount` it was fully completed.
-///
-/// `tags` holds additive operational metadata (e.g. marking a transaction for
-/// manual review) managed via `add_transaction_tag` / `get_transaction_tags`.
-/// Tags never affect `status` or any other entry point's behavior.
+/// Merging a duplicate does not destroy this record: the `merged_into` field
+/// is populated with the primary transaction id and the status is set to
+/// [`TxStatus::Merged`], preserving all original data.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transaction {
-    pub tx_id: u64,
-    pub caller: Address,
-    pub amount: i128,
-    pub settled_amount: Option<i128>,
-    pub stellar_tx_hash: BytesN<32>,
-    pub status: TransactionStatus,
+    /// Unique transaction id.
+    pub id: u64,
+    /// Account that owns/created the record.
+    pub owner: Address,
+    /// Current lifecycle status.
+    pub status: TxStatus,
+    /// Opaque payload retained verbatim across merges.
+    pub data: BytesN<32>,
+    /// If this record was merged away, the primary transaction id it points to.
+    pub merged_into: Option<u64>,
+    /// Additive operational metadata managed via `add_transaction_tag` /
+    /// `get_transaction_tags`. Tags never affect `status` or any other entry
+    /// point's behavior.
     pub tags: Vec<String>,
-    pub created_at: u64,
-    pub updated_at: u64,
+}
+
+/// Marker stored alongside a duplicate record indicating the primary it was
+/// merged into. Kept separate from [`Transaction`] so the original record can
+/// remain intact ("keeps data").
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MergedInto {
+    /// The primary transaction id this record was merged into.
+    pub primary_tx_id: u64,
+}
+
+/// Storage keys used by the contract.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StorageKey {
+    /// A transaction record keyed by its id.
+    Transaction(u64),
+    /// A "merged into" marker keyed by the duplicate's id.
+    MergedInto(u64),
+}
+
+impl Transaction {
+    /// Returns `true` when this record has been settled (`Completed`).
+    ///
+    /// Settled records must not be merged away.
+    pub fn is_settled(&self) -> bool {
+        matches!(self.status, TxStatus::Completed)
+    }
+
+    /// Returns `true` when this record has already been merged away.
+    pub fn is_merged(&self) -> bool {
+        matches!(self.status, TxStatus::Merged) || self.merged_into.is_some()
+    }
+}
+
+/// Convenience helper returning the storage key for a transaction record.
+pub fn tx_key(_env: &Env, tx_id: u64) -> StorageKey {
+    StorageKey::Transaction(tx_id)
+}
+
+/// Convenience helper returning the storage key for a merged-into marker.
+pub fn merged_into_key(_env: &Env, tx_id: u64) -> StorageKey {
+    StorageKey::MergedInto(tx_id)
 }
