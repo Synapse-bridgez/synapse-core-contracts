@@ -3,12 +3,20 @@
 //! This crate exposes the contract entry points and supporting modules.
 //! The migration registry lives in [`migration`] and is invoked by the
 //! upgrade path before the WASM swap commits.
+//!
+//! Relay signer rotation with timelock lives in [`relay_signer`]:
+//! `propose_relay_signer`, `finalize_relay_signer` /
+//! `try_finalize_relay_signer`, and `cancel_relay_signer_change`, mirroring
+//! the propose/finalize/cancel shape used for admin transfer and upgrades.
+//! The immediate single-signer rotation path (`set_relay_signer`) is
+//! intentionally separate.
 
 #![no_std]
 
 mod admin;
 mod events;
 mod migration;
+mod relay_signer;
 mod storage;
 mod types;
 mod validation;

@@ -218,3 +218,33 @@ fn immediate_rotation_closed_when_delay_set() {
         ContractError::TimelockRequired
     );
 }
+
+// ─── #300 set_relay_signer_delay bounds ───────────────────────────────────────
+
+#[test]
+fn set_relay_signer_delay_rejects_zero_and_out_of_bounds() {
+    let (env, client, _admin) = setup();
+    assert_eq!(
+        client
+            .try_set_relay_signer_delay(&0)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidDelay
+    );
+    assert_eq!(
+        client
+            .try_set_relay_signer_delay(&u32::MAX)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidDelay
+    );
+    let _ = env;
+}
+
+#[test]
+fn set_relay_signer_delay_stores_value() {
+    let (env, client, _admin) = setup();
+    client.set_relay_signer_delay(&100);
+    assert_eq!(client.relay_signer_delay(), 100);
+    let _ = env;
+}
