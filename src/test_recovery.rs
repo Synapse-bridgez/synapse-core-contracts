@@ -229,6 +229,107 @@ fn quorum_met_allowed_one_short_rejected() {
             .unwrap(),
         ContractError::QuorumNotMet
     );
-    client.approve_relay_call(&s2);
+    client.approve_relay_call(&a, &s2);
     client.start_processing(&a, &primary);
+    assert_eq!(client.get_status(&a), TransactionStatus::Processing);
+    let _ = admin;
+}
+
+#[test]
+fn threshold_bounds_enforced() {
+    let (env, client, _admin) = setup();
+    // Reject threshold == 0 (quorum would be trivially met).
+    assert_eq!(
+        client.try_set_relay_threshold(&0).unwrap_err().unwrap(),
+        ContractError::InvalidThreshold
+    );
+    // Reject threshold > current signer count (quorum unreachable).
+    assert_eq!(
+        client.try_set_relay_threshold(&2).unwrap_err().unwrap(),
+        ContractError::InvalidThreshold
+    );
+    // Accept threshold == signer count (full consensus required).
+    client.set_relay_threshold(&1);
+    assert_eq!(client.relay_signer_set().threshold, 1);
+    // Removing the last signer would leave threshold > signer count.
+    let primary = client.relay_signer();
+    assert_eq!(
+        client
+            .try_remove_relay_signer(&primary)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidThreshold
+    );
+    let _ = env;
+}
+
+// ─── #66 timelocked relay signer ──────────────────────────────────────────────
+
+use soroban_sdk::testutils::Ledger;
+
+#[test]
+fn timelock_boundary_and_cancel() {
+    let (env, client, _admin) = setup();
+    let new = Address::generate(&env);
+    client.set_relay_signer_delay(&100);
+    let start = env.ledger().sequence();
+    client.propose_relay_signer(&new);
+    env.ledger().with_mut(|l| l.sequence_number = start + 99);
+    assert_eq!(
+        client.try_finalize_relay_signer().unwrap_err().unwrap(),
+        ContractError::TimelockNotElapsed
+    );
+    env.ledger().with_mut(|l| l.sequence_number = start + 100);
+    client.finalize_relay_signer();
+    assert_eq!(client.relay_signer(), new);
+
+    client.propose_relay_signer(&Address::generate(&env));
+    client.cancel_relay_signer_change();
+    assert_eq!(
+        client.try_finalize_relay_signer().unwrap_err().unwrap(),
+        ContractError::NoPendingChange
+    );
+}
+
+#[test]
+fn immediate_rotation_closed_when_delay_set() {
+    let (env, client, _admin) = setup();
+    client.set_relay_signer_delay(&10);
+    assert_eq!(
+        client
+            .try_set_relay_signer(&Address::generate(&env))
+            .unwrap_err()
+            .unwrap(),
+        ContractError::TimelockRequired
+    );
+}
+
+// ─── #300 set_relay_signer_delay bounds ───────────────────────────────────────
+
+#[test]
+fn set_relay_signer_delay_rejects_zero_and_out_of_bounds() {
+    let (env, client, _admin) = setup();
+    assert_eq!(
+        client
+            .try_set_relay_signer_delay(&0)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidDelay
+    );
+    assert_eq!(
+        client
+            .try_set_relay_signer_delay(&u32::MAX)
+            .unwrap_err()
+            .unwrap(),
+        ContractError::InvalidDelay
+    );
+    let _ = env;
+}
+
+#[test]
+fn set_relay_signer_delay_stores_value() {
+    let (env, client, _admin) = setup();
+    client.set_relay_signer_delay(&100);
+    assert_eq!(client.relay_signer_delay(), 100);
+    let _ = env;
 }
