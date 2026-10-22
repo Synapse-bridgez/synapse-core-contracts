@@ -1,3 +1,36 @@
+use soroban_sdk::{Address, Env};
+
+use crate::types::{BondRecord, UnbondRequest};
+
+/// Storage key for a signer's bond record.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub enum BondKey {
+    Bond(Address),
+    Unbond(Address),
+}
+
+/// Read the bond record for `signer`, returning a zero/default record when the
+/// signer has never bonded.
+pub fn get_bond_record(env: &Env, signer: &Address) -> BondRecord {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Bond(signer.clone()))
+        .unwrap_or(BondRecord {
+            signer: signer.clone(),
+            amount: 0,
+            bonded_at: 0,
+        })
+}
+
+/// Read the pending unbond request for `signer`, or `None` when no request is
+/// pending (including after a completed unbond has been claimed).
+pub fn get_unbond_request(env: &Env, signer: &Address) -> Option<UnbondRequest> {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Unbond(signer.clone()))
+}
+
 pub fn get_relay_signer(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::RelaySigner)
 }
@@ -9,18 +42,6 @@ pub fn get_relay_signer(env: &Env) -> Option<Address> {
 /// disruptive migration step. If the explicit N-of-M storage was never
 /// initialized, this derives the equivalent one-of-one view from the legacy
 /// single `relay_signer`.
-pub fn get_relay_signer(env: &Env) -> Option<Address> {
-    env.storage().instance().get(&DataKey::RelaySigner)
-}
-
-/// Returns the effective relay signer set, applying the one-of-one fallback.
-///
-/// Decision (issue #304): a contract initialized before the N-of-M feature
-/// existed must be representable as a valid one-of-one signer set without a
-/// disruptive migration step. If the explicit N-of-M storage was never
-/// initialized, this derives the equivalent one-of-one view from the
-/// single-signer baseline instead of erroring. Once `add_relay_signer`
-/// (issue #74) writes the explicit set, the fallback is no longer consulted.
 pub fn relay_signer_set(env: &Env) -> Vec<Address> {
     if let Some(set) = get_relay_signer_set(env) {
         return set;
