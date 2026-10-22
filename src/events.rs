@@ -1,367 +1,244 @@
-//! # Event definitions and emitters
+//! Event definitions and emission helpers for the contract.
 //!
-//! This module defines every event emitted by the contract as a
-//! `#[contracttype]` struct, together with the [`EventEmitter`] helper that
-//! publishes them to the Soroban host.
+//! Events are emitted with a stable topic so off-chain indexers can filter
+//! reliably. The `init` topic is emitted exactly once by
+//! `initialize(admin, relay_signer)`.
 //!
-//! The structs here are the canonical ground truth for
-//! `event_conformance_manifest.toml`: field names, types, and declaration
-//! order must match the manifest entries exactly, and every emitter method on
-//! [`EventEmitter`] must use the topic symbol recorded in the manifest.
+//! The `upgrade` topic is emitted by the admin-gated `upgrade()`
+//! entry point after a successful WASM swap (see `DECISIONS.md` §5).
+//!
+//! The `guardian_revoke` topic is emitted by the guardian emergency admin
+//! revocation entry point described in
+//! `docs/adr/0004-guardian-emergency-admin-revocation.md`. It is deliberately
+//! distinct from the normal `propose_admin`/`accept_admin` transfer events so
+//! downstream monitoring can tell a planned handoff apart from an emergency
+//! revocation.
+//!
+//! Relay signer rotation events are emitted under the `relay` topic and mirror
+//! the schema in `EVENTS.md`; keep them in sync.
+//!
+//! Transaction failure events are emitted under the `fail` topic. This is
+//! deliberately distinct from the `cancel` topic: `fail` means "the anchor
+//! genuinely failed", while `cancel` means "someone decided to stop this".
+//!
+//! # Guaranteed multi-event emission order
+//!
+//! Several entry points emit more than one event per invocation. For those
+//! entry points the relative order of the emitted events is a documented,
+//! tested guarantee (see `EVENTS.md`). The helpers in this module are the
+//! single source of truth for those orderings: they publish events in a fixed
+//! sequence so the guarantee is enforced at the source rather than relying on
+//! call-site discipline.
+//!
+//! In particular, `complete_transaction` emits `status` **then** `done`; see
+//! [`emit_status_then_done`].
 
-use soroban_sdk::{contracttype, Address, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol};
 
-/// Emitted when the contract is initialized.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Initialized {
-    /// Address of the account that performed initialization.
-    pub admin: Address,
-    /// Ledger timestamp at initialization.
-    pub timestamp: u64,
-}
+/// Topic symbol for the contract-initialized event ("init" per README).
+pub const TOPIC_INIT: Symbol = symbol_short!("init");
 
-/// Emitted when the admin is changed.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminChanged {
-    /// Previous admin address.
-    pub old_admin: Address,
-    /// New admin address.
-    pub new_admin: Address,
-    /// Ledger timestamp of the change.
-    pub timestamp: u64,
-}
+/// Topic symbol used for contract-upgrade events.
+pub const UPGRADE_TOPIC: Symbol = symbol_short!("upgrade");
 
-/// Emitted when the contract is paused.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Paused {
-    /// Address that triggered the pause.
-    pub admin: Address,
-    /// Ledger timestamp of the pause.
-    pub timestamp: u64,
-}
+/// Topic symbol used for guardian emergency admin revocation events.
+pub const GUARDIAN_REVOKE_TOPIC: Symbol = symbol_short!("guardian_revoke");
 
-/// Emitted when the contract is unpaused.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Unpaused {
-    /// Address that triggered the unpause.
-    pub admin: Address,
-    /// Ledger timestamp of the unpause.
-    pub timestamp: u64,
-}
+/// Topic symbol used for relay-related events (matches the "relay" topic in
+/// `EVENTS.md`).
+pub const RELAY_TOPIC: Symbol = symbol_short!("relay");
 
-/// Emitted when a new account is registered.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccountRegistered {
-    /// Address of the newly registered account.
-    pub account: Address,
-    /// Ledger timestamp of registration.
-    pub timestamp: u64,
-}
-
-/// Emitted when an account is removed.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccountRemoved {
-    /// Address of the removed account.
-    pub account: Address,
-    /// Ledger timestamp of removal.
-    pub timestamp: u64,
-}
-
-/// Emitted when a deposit is made.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Deposited {
-    /// Address making the deposit.
-    pub from: Address,
-    /// Amount deposited.
-    pub amount: i128,
-    /// Ledger timestamp of the deposit.
-    pub timestamp: u64,
-}
-
-/// Emitted when a withdrawal is made.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Withdrawn {
-    /// Address receiving the withdrawal.
-    pub to: Address,
-    /// Amount withdrawn.
-    pub amount: i128,
-    /// Ledger timestamp of the withdrawal.
-    pub timestamp: u64,
-}
-
-/// Emitted when a transfer occurs between accounts.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Transferred {
-    /// Source address.
-    pub from: Address,
-    /// Destination address.
-    pub to: Address,
-    /// Amount transferred.
-    pub amount: i128,
-    /// Ledger timestamp of the transfer.
-    pub timestamp: u64,
-}
-
-/// Emitted when a fee is collected.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FeeCollected {
-    /// Address from which the fee was collected.
-    pub from: Address,
-    /// Fee amount collected.
-    pub amount: i128,
-    /// Ledger timestamp of collection.
-    pub timestamp: u64,
-}
-
-/// Emitted when a role is granted to an account.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RoleGranted {
-    /// Account receiving the role.
-    pub account: Address,
-    /// Symbol identifying the role.
-    pub role: Symbol,
-    /// Address that granted the role.
-    pub admin: Address,
-    /// Ledger timestamp of the grant.
-    pub timestamp: u64,
-}
-
-/// Emitted when a role is revoked from an account.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RoleRevoked {
-    /// Account losing the role.
-    pub account: Address,
-    /// Symbol identifying the role.
-    pub role: Symbol,
-    /// Address that revoked the role.
-    pub admin: Address,
-    /// Ledger timestamp of the revocation.
-    pub timestamp: u64,
-}
-
-/// Emitted when an allowance is approved.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Approved {
-    /// Owner granting the allowance.
-    pub owner: Address,
-    /// Spender receiving the allowance.
-    pub spender: Address,
-    /// Allowance amount.
-    pub amount: i128,
-    /// Ledger timestamp of the approval.
-    pub timestamp: u64,
-}
-
-/// Emitted when an allowance is revoked.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Revoked {
-    /// Owner revoking the allowance.
-    pub owner: Address,
-    /// Spender losing the allowance.
-    pub spender: Address,
-    /// Ledger timestamp of the revocation.
-    pub timestamp: u64,
-}
-
-/// Emitted when a configuration parameter is updated.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConfigUpdated {
-    /// Symbol identifying the configuration key.
-    pub key: Symbol,
-    /// Ledger timestamp of the update.
-    pub timestamp: u64,
-}
-
-/// Emitted when a batch operation completes.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BatchCompleted {
-    /// Number of items processed in the batch.
-    pub count: u32,
-    /// Ledger timestamp of completion.
-    pub timestamp: u64,
-}
-
-/// Emitted when an emergency shutdown is triggered.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EmergencyShutdown {
-    /// Address that triggered the shutdown.
-    pub admin: Address,
-    /// Human-readable reason symbol.
-    pub reason: Symbol,
-    /// Ledger timestamp of the shutdown.
-    pub timestamp: u64,
-}
-
-/// Emitted when an emergency shutdown is lifted.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EmergencyResumed {
-    /// Address that lifted the shutdown.
-    pub admin: Address,
-    /// Ledger timestamp of the resume.
-    pub timestamp: u64,
-}
-
-/// Emitted when a migration step is performed.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Migrated {
-    /// Previous schema version.
-    pub from_version: u32,
-    /// New schema version.
-    pub to_version: u32,
-    /// Ledger timestamp of the migration.
-    pub timestamp: u64,
-}
-
-/// Emitted when an upgrade is scheduled.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeScheduled {
-    /// New wasm hash being scheduled.
-    pub new_wasm_hash: soroban_sdk::BytesN<32>,
-    /// Ledger timestamp at which the upgrade becomes effective.
-    pub effective_at: u64,
-    /// Ledger timestamp of scheduling.
-    pub timestamp: u64,
-}
-
-/// Emitted when a scheduled upgrade is applied.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeApplied {
-    /// Wasm hash that was applied.
-    pub new_wasm_hash: soroban_sdk::BytesN<32>,
-    /// Ledger timestamp of application.
-    pub timestamp: u64,
-}
-
-/// Helper for publishing contract events to the Soroban host.
+/// Topic symbol used for transaction failure events.
 ///
-/// Each method corresponds to one event struct and publishes it under the
-/// topic symbol recorded in `event_conformance_manifest.toml`.
-pub struct EventEmitter;
+/// Emitted by `fail_transaction` when an anchor genuinely fails. This is
+/// deliberately distinct from the `cancel` topic: `fail` means "the anchor
+/// genuinely failed", while `cancel` means "someone decided to stop this".
+pub const FAIL_TOPIC: Symbol = symbol_short!("fail");
 
-impl EventEmitter {
-    /// Publishes an [`Initialized`] event under topic `init`.
-    pub fn initialized(env: &Env, event: Initialized) {
-        env.events().publish((Symbol::new(env, "init"),), event);
-    }
+/// Topic symbol for the `status` event.
+pub const TOPIC_STATUS: &str = "status";
+/// Topic symbol for the `done` event.
+pub const TOPIC_DONE: &str = "done";
 
-    /// Publishes an [`AdminChanged`] event under topic `admin_chg`.
-    pub fn admin_changed(env: &Env, event: AdminChanged) {
-        env.events().publish((Symbol::new(env, "admin_chg"),), event);
-    }
+/// Payload emitted when the contract is initialized for the first time.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventContractInitialized {
+    /// The admin address stored during initialization.
+    pub admin: Address,
+    /// The relay signer address stored during initialization.
+    pub relay_signer: Address,
+}
 
-    /// Publishes a [`Paused`] event under topic `paused`.
-    pub fn paused(env: &Env, event: Paused) {
-        env.events().publish((Symbol::new(env, "paused"),), event);
-    }
+/// Payload emitted when the contract WASM is upgraded in place.
+///
+/// `new_wasm_hash` is the hash of the freshly installed WASM and
+/// `schema_version` is the live schema version the upgrade was validated
+/// against.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventContractUpgraded {
+    pub new_wasm_hash: BytesN<32>,
+    pub schema_version: u32,
+}
 
-    /// Publishes an [`Unpaused`] event under topic `unpaused`.
-    pub fn unpaused(env: &Env, event: Unpaused) {
-        env.events().publish((Symbol::new(env, "unpaused"),), event);
-    }
+/// Payload emitted when a guardian revokes a compromised admin.
+///
+/// `guardian` is the guardian that triggered the revocation, `revoked_admin`
+/// is the admin that was removed, and `new_admin` is the replacement admin
+/// that takes effect immediately.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventGuardianAdminRevoked {
+    pub guardian: Address,
+    pub revoked_admin: Address,
+    pub new_admin: Address,
+}
 
-    /// Publishes an [`AccountRegistered`] event under topic `acct_reg`.
-    pub fn account_registered(env: &Env, event: AccountRegistered) {
-        env.events().publish((Symbol::new(env, "acct_reg"),), event);
-    }
+/// Payload emitted when the relay signer is rotated.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventRelaySignerRotated {
+    /// The relay signer that was active before the rotation.
+    pub old_signer: Address,
+    /// The relay signer that is active after the rotation.
+    pub new_signer: Address,
+}
 
-    /// Publishes an [`AccountRemoved`] event under topic `acct_rm`.
-    pub fn account_removed(env: &Env, event: AccountRemoved) {
-        env.events().publish((Symbol::new(env, "acct_rm"),), event);
-    }
+/// Emit the `EventContractInitialized` event under the "init" topic.
+///
+/// Called exactly once from `initialize`; the one-time-init guard in the
+/// contract ensures this emitter is never reached on a second call.
+pub fn emit_contract_initialized(env: &Env, admin: Address, relay_signer: Address) {
+    let event = EventContractInitialized {
+        admin,
+        relay_signer,
+    };
+    env.events().publish((TOPIC_INIT,), event);
+}
 
-    /// Publishes a [`Deposited`] event under topic `deposit`.
-    pub fn deposited(env: &Env, event: Deposited) {
-        env.events().publish((Symbol::new(env, "deposit"),), event);
-    }
+/// Emit the `upgrade` event for a successful in-place WASM swap.
+///
+/// Called by `upgrade()` only after the schema-version guard has passed and
+/// `env.deployer().update_current_contract_wasm()` has been invoked.
+pub fn emit_contract_upgraded(env: &Env, new_wasm_hash: BytesN<32>, schema_version: u32) {
+    let payload = EventContractUpgraded {
+        new_wasm_hash,
+        schema_version,
+    };
+    env.events().publish((UPGRADE_TOPIC,), payload);
+}
 
-    /// Publishes a [`Withdrawn`] event under topic `withdraw`.
-    pub fn withdrawn(env: &Env, event: Withdrawn) {
-        env.events().publish((Symbol::new(env, "withdraw"),), event);
-    }
+/// Emit the `guardian_revoke` event for a guardian emergency admin revocation.
+///
+/// Called by the guardian revocation entry point after the admin has been
+/// replaced. The dedicated topic keeps this event distinguishable from the
+/// normal `propose_admin`/`accept_admin` transfer events.
+pub fn emit_guardian_admin_revoked(
+    env: &Env,
+    guardian: Address,
+    revoked_admin: Address,
+    new_admin: Address,
+) {
+    let payload = EventGuardianAdminRevoked {
+        guardian,
+        revoked_admin,
+        new_admin,
+    };
+    env.events().publish((GUARDIAN_REVOKE_TOPIC,), payload);
+}
 
-    /// Publishes a [`Transferred`] event under topic `transfer`.
-    pub fn transferred(env: &Env, event: Transferred) {
-        env.events().publish((Symbol::new(env, "transfer"),), event);
-    }
+/// Emit an [`EventRelaySignerRotated`] event under the `relay` topic.
+///
+/// This is emitted on every successful `set_relay_signer` call, including
+/// no-op rotations to the currently-active signer.
+pub fn emit_relay_signer_rotated(env: &Env, old_signer: Address, new_signer: Address) {
+    let event = EventRelaySignerRotated {
+        old_signer,
+        new_signer,
+    };
+    env.events().publish((RELAY_TOPIC,), event);
+}
 
-    /// Publishes a [`FeeCollected`] event under topic `fee`.
-    pub fn fee_collected(env: &Env, event: FeeCollected) {
-        env.events().publish((Symbol::new(env, "fee"),), event);
-    }
+/// Emit the `fail` event for a transaction.
+///
+/// Publishes the `fail` topic with a payload of `(tx_id, reason)`, allowing
+/// off-chain consumers to observe both the affected transaction and the
+/// human-readable failure reason.
+///
+/// # Arguments
+///
+/// * `env` - The contract environment used to publish the event.
+/// * `tx_id` - Identifier of the transaction that failed.
+/// * `reason` - Human-readable reason for the failure. Callers are
+///   responsible for validating `reason` against the string-length cap
+///   (issue #47) before invoking this helper.
+pub fn emit_fail(env: &Env, tx_id: u64, reason: &String) {
+    env.events()
+        .publish((FAIL_TOPIC, tx_id), reason.clone());
+}
 
-    /// Publishes a [`RoleGranted`] event under topic `role_grant`.
-    pub fn role_granted(env: &Env, event: RoleGranted) {
-        env.events().publish((Symbol::new(env, "role_grant"),), event);
-    }
+/// Emit the `status` event.
+///
+/// Publishes a `status` event with the given `tx_id` and `status` payload.
+/// This is a low-level helper; callers that must also emit `done` should use
+/// [`emit_status_then_done`] so the documented ordering is preserved.
+pub fn emit_status(env: &Env, tx_id: u64, status: u32) {
+    let topics = (Symbol::new(env, TOPIC_STATUS), tx_id);
+    env.events().publish(topics, status);
+}
 
-    /// Publishes a [`RoleRevoked`] event under topic `role_revoke`.
-    pub fn role_revoked(env: &Env, event: RoleRevoked) {
-        env.events().publish((Symbol::new(env, "role_revoke"),), event);
-    }
+/// Emit the `done` event.
+///
+/// Publishes a `done` event with the given `tx_id` and `stellar_tx_hash`
+/// payload. This is a low-level helper; callers that must also emit `status`
+/// should use [`emit_status_then_done`] so the documented ordering is
+/// preserved.
+pub fn emit_done(env: &Env, tx_id: u64, stellar_tx_hash: &soroban_sdk::BytesN<32>) {
+    let topics = (Symbol::new(env, TOPIC_DONE), tx_id);
+    env.events().publish(topics, stellar_tx_hash.clone());
+}
 
-    /// Publishes an [`Approved`] event under topic `approve`.
-    pub fn approved(env: &Env, event: Approved) {
-        env.events().publish((Symbol::new(env, "approve"),), event);
-    }
+/// Emit the `status` event followed by the `done` event, in that exact order.
+///
+/// This is the guaranteed emission order for `complete_transaction`
+/// (`Processing → Completed`): the `status` event is published first, then the
+/// `done` event. The ordering is enforced here so every caller inherits it.
+///
+/// # Arguments
+///
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction identifier, used as the second topic of both
+///   events.
+/// * `status` - The new status payload for the `status` event.
+/// * `stellar_tx_hash` - The Stellar transaction hash recorded on the `done`
+///   event for audit purposes.
+pub fn emit_status_then_done(
+    env: &Env,
+    tx_id: u64,
+    status: u32,
+    stellar_tx_hash: &soroban_sdk::BytesN<32>,
+) {
+    emit_status(env, tx_id, status);
+    emit_done(env, tx_id, stellar_tx_hash);
+}
 
-    /// Publishes a [`Revoked`] event under topic `revoke`.
-    pub fn revoked(env: &Env, event: Revoked) {
-        env.events().publish((Symbol::new(env, "revoke"),), event);
-    }
+/// Emit a generic single event with the given topic and payload.
+///
+/// Convenience wrapper used by entry points that emit a single event and
+/// therefore make no ordering claim.
+pub fn emit_single<T>(env: &Env, topic: &str, tx_id: u64, payload: T)
+where
+    T: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+{
+    let topics = (Symbol::new(env, topic), tx_id);
+    env.events().publish(topics, payload);
+}
 
-    /// Publishes a [`ConfigUpdated`] event under topic `cfg_upd`.
-    pub fn config_updated(env: &Env, event: ConfigUpdated) {
-        env.events().publish((Symbol::new(env, "cfg_upd"),), event);
-    }
-
-    /// Publishes a [`BatchCompleted`] event under topic `batch`.
-    pub fn batch_completed(env: &Env, event: BatchCompleted) {
-        env.events().publish((Symbol::new(env, "batch"),), event);
-    }
-
-    /// Publishes an [`EmergencyShutdown`] event under topic `em_shutdown`.
-    pub fn emergency_shutdown(env: &Env, event: EmergencyShutdown) {
-        env.events().publish((Symbol::new(env, "em_shutdown"),), event);
-    }
-
-    /// Publishes an [`EmergencyResumed`] event under topic `em_resume`.
-    pub fn emergency_resumed(env: &Env, event: EmergencyResumed) {
-        env.events().publish((Symbol::new(env, "em_resume"),), event);
-    }
-
-    /// Publishes a [`Migrated`] event under topic `migrate`.
-    pub fn migrated(env: &Env, event: Migrated) {
-        env.events().publish((Symbol::new(env, "migrate"),), event);
-    }
-
-    /// Publishes an [`UpgradeScheduled`] event under topic `upg_sched`.
-    pub fn upgrade_scheduled(env: &Env, event: UpgradeScheduled) {
-        env.events().publish((Symbol::new(env, "upg_sched"),), event);
-    }
-
-    /// Publishes an [`UpgradeApplied`] event under topic `upg_apply`.
-    pub fn upgrade_applied(env: &Env, event: UpgradeApplied) {
-        env.events().publish((Symbol::new(env, "upg_apply"),), event);
-    }
+/// Emit an event with an `Address` payload (e.g. relay/admin notifications).
+///
+/// Convenience wrapper for single-event emitters whose payload is an address.
+pub fn emit_address(env: &Env, topic: &str, tx_id: u64, payload: &Address) {
+    let topics = (Symbol::new(env, topic), tx_id);
+    env.events().publish(topics, payload.clone());
 }

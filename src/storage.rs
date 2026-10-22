@@ -1,115 +1,612 @@
-//! Storage helpers for the anchor registry contract.
-//!
-//! This module centralises all key definitions and read/write helpers so that
-//! validation logic (see `validation.rs`) and the contract entry points share a
-//! single, consistent view of persistent and instance storage.
-//!
-//! # Amount ceilings
-//!
-//! Two layers of amount ceilings are supported:
-//!
-//! * A **global default ceiling** (`global_max_amount`) stored in `instance`
-//!   storage. It is admin-settable and, when unset, falls back to
-//!   [`DEFAULT_GLOBAL_MAX_AMOUNT`]. An unset global ceiling never means "no
-//!   ceiling" — it always resolves to the documented default.
-//! * A **per-anchor override** stored in `persistent` storage keyed by the
-//!   anchor address. When an anchor has no explicit override, the global
-//!   default ceiling applies.
+/// Writes (or overwrites) a transaction record.
+pub fn set_transaction(env: &Env, tx: &Transaction) {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Transaction(tx_id.clone()))
+}
 
-use soroban_sdk::{contracttype, Address, Env};
-
-/// Default global maximum transaction amount used when the admin has never
-/// explicitly configured a global ceiling.
+/// Writes (or overwrites) a transaction record.
 ///
-/// This value is deliberately conservative: an unset ceiling must never be
-/// interpreted as "no ceiling", which would silently disable amount validation
-/// for every anchor without an override.
-pub const DEFAULT_GLOBAL_MAX_AMOUNT: i128 = 1_000_000_000_000;
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx` - The transaction record to store.
+pub fn set_transaction(env: &Env, tx: &Transaction) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Transaction(tx.tx_id.clone()), tx);
+}
 
-/// Storage keys used by the contract.
+/// Records the Stellar transaction hash on an existing `Transaction` record.
+///
+/// This is the audit hook used by `complete_transaction`: it persists the
+/// `stellar_tx_hash` so subsequent `get_transaction` calls return it, matching
+/// the assertions in `test_recovery.rs` and `test_rotation_chaos.rs`.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction identifier to update.
+/// * `stellar_tx_hash` - The Stellar ledger transaction hash to record.
+///
+/// # Panics
+/// Panics if no `Transaction` record exists for `tx_id`.
+pub fn set_stellar_tx_hash(env: &Env, tx_id: &BytesN<32>, stellar_tx_hash: &BytesN<32>) {
+    let mut tx = get_transaction(env, tx_id)
+        .unwrap_or_else(|| panic!("transaction not found"));
+    tx.stellar_tx_hash = Some(stellar_tx_hash.clone());
+    put_transaction(env, &tx);
+}
+
+/// Returns the currently accrued treasury fee total.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+///
+/// # Returns
+/// The accumulated fee in stroops, or `0` if none has been accrued.
+pub fn get_treasury_accrued(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TreasuryAccrued)
+        .unwrap_or(0)
+}
+
+/// Persists the accrued treasury fee total.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `amount` - The new accumulated fee total in stroops.
+pub fn set_treasury_accrued(env: &Env, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::TreasuryAccrued, &amount);
+}
+
+/// Fee-accrual hook stub for issue #73.
+///
+/// Called by `complete_transaction` after the status transition succeeds. When
+/// issue #73 lands, this function will compute the fee owed for `tx_id` and add
+/// it to the treasury accumulator. For now it is a no-op placeholder so that
+/// issue #73 does not require re-opening the `complete_transaction` entry point.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction that just completed.
+pub fn accrue_completion_fee(_env: &Env, _tx_id: &BytesN<32>) {
+    // TODO(#73): compute fee for `tx_id` and add to `DataKey::TreasuryAccrued`.
+}
+
+/// Returns whether `addr` is an authorized relayer.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `addr` - The address to check.
+pub fn is_relayer(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Relayer(addr.clone()))
+        .unwrap_or(false)
+}
+
+/// Marks `addr` as an authorized relayer.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `addr` - The address to authorize.
+pub fn set_relayer(env: &Env, addr: &Address) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Relayer(addr.clone()), &true);
+}
+
+/// Returns the configured admin address, if any.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::Admin)
+}
+
+/// Persists the admin address.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `admin` - The address to set as admin.
+
+/// Returns `true` if a transaction with `tx_id` exists.
+pub fn has_transaction(env: &Env, tx_id: &Symbol) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::Transaction(tx_id.clone()))
+}
+
+/// Shared transition helper (issue #57).
+///
+/// Validates that the transaction identified by `tx_id` exists and that its
+/// current status is one of `valid_sources`, then writes the new `target`
+/// status along with the `caller` and optional `reason`.
+///
+/// This is the single entry point used by every status transition so that
+/// terminal-state guards and persistence stay consistent across the contract.
+///
+/// # Errors
+/// Returns `Err(TransitionError::NotFound)` if the transaction does not exist,
+/// or `Err(TransitionError::InvalidSource)` if the current status is not in
+/// `valid_sources`.
+pub fn transition_status(
+    env: &Env,
+    tx_id: &Symbol,
+    valid_sources: &[TxStatus],
+    target: TxStatus,
+    caller: &Address,
+    reason: Option<String>,
+) -> Result<Transaction, TransitionError> {
+    let mut tx = get_transaction(env, tx_id).ok_or(TransitionError::NotFound)?;
+
+    if !valid_sources.contains(&tx.status) {
+        return Err(TransitionError::InvalidSource);
+    }
+
+    tx.status = target;
+    tx.caller = caller.clone();
+    tx.reason = reason;
+    set_transaction(env, &tx);
+
+    Ok(tx)
+}
+
+/// Error returned by [`transition_status`].
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StorageKey {
-    /// Instance-tier key holding the admin-settable global default ceiling.
-    GlobalMaxAmount,
-    /// Persistent-tier key holding a per-anchor amount-ceiling override.
-    AnchorAmountCeiling(Address),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransitionError {
+    NotFound,
+    InvalidSource,
 }
 
-// ---------------------------------------------------------------------------
-// Global default ceiling (instance storage)
-// ---------------------------------------------------------------------------
-
-/// Returns the configured global default amount ceiling.
+/// Marks a transaction as `Failed`.
 ///
-/// If the admin has never set a global ceiling, [`DEFAULT_GLOBAL_MAX_AMOUNT`]
-/// is returned. This function never returns `None`; an unset ceiling always
-/// resolves to the documented default rather than "no ceiling".
-pub fn get_global_max_amount(env: &Env) -> i128 {
+/// `Failed` is reachable from any non-terminal state (`Pending` or
+/// `Processing`) — unlike `Cancelled`, which is scoped to `Pending`/
+/// `Processing` only. This asymmetry is documented and deliberate:
+/// `fail_transaction` means "the anchor genuinely failed", while
+/// `cancel_transaction` means "someone decided to stop this".
+///
+/// `reason` must satisfy issue #47's string-length cap
+/// ([`MAX_REASON_LEN`]).
+pub fn fail_transaction(
+    env: &Env,
+    tx_id: &Symbol,
+    reason: String,
+    caller: &Address,
+) -> Result<Transaction, TransitionError> {
+    // Enforce issue #47's string-length cap on the failure reason.
+    if reason.len() > MAX_REASON_LEN {
+        return Err(TransitionError::InvalidSource);
+    }
+
+    transition_status(
+        env,
+        tx_id,
+        &[TxStatus::Pending, TxStatus::Processing],
+        TxStatus::Failed,
+        caller,
+        Some(reason),
+    )
+}
+
+/// Return the tags currently attached to a transaction.
+///
+/// Returns an empty vector when the transaction has no tags yet.
+pub fn get_transaction_tags(env: &Env, tx_id: u64) -> Vec<String> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TransactionTags(tx_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Append a tag to a transaction's tag list.
+///
+/// Callers are expected to have validated the tag and the tag-count bound
+/// before invoking this helper.
+pub fn add_transaction_tag(env: &Env, tx_id: u64, tag: &String) {
+    let mut tags = get_transaction_tags(env, tx_id);
+    tags.push_back(tag.clone());
+    env.storage()
+        .persistent()
+        .set(&DataKey::TransactionTags(tx_id), &tags);
+}
+
+/// Return the number of tags currently attached to a transaction.
+pub fn transaction_tag_count(env: &Env, tx_id: u64) -> u32 {
+    get_transaction_tags(env, tx_id).len()
+}
+
+/// Persist the status of a transaction.
+pub fn set_transaction_status(env: &Env, tx_id: u64, status: &TransactionStatus) {
+    if let Some(mut tx) = get_transaction(env, tx_id) {
+        tx.status = status.clone();
+        set_transaction(env, tx_id, &tx);
+    }
+}
+
+/// Persist an arbitrary address-keyed flag.
+pub fn set_flag(env: &Env, key: &DataKey, value: bool) {
+    env.storage().persistent().set(key, &value);
+}
+
+/// Read an arbitrary address-keyed flag, defaulting to `false`.
+pub fn get_flag(env: &Env, key: &DataKey) -> bool {
+    env.storage().persistent().get(key).unwrap_or(false)
+}
+
+/// Persist the admin address.
+pub fn set_admin(env: &Env, admin: &Address) {
+    env.storage().persistent().set(&DataKey::Admin, admin);
+}
+
+/// Emits a contract event with the given topics and data.
+///
+/// Thin wrapper kept here so storage/transition helpers can emit without
+/// importing the events module directly.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `topics` - The event topics.
+/// * `data` - The event payload.
+pub fn emit(env: &Env, topics: &soroban_sdk::Vec<Symbol>, data: &soroban_sdk::Val) {
+    env.events().publish(topics.clone(), data.clone());
+}
+
+/// Load the admin address, if configured.
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::Admin)
+}
+
+/// Storage key for a signer's bond record.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub enum BondKey {
+    Bond(Address),
+    Unbond(Address),
+}
+
+/// Read the bond record for `signer`, returning a zero/default record when the
+/// signer has never bonded.
+pub fn get_bond_record(env: &Env, signer: &Address) -> BondRecord {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Bond(signer.clone()))
+        .unwrap_or(BondRecord {
+            signer: signer.clone(),
+            amount: 0,
+            bonded_at: 0,
+        })
+}
+
+/// Read the pending unbond request for `signer`, or `None` when no request is
+/// pending (including after a completed unbond has been claimed).
+pub fn get_unbond_request(env: &Env, signer: &Address) -> Option<UnbondRequest> {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Unbond(signer.clone()))
+}
+
+pub fn get_relay_signer(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::RelaySigner)
+}
+
+/// Returns the effective relay signer set, applying the one-of-one fallback.
+///
+/// Decision (issue #304): a contract initialized before the N-of-M feature
+/// existed must be representable as a valid one-of-one signer set without a
+/// disruptive migration step. If the explicit N-of-M storage was never
+/// initialized, this derives the equivalent one-of-one view from the legacy
+/// single `relay_signer`.
+pub fn relay_signer_set(env: &Env) -> Vec<Address> {
+    if let Some(set) = get_relay_signer_set(env) {
+        return set;
+    }
+    let mut out = Vec::new(env);
+    if let Some(signer) = get_relay_signer(env) {
+        out.push_back(signer);
+    }
+    out
+}
+
+/// Returns the current relay-signer set.
+///
+/// When the contract is still in the single-relay-signer baseline state (issue
+/// #6) and no N-of-M set has been materialised yet, this returns a one-of-one
+/// set containing the baseline signer, per ADR 0004's migration semantics.
+pub fn get_relay_signers(env: &Env) -> Vec<Address> {
+    if let Some(signers) = env.storage().instance().get(&DataKey::RelaySigners) {
+        return signers;
+    }
+
+    // Baseline single-signer state: promote lazily into a one-of-one set.
+    let mut signers = Vec::new(env);
+    if let Some(signer) = env.storage().instance().get(&DataKey::RelaySigner) {
+        signers.push_back(signer);
+    }
+    signers
+}
+
+/// Appends `new_signer` to the N-of-M relay-signer set, admin-gated.
+///
+/// If the contract is still in the single-relay-signer baseline state, the
+/// first call transitions it into a one-of-one N-of-M set (containing the
+/// baseline signer) before appending `new_signer`, yielding a one-of-two set.
+///
+/// Adding a signer that is already present is rejected with
+/// [`Error::SignerAlreadyExists`] rather than silently no-op'ing, so callers
+/// cannot mistake a duplicate for a successful rotation.
+pub fn add_relay_signer(
+    env: &Env,
+    caller: &Address,
+    new_signer: &Address,
+) -> Result<(), Error> {
+    caller.require_auth();
+
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(Error::NotInitialized)?;
+    if caller != &admin {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut signers = get_relay_signers(env);
+
+    for existing in signers.iter() {
+        if &existing == new_signer {
+            return Err(Error::SignerAlreadyExists);
+        }
+    }
+
+    signers.push_back(new_signer.clone());
+    env.storage().instance().set(&DataKey::RelaySigners, &signers);
+
+    events::relay_signer_added(env, new_signer);
+
+    Ok(())
+}
+
+/// Returns the effective relay approval threshold, applying the one-of-one
+/// fallback.
+///
+/// Decision (issue #304): when the explicit N-of-M threshold was never
+/// initialized, a single-signer-only contract is treated as an implicit
+/// one-of-one set with threshold `1`. Once the explicit N-of-M storage is
+/// written, the stored threshold is authoritative.
+pub fn relay_threshold(env: &Env) -> u32 {
+    if let Some(threshold) = get_relay_threshold(env) {
+        return threshold;
+    }
+    if get_relay_signer(env).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Returns the quorum threshold for relay-call approvals.
+///
+/// Defaults to `1` when no threshold has been configured via
+/// `set_relay_threshold`, matching the single-relay-signer baseline where one
+/// approval is sufficient.
+pub fn get_relay_threshold(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&StorageKey::GlobalMaxAmount)
-        .unwrap_or(DEFAULT_GLOBAL_MAX_AMOUNT)
+        .get(&DataKey::RelayThreshold)
+        .unwrap_or(1)
 }
 
-/// Sets the global default amount ceiling.
+/// Returns the set of signers that have approved `call_id` so far.
 ///
-/// # Panics
-///
-/// Panics if `amount` is not strictly positive. A non-positive ceiling would
-/// either reject every transaction or be meaningless, so it is rejected at the
-/// storage boundary.
-pub fn set_global_max_amount(env: &Env, amount: i128) {
-    assert!(amount > 0, "global max amount must be positive");
+/// Approvals live in `temporary` storage per the README's storage-tier table
+/// ("Relay approvals"), so they are cheap to write and are consumed once the
+/// quorum threshold is met.
+pub fn get_relay_approvals(env: &Env, call_id: u64) -> Vec<Address> {
     env.storage()
-        .instance()
-        .set(&StorageKey::GlobalMaxAmount, &amount);
+        .temporary()
+        .get(&DataKey::RelayApprovals(call_id))
+        .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Returns `true` if the admin has explicitly configured a global ceiling.
-pub fn has_global_max_amount(env: &Env) -> bool {
-    env.storage().instance().has(&StorageKey::GlobalMaxAmount)
+/// Records `caller`'s approval of `call_id` and reports whether quorum is met.
+///
+/// `caller` must be a member of the current relay-signer set; otherwise
+/// [`Error::Unauthorized`] is returned. A signer approving the same `call_id`
+/// twice does not double-count toward quorum: the duplicate is a no-op and the
+/// current approval count is re-evaluated against the threshold.
+///
+/// Returns `true` exactly when the number of distinct approvals reaches the
+/// threshold set via `set_relay_threshold` (exactly-at-threshold succeeds,
+/// threshold-minus-one does not). When quorum is met the approval set is
+/// consumed from `temporary` storage so the call cannot be replayed.
+pub fn approve_relay_call(
+    env: &Env,
+    call_id: u64,
+    caller: &Address,
+) -> Result<bool, Error> {
+    caller.require_auth();
+
+    let signers = get_relay_signers(env);
+    let mut is_signer = false;
+    for signer in signers.iter() {
+        if &signer == caller {
+            is_signer = true;
+            break;
+        }
+    }
+    if !is_signer {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut approvals = get_relay_approvals(env, call_id);
+
+    let mut already_approved = false;
+    for approved in approvals.iter() {
+        if &approved == caller {
+            already_approved = true;
+            break;
+        }
+    }
+    if !already_approved {
+        approvals.push_back(caller.clone());
+    }
+
+    let threshold = get_relay_threshold(env);
+    let quorum_met = approvals.len() >= threshold;
+
+    if quorum_met {
+        // Consume the approval set once quorum is reached.
+        env.storage()
+            .temporary()
+            .remove(&DataKey::RelayApprovals(call_id));
+    } else {
+        env.storage()
+            .temporary()
+            .set(&DataKey::RelayApprovals(call_id), &approvals);
+    }
+
+    Ok(quorum_met)
 }
 
-// ---------------------------------------------------------------------------
-// Per-anchor override (persistent storage)
-// ---------------------------------------------------------------------------
-
-/// Returns the per-anchor amount-ceiling override, if one is set.
-pub fn get_anchor_amount_ceiling(env: &Env, anchor: &Address) -> Option<i128> {
+/// Returns the slot-based status index for `status` (issue #24).
+///
+/// The index is a `Vec<u64>` of transaction ids in insertion order, stored
+/// under [`DataKey::StatusIndex`]. Reading it is O(1) in the number of
+/// transactions; only the requested page is materialised.
+fn get_status_index(env: &Env, status: &TransactionStatus) -> Vec<u64> {
     env.storage()
         .persistent()
-        .get(&StorageKey::AnchorAmountCeiling(anchor.clone()))
+        .get(&DataKey::StatusIndex(status.clone()))
+        .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Sets a per-anchor amount-ceiling override.
+/// Returns a page of transactions currently in `status`, unauthenticated.
 ///
-/// # Panics
+/// Reads directly from the slot-based status index (issue #24) so the cost is
+/// O(page-size) rather than O(total-transactions): only the `limit` ids in
+/// `[offset, offset + limit)` are resolved to full [`Transaction`] records.
 ///
-/// Panics if `amount` is not strictly positive.
-pub fn set_anchor_amount_ceiling(env: &Env, anchor: &Address, amount: i128) {
-    assert!(amount > 0, "anchor amount ceiling must be positive");
-    env.storage()
-        .persistent()
-        .set(&StorageKey::AnchorAmountCeiling(anchor.clone()), &amount);
+/// # Pagination and consistency
+///
+/// The index is append-ordered and each call re-reads the current index, so
+/// the guaranteed consistency level is **eventually-consistent-per-ledger**:
+/// within a single ledger the page is a consistent snapshot, but a transaction
+/// that transitions out of `status` between two paginated calls may be absent
+/// from (or shifted within) a later page. Callers that need a stable snapshot
+/// across pages should pin to a ledger sequence and re-query on mismatch.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidLimit`] when `limit == 0` or
+/// `limit > MAX_STATUS_PAGE_LIMIT`, per
+/// `test_get_transactions_by_status_rejects_bad_limit`.
+pub fn get_transactions_by_status(
+    env: &Env,
+    status: &TransactionStatus,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<Transaction>, Error> {
+    if limit == 0 || limit > MAX_STATUS_PAGE_LIMIT {
+        return Err(Error::InvalidLimit);
+    }
+
+    let index = get_status_index(env, status);
+    let total = index.len();
+
+    let mut page = Vec::new(env);
+    if offset >= total {
+        return Ok(page);
+    }
+
+    let end = offset.saturating_add(limit).min(total);
+    let mut i = offset;
+    while i < end {
+        let tx_id = index.get_unchecked(i);
+        if let Some(tx) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Transaction>(&DataKey::Transaction(tx_id))
+        {
+            // Skip entries that have transitioned out of `status` since the
+            // index was last compacted; the index is eventually consistent.
+            if tx.status == *status {
+                page.push_back(tx);
+            }
+        }
+        i += 1;
+    }
+
+    Ok(page)
 }
 
-/// Removes a per-anchor amount-ceiling override, causing the anchor to fall
-/// back to the global default ceiling.
-pub fn remove_anchor_amount_ceiling(env: &Env, anchor: &Address) {
-    env.storage()
-        .persistent()
-        .remove(&StorageKey::AnchorAmountCeiling(anchor.clone()));
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{Address, Bytes, Env, String, Vec};
 
-/// Returns the effective amount ceiling for `anchor`.
-///
-/// Resolution order:
-/// 1. The per-anchor override, if set.
-/// 2. Otherwise, the global default ceiling (which itself falls back to
-///    [`DEFAULT_GLOBAL_MAX_AMOUNT`] when unset).
-///
-/// This function never returns `None`: every anchor always has a ceiling.
-pub fn get_effective_amount_ceiling(env: &Env, anchor: &Address) -> i128 {
-    get_anchor_amount_ceiling(env, anchor).unwrap_or_else(|| get_global_max_amount(env))
+    #[test]
+    fn round_trip_preserves_every_field() {
+        let env = Env::default();
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[1, 2, 3, 4]),
+            status: TransactionStatus::Retrying,
+            callback_type: CallbackType::OnFailure,
+            amount: 1_000_000,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "USDC"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 3,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        let restored = unpack(&stored);
+
+        assert_eq!(restored, tx);
+    }
+
+    #[test]
+    fn retry_count_defaults_to_zero_and_round_trips() {
+        let env = Env::default();
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[9, 9]),
+            status: TransactionStatus::Pending,
+            callback_type: CallbackType::None,
+            amount: 0,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "XLM"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 0,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0);
+        assert_eq!(unpack(&stored).retry_count, 0);
+    }
+
+    #[test]
+    fn retry_count_is_masked_to_four_bits() {
+        let env = Env::default();
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[7]),
+            status: TransactionStatus::Retrying,
+            callback_type: CallbackType::OnComplete,
+            amount: 5,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "USDC"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 0xF,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0xF);
+        assert_eq!(unpack(&stored).retry_count, 0xF);
+    }
 }

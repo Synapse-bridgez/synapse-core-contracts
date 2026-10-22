@@ -1,34 +1,39 @@
-I need to see the current content of `src/bench_resources.rs` to make a proper edit. However, the file content provided is empty. Let me check — the prompt says "Current content:" followed by nothing.
-
-Since I don't have the actual file content, I cannot preserve existing functionality. Let me reconsider — perhaps I should look at what's likely there based on the context. But without the actual content, I risk breaking things.
-
-Wait, re-reading: "File: src/bench_resources.rs\nCurrent content:\n\n\nChange type: edit". The content appears to be empty or whitespace. This is unusual for a file that's referenced as feeding "bucket 11's bench_resources.rs".
-
-Given the ambiguity, I'll construct a reasonable `bench_resources.rs` that provides the benchmark scenarios described in the step. Since the file appears empty, I'll create a complete implementation that adds the required benchmark scenarios.
-
-Let me write a benchmark module that:
-1. Has reject-path benchmarks: amount=0, empty idempotency_key, over-long callback_status, lowercase asset_code, stellar_account CRC mismatch, asset_issuer CRC mismatch
-2. Accepted register_callback
-3. Idempotent replay
-
-This is a Soroban contract benchmark file. Let me write it in a way consistent with typical Soroban bench patterns.
-
-```rust
-//! Resource-usage benchmarks for the callback registry contract.
+//! # Resource-usage regression gate (#119)
 //!
-//! These scenarios feed bucket 11's `bench_resources.rs` and reproduce the
-//! cost deltas documented in `COST_MODEL.md` §12.5 for the cheapest-first
-//! validation ordering:
+//! Meters every hot `#[contractimpl]` entry point against the **release WASM**
+//! and compares CPU-instruction / memory-byte cost with the committed
+//! [`resource_baseline.toml`](../resource_baseline.toml). The build fails when
+//! any entry point exceeds its baseline by more than the configured threshold.
 //!
-//! * amount bounds
-//! * host-length checks
-//! * `asset_code`
-//! * `stellar_account` / `asset_issuer` strkey + CRC16
+//! ## Why the release WASM, not the native contract
 //!
-//! Each reject path exercises a single invalid field so the measured cost
-//! isolates the check that fires first under the restored ordering. The
-//! accepted `register_callback` and idempotent replay scenarios provide the
-//! positive-path baselines the deltas are computed against.
+//! Native `cargo test` runs contract code as plain Rust, so the Soroban budget
+//! only sees host calls; guest-side work (strkey base32 + CRC16, loops,
+//! allocations in linear memory) costs nothing there. Registering the built
+//! `.wasm` makes the host meter every executed WASM instruction and linear-memory
+//! grow, which is what validators charge for on-chain.
+//!
+//! ## Determinism
+//!
+//! Soroban metering is a deterministic cost model (instruction counts, not wall
+//! time), so the same WASM + SDK version yields identical numbers on every
+//! machine; CI runner noise does not apply. The numbers *do* move when the
+//! WASM changes — including a different `rustc` producing different code —
+//! which is why the CI job pins the toolchain (see `.github/workflows/`).
+//!
+//! ## Running
+//!
+//! The gate is a no-op in plain `cargo test`; it is driven by
+//! `scripts/check_resource_budget.sh` (or `make resource-gate`), which sets:
+//!
+//! | Variable                          | Meaning                                                  |
+//! |-----------------------------------|----------------------------------------------------------|
+//! | `SYNAPSE_RESOURCE_GATE=1`         | enable the gate                                          |
+//! | `SYNAPSE_RESOURCE_WASM`           | path to the release WASM                                 |
+//! | `SYNAPSE_RESOURCE_BASELINE`       | path to the baseline file                                |
+//! | `SYNAPSE_RESOURCE_THRESHOLD_PCT`  | override the baseline's `threshold_pct`                  |
+//! | `SYNAPSE_RESOURCE_UPDATE=1`       | rewrite the baseline from the current measurements       |
+//! | `SYNAPSE_RESOURCE_INJECT`         | `scenario:pct` — inflate one measurement (CI self-test)  |
 
 #![cfg(test)]
 
@@ -43,751 +48,664 @@ const VALID_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 /// A valid 56-character asset issuer strkey (G...).
 const VALID_ISSUER: &str = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 /// A valid 4-character asset code.
-const VALID_ASSET_CODE: &str = "USDC";
-
-/// Builds a fresh contract instance for a benchmark scenario.
-fn setup(env: &Env) -> (CallbackRegistryClient<'_>, Address) {
-    let contract_id = env.register_contract(None, CallbackRegistry);
-    let client = CallbackRegistryClient::new(env, &contract_id);
-    let admin = Address::generate(env);
-    client.initialize(&admin);
-    (client, admin)
-}
-
-// ... etc
-```
-
-Hmm, but I don't know the actual contract API. This is risky. Without the real file content and real contract API, I'd be guessing at method names, types, etc.
-
-Given the constraints, the safest interpretation: the file is empty, and I need to produce a complete file. But I genuinely don't know the contract's API surface.
-
-Let me reconsider the situation. The task says "Return the COMPLETE new file content." If the current content is empty, I return a complete new file. But I need to make it compile against the actual contract.
-
-Since I can't see the contract, I'll make reasonable assumptions based on the issue description:
-- `Validator::validate_payload` in `src/validation.rs`
-- `register_callback` method
-- Fields: `amount`, `idempotency_key`, `callback_status`, `asset_code`, `stellar_account`, `asset_issuer`
-
-Let me write a benchmark file that's self-contained and uses these field names. I'll structure it as a set of `#[test]` functions that measure resource usage via `env.budget()`.
-
-Actually, given the deep uncertainty, let me write something that's plausible and complete, using the standard Soroban budget measurement pattern. I'll make it defensive with helper functions.
-
-Given the risk, I'll produce a well-structured file that:
-1. Documents the §12.5 ordering
-2. Provides benchmark functions for each scenario
-3. Uses `env.budget().reset_unlimited()` and measures CPU/memory
-
-Let me write it:
-
-```rust
-//! Resource-usage benchmarks for the callback registry contract.
-//!
-//! These scenarios reproduce the cost deltas documented in `COST_MODEL.md`
-//! §12.5 for the restored cheapest-first validation ordering:
-//!
-//! 1. amount bounds
-//! 2. host-length checks
-//! 3. `asset_code`
-//! 4. `stellar_account` / `asset_issuer` strkey + CRC16
-//!
-//! Each reject path exercises exactly one invalid field so the measured cost
-//! isolates the check that fires first under the restored ordering. The
-//! accepted `register_callback` and idempotent replay scenarios provide the
-//! positive-path baselines the deltas are computed against.
-//!
-//! The scenarios are gated against `resource_baseline.toml`; run with
-//! `cargo test --features testutils bench_ -- --nocapture` to print the
-//! measured CPU-instruction and memory deltas.
+c
 
 #![cfg(test)]
 
 extern crate std;
 
-use soroban_sdk::{
-    testutils::{Address as _, Budget},
-    Address, Env, String,
+use std::{
+    borrow::ToOwned,
+    collections::BTreeMap,
+    eprintln, format,
+    string::{String as StdString, ToString},
+    vec::Vec,
 };
 
-use crate::{CallbackRegistry, CallbackRegistryClient};
+use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
-/// Valid 56-character Stellar account strkey (`G...`).
-const VALID_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-/// Valid 56-character asset issuer strkey (`G...`).
-const VALID_ISSUER: &str = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-/// Valid asset code.
-const VALID_ASSET_CODE: &str = "USDC";
-/// Valid idempotency key.
-const VALID_IDEMPOTENCY_KEY: &str = "idem-key-0001";
-/// Valid callback status.
-const VALID_CALLBACK_STATUS: &str = "pending";
+use crate::types::{CallbackPayload, CallbackType};
+use crate::SynapseCoreContractClient;
 
-/// Registers a fresh contract and returns a client plus the admin address.
-fn setup(env: &Env) -> (CallbackRegistryClient<'_>, Address) {
-    let contract_id = env.register_contract(None, CallbackRegistry);
-    let client = CallbackRegistryClient::new(env, &contract_id);
-    let admin = Address::generate(env);
-    client.initialize(&admin);
-    (client, admin)
+/// Default threshold used when the baseline file omits `threshold_pct`.
+const DEFAULT_THRESHOLD_PCT: u64 = 15;
+
+/// Checksum-valid SEP-23 G-address.
+const G_VALID: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+/// Same shape as [`G_VALID`] with one character changed so only CRC16 fails —
+/// the most expensive way for a strkey to be rejected.
+const G_BAD_CRC: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGY";
+
+// ─── Measurement ─────────────────────────────────────────────────────────────
+
+/// CPU-instruction and memory-byte cost of one metered call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cost {
+    pub cpu_insns: u64,
+    pub mem_bytes: u64,
 }
 
-/// Measures the CPU instructions and memory bytes consumed by `f`.
-fn measure<F: FnOnce()>(env: &Env, f: F) -> (u64, u64) {
-    env.budget().reset_unlimited();
-    f();
-    let cpu = env.budget().cpu_instruction_cost();
-    let mem = env.budget().memory_bytes_cost();
-    (cpu, mem)
+/// Fresh env with the release WASM registered and initialised.
+struct Harness {
+    env: Env,
+    client: SynapseCoreContractClient<'static>,
+    relay: Address,
 }
 
-/// Builds a valid `register_callback` payload, allowing a single field to be
-/// overridden for a reject-path scenario.
-#[allow(clippy::too_many_arguments)]
-fn register(
-    client: &CallbackRegistryClient<'_>,
-    caller: &Address,
-    amount: i128,
-    idempotency_key: &str,
-    callback_status: &str,
-    asset_code: &str,
-    stellar_account: &str,
-    asset_issuer: &str,
-) -> bool {
-    client
-        .try_register_callback(
-            caller,
-            &amount,
-            &String::from_str(client.env(), idempotency_key),
-            &String::from_str(client.env(), callback_status),
-            &String::from_str(client.env(), asset_code),
-            &String::from_str(client.env(), stellar_account),
-            &String::from_str(client.env(), asset_issuer),
-        )
-        .is_ok()
-}
-```
+impl Harness {
+    fn new(wasm: &[u8]) -> Self {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        env.mock_all_auths();
+        let contract_id = env.register(wasm, ());
+        let client = SynapseCoreContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let relay = Address::generate(&env);
+        client.initialize(&admin, &relay);
+        Harness { env, client, relay }
+    }
 
-Hmm, this is getting too speculative. The `try_register_callback` signature and `client.env()` may not exist.
+    /// Meter exactly the calls made inside `f`.
+    fn measure(&self, f: impl FnOnce()) -> Cost {
+        let mut budget = self.env.cost_estimate().budget();
+        budget.reset_unlimited();
+        f();
+        Cost {
+            cpu_insns: budget.cpu_instruction_cost(),
+            mem_bytes: budget.memory_bytes_cost(),
+        }
+    }
 
-I think the honest answer here is: I cannot reliably produce this file without the actual content and contract API. But the task demands a complete file.
+    fn s(&self, v: &str) -> String {
+        String::from_str(&self.env, v)
+    }
 
-Let me take a different, more conservative approach: write the benchmark file in a way that's most likely to match a typical Soroban contract, and clearly structured. I'll assume:
-- `CallbackRegistryClient` with `register_callback` taking `(caller, amount, idempotency_key, callback_status, asset_code, stellar_account, asset_issuer)`
-- `try_register_callback` returns `Result<..., ...>`
+    fn payload(&self, tx_id: &str, idem: &str) -> CallbackPayload {
+        CallbackPayload {
+            transaction_id: self.s(tx_id),
+            stellar_account: self.s(G_VALID),
+            amount: 10_000_000,
+            asset_code: self.s("USDC"),
+            asset_issuer: self.s(G_VALID),
+            idempotency_key: self.s(idem),
+            anchor_transaction_id: self.s("anchor-tx-abc123"),
+            callback_type: CallbackType::Deposit,
+            callback_status: self.s("pending_external"),
+        }
+    }
 
-Actually, I realize I should just commit to a reasonable implementation. Let me finalize.
-
-Given the extreme uncertainty, I'll produce a complete, well-documented file that implements the benchmark scenarios. I'll use `try_register_callback` and standard Soroban testutils. This is my best effort.
-
-Let me write the final version carefully:
-
-```rust
-//! Resource-usage benchmarks for the callback registry contract.
-//!
-//! These scenarios reproduce the cost deltas documented in `COST_MODEL.md`
-//! §12.5 for the restored cheapest-first validation ordering:
-//!
-//! 1. amount bounds
-//! 2. host-length checks
-//! 3. `asset_code`
-//! 4. `stellar_account` / `asset_issuer` strkey + CRC16
-//!
-//! Each reject path exercises exactly one invalid field so the measured cost
-//! isolates the check that fires first under the restored ordering. The
-//! accepted `register_callback` and idempotent replay scenarios provide the
-//! positive-path baselines the deltas are computed against.
-//!
-//! The scenarios are gated against `resource_baseline.toml`; run with
-//! `cargo test --features testutils bench_ -- --nocapture` to print the
-//! measured CPU-instruction and memory deltas.
-
-#![cfg(test)]
-
-extern crate std;
-
-use soroban_sdk::{
-    testutils::{Address as _, Budget},
-    Address, Env, String,
-};
-
-use crate::{CallbackRegistry, CallbackRegistryClient};
-
-/// Valid 56-character Stellar account strkey (`G...`).
-const VALID_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-/// Valid 56-character asset issuer strkey (`G...`).
-const VALID_ISSUER: &str = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-/// Valid asset code.
-const VALID_ASSET_CODE: &str = "USDC";
-/// Valid idempotency key.
-const VALID_IDEMPOTENCY_KEY: &str = "idem-key-0001";
-/// Valid callback status.
-const VALID_CALLBACK_STATUS: &str = "pending";
-
-/// Registers a fresh contract and returns a client plus the admin address.
-fn setup(env: &Env) -> (CallbackRegistryClient<'_>, Address) {
-    let contract_id = env.register_contract(None, CallbackRegistry);
-    let client = CallbackRegistryClient::new(env, &contract_id);
-    let admin = Address::generate(env);
-    client.initialize(&admin);
-    (client, admin)
+    /// Register `tx-1` and return its id.
+    fn registered(&self) -> String {
+        self.client
+            .register_callback(&self.payload("tx-1", "idem-1"))
+    }
 }
 
-/// Measures the CPU instructions and memory bytes consumed by `f`.
-fn measure<F: FnOnce()>(env: &Env, f: F) -> (u64, u64) {
-    env.budget().reset_unlimited();
-    f();
-    let cpu = env.budget().cpu_instruction_cost();
-    let mem = env.budget().memory_bytes_cost();
-    (cpu, mem)
+/// A named, self-contained scenario: builds its own preconditions, then meters
+/// only the entry-point call under test.
+struct Scenario {
+    name: &'static str,
+    run: fn(&Harness) -> Cost,
 }
 
-/// Builds a valid `register_callback` payload, allowing a single field to be
-/// overridden for a reject-path scenario.
-#[allow(clippy::too_many_arguments)]
-fn register(
-    client: &CallbackRegistryClient<'_>,
-    caller: &Address,
-    amount: i128,
-    idempotency_key: &str,
-    callback_status: &str,
-    asset_code: &str,
-    stellar_account: &str,
-    asset_issuer: &str,
-) -> bool {
-    let env = client.env();
-    client
-        .try_register_callback(
-            caller,
-            &amount,
-            &String::from_str(env, idempotency_key),
-            &String::from_str(env, callback_status),
-            &String::from_str(env, asset_code),
-            &String::from_str(env, stellar_account),
-            &String::from_str(env, asset_issuer),
-        )
-        .is_ok()
+/// Every metered scenario. Names are the keys in `resource_baseline.toml`.
+///
+/// `register_callback_reject_*` cover each validation failure path (#120):
+/// they meter how cheaply malformed input is turned away.
+fn scenarios() -> Vec<Scenario> {
+    Vec::from([
+        Scenario {
+            name: "register_callback",
+            run: |h| {
+                let p = h.payload("tx-1", "idem-1");
+                h.measure(|| {
+                    h.client.register_callback(&p);
+                })
+            },
+        },
+        Scenario {
+            name: "register_callback_idempotent_replay",
+            run: |h| {
+                let p = h.payload("tx-1", "idem-1");
+                h.client.register_callback(&p);
+                h.measure(|| {
+                    h.client.register_callback(&p);
+                })
+            },
+        },
+        Scenario {
+            name: "register_callback_reject_amount",
+            run: |h| {
+                let mut p = h.payload("tx-1", "idem-1");
+                p.amount = 0;
+                h.measure(|| {
+                    assert!(h.client.try_register_callback(&p).is_err());
+                })
+            },
+        },
+        Scenario {
+            name: "register_callback_reject_idempotency_key",
+            run: |h| {
+                let p = h.payload("tx-1", "");
+                h.measure(|| {
+                    assert!(h.client.try_register_callback(&p).is_err());
+                })
+            },
+        },
+        Scenario {
+            name: "register_callback_reject_callback_status_len",
+            run: |h| {
+                let mut p = h.payload("tx-1", "idem-1");
+                p.callback_status = h.s("x".repeat(33).as_str());
+                h.measure(|| {
+                    assert!(h.client.try_register_callback(&p).is_err());
+                })
+            },
+        },
+        Scenario {
+            name: "register_callback_reject_asset_code",
+            run: |h| {
+                let mut p = h.payload("tx-1", "idem-1");
+                p.asset_code = h.s("usdc");
+                h.measure(|| {
+                    assert!(h.client.try_register_callback(&p).is_err());
+                })
+            },
+        },
+        Scenario {
+            name: "register_callback_reject_account_checksum",
+            run: |h| {
+                let mut p = h.payload("tx-1", "idem-1");
+                p.stellar_account = h.s(G_BAD_CRC);
+                h.measure(|| {
+                    assert!(h.client.try_register_callback(&p).is_err());
+                })
+            },
+        },
+        Scenario {
+            name: "register_callback_reject_issuer_checksum",
+            run: |h| {
+                let mut p = h.payload("tx-1", "idem-1");
+                p.asset_issuer = h.s(G_BAD_CRC);
+                h.measure(|| {
+                    assert!(h.client.try_register_callback(&p).is_err());
+                })
+            },
+        },
+        Scenario {
+            name: "start_processing",
+            run: |h| {
+                let id = h.registered();
+                h.measure(|| h.client.start_processing(&id, &h.relay))
+            },
+        },
+        Scenario {
+            name: "complete_transaction",
+            run: |h| {
+                let id = h.registered();
+                h.client.start_processing(&id, &h.relay);
+                let hash = h.s("d3b07384d113edec49eaa6238ad5ff00a975b0a5b2c6b2b13d7b6e6e10f7b3c1");
+                h.measure(|| h.client.complete_transaction(&id, &hash, &h.relay))
+            },
+        },
+        Scenario {
+            name: "fail_transaction",
+            run: |h| {
+                let id = h.registered();
+                let reason = h.s("horizon_timeout");
+                h.measure(|| h.client.fail_transaction(&id, &reason, &h.relay))
+            },
+        },
+        Scenario {
+            name: "get_transaction",
+            run: |h| {
+                let id = h.registered();
+                h.measure(|| {
+                    h.client.get_transaction(&id);
+                })
+            },
+        },
+        Scenario {
+            name: "propose_admin",
+            run: |h| {
+                let nominee = Address::generate(&h.env);
+                h.measure(|| h.client.propose_admin(&nominee))
+            },
+        },
+        Scenario {
+            name: "accept_admin",
+            run: |h| {
+                let nominee = Address::generate(&h.env);
+                h.client.propose_admin(&nominee);
+                h.measure(|| h.client.accept_admin(&nominee))
+            },
+        },
+        Scenario {
+            name: "set_relay_signer",
+            run: |h| {
+                let signer = Address::generate(&h.env);
+                h.measure(|| h.client.set_relay_signer(&signer))
+            },
+        },
+        Scenario {
+            name: "pause",
+            run: |h| h.measure(|| h.client.pause()),
+        },
+        Scenario {
+            name: "unpause",
+            run: |h| {
+                h.client.pause();
+                h.measure(|| h.client.unpause())
+            },
+        },
+        Scenario {
+            name: "set_param",
+            run: |h| {
+                let name = h.s("slash_bps");
+                h.measure(|| h.client.set_param(&name, &5_000))
+            },
+        },
+        Scenario {
+            name: "bond_collateral",
+            run: |h| h.measure(|| h.client.bond_collateral(&h.relay, &1_000)),
+        },
+    ])
 }
-```
 
-Hmm, `client.env()` — I'm not sure that exists. In Soroban, `CallbackRegistryClient` doesn't typically expose `env()`. Let me pass `env` explicitly instead.
+/// Name of the scenario recording the fixed per-invocation cost.
+const OVERHEAD: &str = "invocation_overhead";
 
-Let me restructure to pass `env` explicitly:
-
-```rust
-fn register(
-    env: &Env,
-    client: &CallbackRegistryClient<'_>,
-    caller: &Address,
-    amount: i128,
-    idempotency_key: &str,
-    callback_status: &str,
-    asset_code: &str,
-    stellar_account: &str,
-    asset_issuer: &str,
-) -> bool {
-    client
-        .try_register_callback(
-            caller,
-            &amount,
-            &String::from_str(env, idempotency_key),
-            &String::from_str(env, callback_status),
-            &String::from_str(env, asset_code),
-            &String::from_str(env, stellar_account),
-            &String::from_str(env, asset_issuer),
-        )
-        .is_ok()
-}
-```
-
-OK. Now the benchmark tests. Each test:
-1. Sets up env + contract
-2. Measures the operation
-3. Asserts outcome (reject or accept)
-4. Prints the measured cost
-
-Let me write them:
-
-```rust
-#[test]
-fn bench_reject_amount_zero() {
-    let env = Env::default();
-    let (client, admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(&env, &client, &caller, 0, VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS, VALID_ASSET_CODE, VALID_ACCOUNT, VALID_ISSUER);
-        assert!(!ok, "amount=0 must be rejected");
+/// Run every scenario in its own fresh env so no scenario's storage or VM
+/// cache state leaks into another's numbers.
+///
+/// Each call pays a fixed ~3M-instruction / ~1.7 MB cost to instantiate the
+/// WASM VM, which would drown out entry-point regressions under a percentage
+/// threshold. So [`OVERHEAD`] meters a trivial `health()` call on its own
+/// (catching WASM-size bloat), and every other scenario is recorded *net* of
+/// it — the work the entry point itself does.
+fn measure_all(wasm: &[u8]) -> BTreeMap<StdString, Cost> {
+    let h = Harness::new(wasm);
+    let overhead = h.measure(|| {
+        h.client.health();
     });
-    std::println!("bench_reject_amount_zero: cpu={cpu} mem={mem}");
-}
-```
-
-Wait, `measure` takes `&Env` and `f: FnOnce()`. But `f` captures `env` by reference too. That's fine since `measure` takes `&Env` and `f` borrows `env` immutably. Actually there's a borrow issue: `measure(&env, || { ... register(&env, ...) ... })` — the closure borrows `env` immutably, and `measure` also takes `&env`. Both immutable borrows, so OK.
-
-But `env.budget().reset_unlimited()` — does `reset_unlimited` exist? In Soroban testutils, `Budget::reset_unlimited()` exists. And `cpu_instruction_cost()` / `memory_bytes_cost()` exist. Good.
-
-Actually, `env.budget()` returns a `Budget` by value in some versions. Let me use `env.budget().reset_unlimited()` — this is the standard pattern.
-
-Now, the `register` helper returns `bool` via `.is_ok()`. But `try_register_callback` returns `Result<Result<T, E>, InvokeError>` in Soroban. So `.is_ok()` on the outer Result would be true even if the inner is Err. I need to handle this.
-
-In Soroban, `try_<method>` returns `Result<Result<T, E>, InvokeError>`. So to check success, I need `matches!(result, Ok(Ok(_)))`.
-
-Let me fix:
-
-```rust
-fn register(...) -> bool {
-    matches!(
-        client.try_register_callback(...),
-        Ok(Ok(_))
-    )
-}
-```
-
-Hmm, but the return type of `register_callback` might be `()` or something. `Ok(Ok(()))` works.
-
-Actually, let me make it return the full result and let callers assert. Or return a bool via `matches!`.
-
-Let me use:
-```rust
-fn register(...) -> bool {
-    client.try_register_callback(...).is_ok()
-}
-```
-
-No — as noted, outer is_ok is true for inner Err. Use `matches!(..., Ok(Ok(_)))`.
-
-OK let me finalize. I'll write the complete file now.
-
-Actually, I realize I'm spending too much effort on speculation. Let me just produce a clean, complete, plausible file. I'll commit to the API shape and write it.
-
-One more consideration: the `measure` function resets budget then runs `f`. But `f` might itself call `env.budget()` — no, it calls contract methods. Fine.
-
-Also, for the accepted register_callback benchmark, I need to measure a successful registration. For idempotent replay, I register once (outside measurement), then measure the replay.
-
-Let me write the final file:
-
-```rust
-//! Resource-usage benchmarks for the callback registry contract.
-//!
-//! These scenarios reproduce the cost deltas documented in `COST_MODEL.md`
-//! §12.5 for the restored cheapest-first validation ordering:
-//!
-//! 1. amount bounds
-//! 2. host-length checks
-//! 3. `asset_code`
-//! 4. `stellar_account` / `asset_issuer` strkey + CRC16
-//!
-//! Each reject path exercises exactly one invalid field so the measured cost
-//! isolates the check that fires first under the restored ordering. The
-//! accepted `register_callback` and idempotent replay scenarios provide the
-//! positive-path baselines the deltas are computed against.
-//!
-//! The scenarios are gated against `resource_baseline.toml`; run with
-//! `cargo test --features testutils bench_ -- --nocapture` to print the
-//! measured CPU-instruction and memory deltas.
-
-#![cfg(test)]
-
-extern crate std;
-
-use soroban_sdk::{
-    testutils::{Address as _, Budget},
-    Address, Env, String,
-};
-
-use crate::{CallbackRegistry, CallbackRegistryClient};
-
-/// Valid 56-character Stellar account strkey (`G...`).
-const VALID_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-/// Valid 56-character asset issuer strkey (`G...`).
-const VALID_ISSUER: &str = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-/// Valid asset code.
-const VALID_ASSET_CODE: &str = "USDC";
-/// Valid idempotency key.
-const VALID_IDEMPOTENCY_KEY: &str = "idem-key-0001";
-/// Valid callback status.
-const VALID_CALLBACK_STATUS: &str = "pending";
-
-/// Registers a fresh contract and returns a client plus the admin address.
-fn setup(env: &Env) -> (CallbackRegistryClient<'_>, Address) {
-    let contract_id = env.register_contract(None, CallbackRegistry);
-    let client = CallbackRegistryClient::new(env, &contract_id);
-    let admin = Address::generate(env);
-    client.initialize(&admin);
-    (client, admin)
+    let mut out = BTreeMap::from([(OVERHEAD.to_owned(), overhead)]);
+    for sc in scenarios() {
+        let h = Harness::new(wasm);
+        let total = (sc.run)(&h);
+        let net = Cost {
+            cpu_insns: total.cpu_insns.saturating_sub(overhead.cpu_insns),
+            mem_bytes: total.mem_bytes.saturating_sub(overhead.mem_bytes),
+        };
+        out.insert(sc.name.to_owned(), net);
+    }
+    out
 }
 
-/// Measures the CPU instructions and memory bytes consumed by `f`.
-fn measure<F: FnOnce()>(env: &Env, f: F) -> (u64, u64) {
-    env.budget().reset_unlimited();
-    f();
-    let cpu = env.budget().cpu_instruction_cost();
-    let mem = env.budget().memory_bytes_cost();
-    (cpu, mem)
+// ─── Baseline file ───────────────────────────────────────────────────────────
+
+/// Parsed `resource_baseline.toml`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Baseline {
+    pub threshold_pct: u64,
+    pub entries: BTreeMap<StdString, Cost>,
 }
 
-/// Invokes `register_callback` with the given field values, returning `true`
-/// when the call succeeds.
-#[allow(clippy::too_many_arguments)]
-fn register(
-    env: &Env,
-    client: &CallbackRegistryClient<'_>,
-    caller: &Address,
-    amount: i128,
-    idempotency_key: &str,
-    callback_status: &str,
-    asset_code: &str,
-    stellar_account: &str,
-    asset_issuer: &str,
-) -> bool {
-    matches!(
-        client.try_register_callback(
-            caller,
-            &amount,
-            &String::from_str(env, idempotency_key),
-            &String::from_str(env, callback_status),
-            &String::from_str(env, asset_code),
-            &String::from_str(env, stellar_account),
-            &String::from_str(env, asset_issuer),
-        ),
-        Ok(Ok(_))
-    )
+/// Parse the minimal TOML subset the baseline uses: a top-level
+/// `threshold_pct`, then one `[scenario]` table per entry with integer
+/// `cpu_insns` / `mem_bytes`. Underscore digit separators are accepted.
+pub(crate) fn parse_baseline(src: &str) -> Result<Baseline, StdString> {
+    let mut threshold_pct = DEFAULT_THRESHOLD_PCT;
+    let mut entries: BTreeMap<StdString, (Option<u64>, Option<u64>)> = BTreeMap::new();
+    let mut section: Option<StdString> = None;
+
+    for (lineno, raw) in src.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            let name = name.trim().to_owned();
+            entries.entry(name.clone()).or_default();
+            section = Some(name);
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| format!("line {}: expected `key = value`", lineno + 1))?;
+        let value: u64 =
+            value.trim().replace('_', "").parse().map_err(|_| {
+                format!("line {}: `{}` is not an integer", lineno + 1, value.trim())
+            })?;
+        match (section.as_deref(), key.trim()) {
+            (None, "threshold_pct") => threshold_pct = value,
+            (Some(s), "cpu_insns") => entries.get_mut(s).unwrap().0 = Some(value),
+            (Some(s), "mem_bytes") => entries.get_mut(s).unwrap().1 = Some(value),
+            (_, k) => return Err(format!("line {}: unknown key `{k}`", lineno + 1)),
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    for (name, (cpu, mem)) in entries {
+        match (cpu, mem) {
+            (Some(cpu_insns), Some(mem_bytes)) => {
+                out.insert(
+                    name,
+                    Cost {
+                        cpu_insns,
+                        mem_bytes,
+                    },
+                );
+            }
+            _ => return Err(format!("[{name}] needs both cpu_insns and mem_bytes")),
+        }
+    }
+    Ok(Baseline {
+        threshold_pct,
+        entries: out,
+    })
 }
 
-/// Reject path: `amount` below the minimum bound (fires first).
-#[test]
-fn bench_reject_amount_zero() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            0,
-            VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE, VALID_ACCOUNT, VALID_ISSUER,
-        );
-        assert!(!ok, "amount=0 must be rejected");
-    });
-    std::println!("bench_reject_amount_zero: cpu={cpu} mem={mem}");
-}
-
-/// Reject path: empty `idempotency_key` (host-length check).
-#[test]
-fn bench_reject_empty_idempotency_key() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            1_000,
-            "", VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE, VALID_ACCOUNT, VALID_ISSUER,
-        );
-        assert!(!ok, "empty idempotency_key must be rejected");
-    });
-    std::println!("bench_reject_empty_idempotency_key: cpu={cpu} mem={mem}");
-}
-
-/// Reject path: over-long `callback_status` (host-length check).
-#[test]
-fn bench_reject_overlong_callback_status() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let overlong = "x".repeat(256);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            1_000,
-            VALID_IDEMPOTENCY_KEY, &overlong,
-            VALID_ASSET_CODE, VALID_ACCOUNT, VALID_ISSUER,
-        );
-        assert!(!ok, "over-long callback_status must be rejected");
-    });
-    std::println!("bench_reject_overlong_callback_status: cpu={cpu} mem={mem}");
-}
-
-/// Reject path: lowercase `asset_code` (checked before strkey decode).
-#[test]
-fn bench_reject_lowercase_asset_code() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            1_000,
-            VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS,
-            "usdc", VALID_ACCOUNT, VALID_ISSUER,
-        );
-        assert!(!ok, "lowercase asset_code must be rejected");
-    });
-    std::println!("bench_reject_lowercase_asset_code: cpu={cpu} mem={mem}");
-}
-
-/// Reject path: `stellar_account` with a corrupted CRC16 (first strkey check).
-#[test]
-fn bench_reject_stellar_account_crc_mismatch() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    // Flip the final character so the CRC16 no longer matches.
-    let bad_account = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHG";
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            1_000,
-            VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE, bad_account, VALID_ISSUER,
-        );
-        assert!(!ok, "stellar_account CRC mismatch must be rejected");
-    });
-    std::println!("bench_reject_stellar_account_crc_mismatch: cpu={cpu} mem={mem}");
-}
-
-/// Reject path: `asset_issuer` with a corrupted CRC16 (worst case — both
-/// strkey checks run before rejection).
-#[test]
-fn bench_reject_asset_issuer_crc_mismatch() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let bad_issuer = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBG";
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            1_000,
-            VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE, VALID_ACCOUNT, bad_issuer,
-        );
-        assert!(!ok, "asset_issuer CRC mismatch must be rejected");
-    });
-    std::println!("bench_reject_asset_issuer_crc_mismatch: cpu={cpu} mem={mem}");
-}
-
-/// Accepted path: a fully valid `register_callback`.
-#[test]
-fn bench_accept_register_callback() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            1_000,
-            VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE, VALID_ACCOUNT, VALID_ISSUER,
-        );
-        assert!(ok, "valid register_callback must be accepted");
-    });
-    std::println!("bench_accept_register_callback: cpu={cpu} mem={mem}");
-}
-
-/// Accepted path: idempotent replay of an already-registered callback.
-#[test]
-fn bench_accept_idempotent_replay() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    // Prime the registry with the first registration.
-    let first = register(
-        &env, &client, &caller,
-        1_000,
-        VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS,
-        VALID_ASSET_CODE, VALID_ACCOUNT, VALID_ISSUER,
+/// Render measurements as a baseline file (used by `--update`).
+fn render_baseline(threshold_pct: u64, measured: &BTreeMap<StdString, Cost>) -> StdString {
+    let mut s = StdString::from(
+        "# Resource-usage baseline for the release WASM (#119).\n\
+         #\n\
+         # Generated by `scripts/check_resource_budget.sh --update`; do not edit\n\
+         # numbers by hand. See COST_MODEL.md §12 for the update process.\n\n",
     );
-    assert!(first, "priming registration must succeed");
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env, &client, &caller,
-            1_000,
-            VALID_IDEMPOTENCY_KEY, VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE, VALID_ACCOUNT, VALID_ISSUER,
-        );
-        assert!(ok, "idempotent replay must be accepted");
-    });
-    std::println!("bench_accept_idempotent_replay: cpu={cpu} mem={mem}");
-}
-```
-
-Wait — `"x".repeat(256)` requires `alloc::string::String` and the `repeat` method. In `#![cfg(test)]` with `extern crate std;`, `std::string::String` is available. But `"x".repeat(256)` returns `std::string::String`. Then `&overlong` is `&std::string::String`, which derefs to `&str`. That works.
-
-But there's a subtlety: `String::from_str(env, &overlong)` — `&overlong` is `&std::string::String`, needs `&str`. Deref coercion should handle it. Actually, `String::from_str` takes `&str`, and `&overlong` where `overlong: std::string::String` — deref coercion from `&String` to `&str` works. Good.
-
-Also `env.budget()` — in newer Soroban, `Env::budget()` returns `&Budget` or `Budget`. `reset_unlimited()` and `cpu_instruction_cost()` are methods. Should be fine.
-
-One concern: `measure` takes `&Env` and `f: FnOnce()`. The closure captures `&env` (immutable). `measure(&env, closure)` — both borrow `env` immutably. OK.
-
-But wait: inside `measure`, `env.budget().reset_unlimited()` — if `budget()` returns `&Budget`, then `reset_unlimited` takes `&self` or `&mut self`? In Soroban, `Budget::reset_unlimited(&self)` — actually it's `pub fn reset_unlimited(&self)`. Let me assume it works.
-
-Also `cpu_instruction_cost()` returns `u64`. Good.
-
-I think this is a reasonable complete file. Let me also double check: the issue says "feeds bucket 11's bench_resources.rs". So this file is the benchmark file. Good.
-
-Let me also reconsider whether `#![cfg(test)]` is appropriate. If the file is only compiled in test mode, that's fine for benchmarks. But if it's included via `mod bench_resources;` in lib.rs unconditionally, then `#![cfg(test)]` at the top of the module file would make the whole module empty in non-test builds — which is fine.
-
-Actually, `#![cfg(test)]` as an inner attribute at the top of a module file works to conditionally compile the module. Good.
-
-Let me finalize. I'll also add a note about the exhaustive 2^8 test being in validation.rs, not here — but the step only asks for benchmark scenarios here.
-
-Final answer below.```rust
-//! Resource-usage benchmarks for the callback registry contract.
-//!
-//! These scenarios reproduce the cost deltas documented in `COST_MODEL.md`
-//! §12.5 for the restored cheapest-first validation ordering:
-//!
-//! 1. amount bounds
-//! 2. host-length checks
-//! 3. `asset_code`
-//! 4. `stellar_account` / `asset_issuer` strkey + CRC16
-//!
-//! Each reject path exercises exactly one invalid field so the measured cost
-//! isolates the check that fires first under the restored ordering. The
-//! accepted `register_callback` and idempotent replay scenarios provide the
-//! positive-path baselines the deltas are computed against.
-//!
-//! The scenarios are gated against `resource_baseline.toml`; run with
-//! `cargo test --features testutils bench_ -- --nocapture` to print the
-//! measured CPU-instruction and memory deltas.
-
-#![cfg(test)]
-
-extern crate std;
-
-use soroban_sdk::{
-    testutils::{Address as _, Budget},
-    Address, Env, String,
-};
-
-use crate::{CallbackRegistry, CallbackRegistryClient};
-
-/// Valid 56-character Stellar account strkey (`G...`).
-const VALID_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-/// Valid 56-character asset issuer strkey (`G...`).
-const VALID_ISSUER: &str = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-/// Valid asset code.
-const VALID_ASSET_CODE: &str = "USDC";
-/// Valid idempotency key.
-const VALID_IDEMPOTENCY_KEY: &str = "idem-key-0001";
-/// Valid callback status.
-const VALID_CALLBACK_STATUS: &str = "pending";
-
-/// Registers a fresh contract and returns a client plus the admin address.
-fn setup(env: &Env) -> (CallbackRegistryClient<'_>, Address) {
-    let contract_id = env.register_contract(None, CallbackRegistry);
-    let client = CallbackRegistryClient::new(env, &contract_id);
-    let admin = Address::generate(env);
-    client.initialize(&admin);
-    (client, admin)
+    s.push_str(&format!("threshold_pct = {threshold_pct}\n"));
+    for (name, c) in measured {
+        s.push_str(&format!(
+            "\n[{name}]\ncpu_insns = {}\nmem_bytes = {}\n",
+            c.cpu_insns, c.mem_bytes
+        ));
+    }
+    s
 }
 
-/// Measures the CPU instructions and memory bytes consumed by `f`.
-fn measure<F: FnOnce()>(env: &Env, f: F) -> (u64, u64) {
-    env.budget().reset_unlimited();
-    f();
-    let cpu = env.budget().cpu_instruction_cost();
-    let mem = env.budget().memory_bytes_cost();
-    (cpu, mem)
+// ─── Comparison ──────────────────────────────────────────────────────────────
+
+/// Outcome of comparing one metric against its baseline.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Finding {
+    /// `measured` exceeds `baseline` by more than the threshold.
+    Regressed {
+        scenario: StdString,
+        metric: &'static str,
+        baseline: u64,
+        measured: u64,
+    },
+    /// A scenario is metered but has no baseline entry.
+    MissingBaseline { scenario: StdString },
+    /// A baseline entry has no corresponding scenario (renamed/removed).
+    StaleBaseline { scenario: StdString },
 }
 
-/// Invokes `register_callback` with the given field values, returning `true`
-/// when the call succeeds.
-#[allow(clippy::too_many_arguments)]
-fn register(
-    env: &Env,
-    client: &CallbackRegistryClient<'_>,
-    caller: &Address,
-    amount: i128,
-    idempotency_key: &str,
-    callback_status: &str,
-    asset_code: &str,
-    stellar_account: &str,
-    asset_issuer: &str,
-) -> bool {
-    matches!(
-        client.try_register_callback(
-            caller,
-            &amount,
-            &String::from_str(env, idempotency_key),
-            &String::from_str(env, callback_status),
-            &String::from_str(env, asset_code),
-            &String::from_str(env, stellar_account),
-            &String::from_str(env, asset_issuer),
+/// Signed percentage change from `base` to `now`, in tenths of a percent.
+fn delta_permille(base: u64, now: u64) -> i128 {
+    if base == 0 {
+        return if now == 0 { 0 } else { i128::MAX };
+    }
+    (now as i128 - base as i128) * 1000 / base as i128
+}
+
+/// `true` when `now` is more than `threshold_pct` above `base`.
+/// Exactly-at-threshold passes.
+pub(crate) fn exceeds(base: u64, now: u64, threshold_pct: u64) -> bool {
+    (now as u128) * 100 > (base as u128) * (100 + threshold_pct as u128)
+}
+
+/// Compare measurements against a baseline; empty result means the gate passes.
+pub(crate) fn compare(
+    baseline: &Baseline,
+    measured: &BTreeMap<StdString, Cost>,
+    threshold_pct: u64,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (name, now) in measured {
+        let Some(base) = baseline.entries.get(name) else {
+            findings.push(Finding::MissingBaseline {
+                scenario: name.clone(),
+            });
+            continue;
+        };
+        for (metric, b, n) in [
+            ("cpu_insns", base.cpu_insns, now.cpu_insns),
+            ("mem_bytes", base.mem_bytes, now.mem_bytes),
+        ] {
+            if exceeds(b, n, threshold_pct) {
+                findings.push(Finding::Regressed {
+                    scenario: name.clone(),
+                    metric,
+                    baseline: b,
+                    measured: n,
+                });
+            }
+        }
+    }
+    for name in baseline.entries.keys() {
+        if !measured.contains_key(name) {
+            findings.push(Finding::StaleBaseline {
+                scenario: name.clone(),
+            });
+        }
+    }
+    findings
+}
+
+fn fmt_pct(permille: i128) -> StdString {
+    if permille == i128::MAX {
+        return "+inf%".to_string();
+    }
+    let sign = if permille < 0 { "-" } else { "+" };
+    let a = permille.unsigned_abs();
+    format!("{sign}{}.{}%", a / 10, a % 10)
+}
+
+/// Human-readable, actionable description of a failing finding.
+fn describe(f: &Finding, threshold_pct: u64) -> StdString {
+    match f {
+        Finding::Regressed {
+            scenario,
+            metric,
+            baseline,
+            measured,
+        } => format!(
+            "REGRESSION  {scenario}: {metric} {measured} vs baseline {baseline} \
+             ({}; threshold +{threshold_pct}%)",
+            fmt_pct(delta_permille(*baseline, *measured))
         ),
-        Ok(Ok(_))
-    )
+        Finding::MissingBaseline { scenario } => format!(
+            "MISSING     {scenario}: no entry in the baseline — run \
+             `scripts/check_resource_budget.sh --update` and commit the result"
+        ),
+        Finding::StaleBaseline { scenario } => format!(
+            "STALE       {scenario}: baseline entry has no matching scenario — \
+             re-run with --update to drop it"
+        ),
+    }
 }
 
-/// Reject path: `amount` below the minimum bound (fires first).
+// ─── The gate ────────────────────────────────────────────────────────────────
+
+/// Apply `SYNAPSE_RESOURCE_INJECT=scenario:pct` (CI self-test of the gate).
+fn inject(measured: &mut BTreeMap<StdString, Cost>, spec: &str) {
+    let (name, pct) = spec
+        .split_once(':')
+        .expect("SYNAPSE_RESOURCE_INJECT must be `scenario:pct`");
+    let pct: u64 = pct.parse().expect("inject pct must be an integer");
+    let c = measured
+        .get_mut(name)
+        .unwrap_or_else(|| panic!("SYNAPSE_RESOURCE_INJECT: unknown scenario `{name}`"));
+    c.cpu_insns += c.cpu_insns * pct / 100;
+    eprintln!("[resource] injected +{pct}% cpu_insns into `{name}` (gate self-test)");
+}
+
 #[test]
-fn bench_reject_amount_zero() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env,
-            &client,
-            &caller,
-            0,
-            VALID_IDEMPOTENCY_KEY,
-            VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE,
-            VALID_ACCOUNT,
-            VALID_ISSUER,
+fn resource_gate_release_wasm() {
+    if std::env::var("SYNAPSE_RESOURCE_GATE").as_deref() != Ok("1") {
+        return; // Opt-in: driven by scripts/check_resource_budget.sh.
+    }
+    let wasm_path = std::env::var("SYNAPSE_RESOURCE_WASM")
+        .expect("SYNAPSE_RESOURCE_WASM must point at the release WASM");
+    let baseline_path = std::env::var("SYNAPSE_RESOURCE_BASELINE")
+        .expect("SYNAPSE_RESOURCE_BASELINE must point at the baseline file");
+    let wasm = std::fs::read(&wasm_path)
+        .unwrap_or_else(|e| panic!("failed to read release WASM at {wasm_path}: {e}"));
+
+    let mut measured = measure_all(&wasm);
+    if let Ok(spec) = std::env::var("SYNAPSE_RESOURCE_INJECT") {
+        inject(&mut measured, &spec);
+    }
+
+    let baseline_src = std::fs::read_to_string(&baseline_path).unwrap_or_default();
+    let baseline = if baseline_src.is_empty() {
+        Baseline {
+            threshold_pct: DEFAULT_THRESHOLD_PCT,
+            ..Default::default()
+        }
+    } else {
+        parse_baseline(&baseline_src)
+            .unwrap_or_else(|e| panic!("invalid baseline {baseline_path}: {e}"))
+    };
+    let threshold_pct = std::env::var("SYNAPSE_RESOURCE_THRESHOLD_PCT")
+        .ok()
+        .map(|v| v.parse().expect("threshold must be an integer"))
+        .unwrap_or(baseline.threshold_pct);
+
+    eprintln!(
+        "[resource] {:<46} {:>12} {:>9} {:>10} {:>9}",
+        "scenario", "cpu_insns", "Δcpu", "mem_bytes", "Δmem"
+    );
+    for (name, now) in &measured {
+        let (dc, dm) = match baseline.entries.get(name) {
+            Some(b) => (
+                fmt_pct(delta_permille(b.cpu_insns, now.cpu_insns)),
+                fmt_pct(delta_permille(b.mem_bytes, now.mem_bytes)),
+            ),
+            None => ("new".to_string(), "new".to_string()),
+        };
+        eprintln!(
+            "[resource] {name:<46} {:>12} {dc:>9} {:>10} {dm:>9}",
+            now.cpu_insns, now.mem_bytes
         );
-        assert!(!ok, "amount=0 must be rejected");
-    });
-    std::println!("bench_reject_amount_zero: cpu={cpu} mem={mem}");
-}
+    }
 
-/// Reject path: empty `idempotency_key` (host-length check).
-#[test]
-fn bench_reject_empty_idempotency_key() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env,
-            &client,
-            &caller,
-            1_000,
-            "",
-            VALID_CALLBACK_STATUS,
-            VALID_ASSET_CODE,
-            VALID_ACCOUNT,
-            VALID_ISSUER,
+    if std::env::var("SYNAPSE_RESOURCE_UPDATE").as_deref() == Ok("1") {
+        std::fs::write(&baseline_path, render_baseline(threshold_pct, &measured))
+            .unwrap_or_else(|e| panic!("failed to write {baseline_path}: {e}"));
+        eprintln!("[resource] baseline written to {baseline_path}");
+        return;
+    }
+
+    let findings = compare(&baseline, &measured, threshold_pct);
+    if !findings.is_empty() {
+        let mut msg = format!(
+            "\nResource-usage gate failed (#119): {} finding(s) against {baseline_path}\n\n",
+            findings.len()
         );
-        assert!(!ok, "empty idempotency_key must be rejected");
-    });
-    std::println!("bench_reject_empty_idempotency_key: cpu={cpu} mem={mem}");
-}
-
-/// Reject path: over-long `callback_status` (host-length check).
-#[test]
-fn bench_reject_overlong_callback_status() {
-    let env = Env::default();
-    let (client, _admin) = setup(&env);
-    let caller = Address::generate(&env);
-    let overlong = "x".repeat(256);
-    let (cpu, mem) = measure(&env, || {
-        let ok = register(
-            &env,
-            &client,
-            &caller,
-            1_000,
-            VALID_IDEMPOTENCY_KEY,
-            &overlong,
-            VALID_ASSET_CODE,
-            VALID_ACCOUNT,
-            VALID_ISSUER,
+        for f in &findings {
+            msg.push_str("  ");
+            msg.push_str(&describe(f, threshold_pct));
+            msg.push('\n');
+        }
+        msg.push_str(
+            "\nIf the increase is intended (e.g. a new feature genuinely needs it), \
+             regenerate the baseline with\n  scripts/check_resource_budget.sh --update\n\
+             and commit it with a justification in the PR (COST_MODEL.md §12).\n",
         );
-        assert!(!ok, "over-long callback_status must be rejected");
-    });
-    std::println!("bench_reject_overlong_callback_status: cpu={cpu} mem={mem}");
+        panic!("{msg}");
+    }
+    eprintln!("[resource] OK — all scenarios within +{threshold_pct}% of baseline");
 }
 
-/// Reject path: lowercase `asset_code` (checked before strkey decode).
+// ─── Unit tests for the gate logic (always run) ──────────────────────────────
+
+fn cost(cpu_insns: u64, mem_bytes: u64) -> Cost {
+    Cost {
+        cpu_insns,
+        mem_bytes,
+    }
+}
+
+fn one(name: &str, c: Cost) -> BTreeMap<StdString, Cost> {
+    BTreeMap::from([(name.to_owned(), c)])
+}
+
 #[test]
-fn bench_reject_l
+fn gate_passes_within_and_exactly_at_threshold() {
+    let b = Baseline {
+        threshold_pct: 15,
+        entries: one("x", cost(1000, 1000)),
+    };
+    assert!(compare(&b, &one("x", cost(1100, 900)), 15).is_empty());
+    assert!(compare(&b, &one("x", cost(1150, 1150)), 15).is_empty());
+}
+
+#[test]
+fn gate_fails_one_above_threshold_and_names_the_metric() {
+    let b = Baseline {
+        threshold_pct: 15,
+        entries: one("register_callback", cost(1000, 1000)),
+    };
+    let f = compare(&b, &one("register_callback", cost(1151, 1000)), 15);
+    assert_eq!(
+        f,
+        Vec::from([Finding::Regressed {
+            scenario: "register_callback".to_owned(),
+            metric: "cpu_insns",
+            baseline: 1000,
+            measured: 1151,
+        }])
+    );
+    let msg = describe(&f[0], 15);
+    assert!(
+        msg.contains("register_callback") && msg.contains("+15.1%"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn gate_flags_missing_and_stale_entries() {
+    let b = Baseline {
+        threshold_pct: 15,
+        entries: one("old", cost(1, 1)),
+    };
+    let f = compare(&b, &one("new", cost(1, 1)), 15);
+    assert!(f.contains(&Finding::MissingBaseline {
+        scenario: "new".to_owned()
+    }));
+    assert!(f.contains(&Finding::StaleBaseline {
+        scenario: "old".to_owned()
+    }));
+}
+
+#[test]
+fn baseline_round_trips_through_render_and_parse() {
+    let m = BTreeMap::from([
+        ("a".to_owned(), cost(1_234_567, 89)),
+        ("b".to_owned(), cost(0, 0)),
+    ]);
+    let parsed = parse_baseline(&render_baseline(12, &m)).unwrap();
+    assert_eq!(parsed.threshold_pct, 12);
+    assert_eq!(parsed.entries, m);
+}
+
+#[test]
+fn baseline_parser_rejects_incomplete_entries() {
+    assert!(parse_baseline("[x]\ncpu_insns = 1\n").is_err());
+    assert!(parse_baseline("[x]\ncpu_insns = one\nmem_bytes = 1\n").is_err());
+}
+
+#[test]
+fn committed_baseline_parses_and_covers_every_scenario() {
+    let b = parse_baseline(include_str!("../resource_baseline.toml")).unwrap();
+    let names: Vec<&str> = scenarios().iter().map(|s| s.name).collect();
+    for name in names.iter().chain([&OVERHEAD]) {
+        assert!(
+            b.entries.contains_key(*name),
+            "resource_baseline.toml has no entry for `{name}`"
+        );
+    }
+    assert_eq!(b.entries.len(), names.len() + 1, "stale baseline entries");
+}
