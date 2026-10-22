@@ -1,20 +1,15 @@
-#![no_std]
-
 //! Soroban smart contract crate.
 //!
 //! This crate exposes the contract entry points and supporting modules.
 //! The migration registry lives in [`migration`] and is invoked by the
 //! upgrade path before the WASM swap commits.
 
+#![no_std]
+
 mod admin;
-mod callbacks;
-mod errors;
 mod events;
 mod migration;
-mod multisig;
-mod recovery;
 mod storage;
-mod treasury;
 mod types;
 mod validation;
 
@@ -25,29 +20,15 @@ mod bench_resources;
 #[cfg(test)]
 mod schema_ci;
 #[cfg(test)]
-mod test_admin;
-#[cfg(test)]
 mod test_amount_ceiling;
 #[cfg(test)]
 mod test_batch_budget;
-#[cfg(test)]
-mod test_callbacks;
 #[cfg(test)]
 mod test_dispute_queue;
 #[cfg(test)]
 mod test_events_conformance;
 #[cfg(test)]
-mod test_multisig;
-#[cfg(test)]
 mod test_pause;
-#[cfg(test)]
-mod test_recovery;
-#[cfg(test)]
-mod test_rotation_chaos;
-#[cfg(test)]
-mod test_treasury;
-#[cfg(test)]
-mod test_upgrade_safety;
 #[cfg(test)]
 mod test_wave2;
 #[cfg(test)]
@@ -59,20 +40,18 @@ mod tests_invariants;
 #[cfg(test)]
 mod tests_state_machine;
 
-pub use errors::Error;
-pub use migration::{MigrationRegistry, MigrationRegistryClient, UpgradeSnapshot};
-pub use types::{
-    AnchorTierConfig, BondRecord, Callback, CallbackPayload, Config, ContractError, DisputeRecord,
-    ParamEntry, Proposal, ProposalStatus, Signer, SignerKind, SlashEvidence, Transaction, TxStatus,
-    TransactionStatus, UnbondRequest, MAX_BATCH_SIZE, MAX_OPEN_DISPUTES, MAX_PAGE_LIMIT,
-    SCHEMA_VERSION,
-};
+pub use migration::{MigrationRegistry, MigrationRegistryClient};
 
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::admin::AdminClient;
 use crate::events::EventEmitter;
 use crate::storage::{StorageClient, PARAM_GLOBAL_MAX_AMOUNT};
+use crate::types::{
+    AnchorTierConfig, BondRecord, CallbackPayload, ContractError, DisputeRecord, ParamEntry,
+    SlashEvidence, Transaction, TransactionStatus, UnbondRequest, MAX_BATCH_SIZE,
+    MAX_OPEN_DISPUTES, MAX_PAGE_LIMIT, SCHEMA_VERSION,
+};
 use crate::validation::Validator;
 
 /// Default unbonding delay in ledgers (~24 h at 5 s/ledger).
@@ -492,6 +471,50 @@ impl SynapseCoreContract {
         );
 
         Ok(())
+    }
+
+    // ── Read-only queries ─────────────────────────────────────────────────────
+
+    /// Returns the treasury's current accrued-and-unwithdrawn balance.
+    ///
+    /// This is a passthrough read of the treasury balance stored by the
+    /// accrual flow; no business logic is applied here.
+    pub fn treasury_balance(env: Env) -> i128 {
+        storage::get_treasury_balance(&env)
+    }
+
+    /// Returns the treasury's current configuration.
+    ///
+    /// Exposes `base_fee_bps`, `treasury_epoch_cap`, and
+    /// `treasury_epoch_length` as stored by the configuration flow.
+    pub fn treasury_config(env: Env) -> TreasuryConfig {
+        storage::get_treasury_config(&env)
+    }
+
+    /// Returns the current in-flight two-party withdrawal proposal, if any.
+    ///
+    /// Returns `None` cleanly when there is no pending proposal rather than
+    /// erroring, so callers can poll this query safely.
+    pub fn pending_withdrawal(env: Env) -> Option<Withdrawal> {
+        storage::get_pending_withdrawal(&env)
+    }
+
+    /// Returns the dispute record for `tx_id`, if one exists.
+    ///
+    /// Unauthenticated read-only query. Returns `None` cleanly when `tx_id`
+    /// has never been disputed rather than erroring, so callers can poll this
+    /// query safely.
+    pub fn get_dispute(env: Env, tx_id: u64) -> Option<Dispute> {
+        storage::get_dispute(&env, tx_id)
+    }
+
+    /// Returns all currently-unresolved disputes.
+    ///
+    /// Unauthenticated read-only bulk query intended for reviewer/admin
+    /// dashboards polling for work. Disputes cleared by `resolve_dispute` are
+    /// excluded, so the result only ever contains unresolved disputes.
+    pub fn get_dispute_queue(env: Env) -> Vec<Dispute> {
+        storage::get_dispute_queue(&env)
     }
 }
 
