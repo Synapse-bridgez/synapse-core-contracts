@@ -58,6 +58,48 @@ Routine, non-retry-safe, non-alert-worthy failures should be dropped.
 > that each exposes a code, a category, and the two triage flags. Any new
 > variant added to the enum must be reflected here and in that test.
 
+## Error-code budget (Soroban's 50-variant cap)
+
+Soroban caps a `#[contracterror]` enum at **50 cases**. The pre-squash feature
+set needed **61** conceptually distinct errors, so `ContractError` is a
+*consolidation* of those 61 into ≤50 actual variants. This section is the
+canonical mapping from "conceptually distinct error" to "actual variant" and
+explains every merge decision. The authoritative decision record lives in
+`DECISIONS.md` under the existing "Error-code budget" header; this table is the
+operational companion.
+
+### Merge rules
+
+1. **Category is preserved.** Every merge keeps the operationally meaningful
+distinction between *invalid input* (`Validation`), *not authorized* (`Auth`),
+and *state machine forbids this* (`State`). Off-chain callers can always route
+on `ErrorCategory`.
+2. **Detail moves to events.** Where two conceptually-different errors share a
+variant, the disambiguating detail (which entry point, which transition) is
+emitted in the corresponding event, not encoded as a separate variant.
+3. **Codes are stable.** A merged variant keeps the code of its primary
+concept; the folded concepts are documented below and never renumbered.
+
+### Consolidation map (61 concepts → ≤50 variants)
+
+| Concept(s) folded | Actual variant | Category | Rationale |
+| --- | --- | --- | --- |
+| `AlreadyInitialized` | `AlreadyExists` | `Validation` | Same "entity already present" category; init is just another entity. |
+| `SchemaVersionMismatch`, `InvalidSchemaCompatRange` | `InvalidInput` | `Validation` | Both are caller-supplied schema arguments that failed validation. |
+| `CannotCancel`, `AlreadyCancelled` | `StateConflict` | `State` | Both are "the state machine forbids this cancel"; retry-safe. |
+| `RetryLimitExceeded` | `StateConflict` | `State` | Ordering/transient condition; retry-safe, same category. |
+| `SelfCheckFailed` | `Internal` | `Internal` | Invariant violation; alert-worthy. |
+| `TimelockNotElapsed` | `StateConflict` | `State` | Ordering condition; retry-safe once the timelock passes. |
+| `NoPendingChange`, `NothingToRollback` | `NotFound` | `Lookup` | Nothing to act on; drop the call. |
+| `UnknownMigration` | `NotFound` | `Lookup` | Referenced migration does not exist. |
+| `MigrationFailed` | `Internal` | `Internal` | Invariant violation during migration; alert-worthy. |
+| `UpgradeNotReversible` | `StateConflict` | `State` | State machine forbids the upgrade; not retry-safe. |
+
+All other concepts map 1:1 to their own variant. The result is a single
+`ContractError` enum with **≤50 variants**, asserted at compile time by the
+variant-count guard in `src/types.rs` so a future PR cannot silently regress
+past the cap.
+
 ## Coordination
 
 This document describes the contract-side structured-error surface only. The

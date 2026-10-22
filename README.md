@@ -291,3 +291,24 @@ wired.
 
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling
+
+<!-- handsoff-issue-273 -->
+- #273: Restore `retry_transaction(tx_id, caller)` with a bounded retry counter
+
+<!-- handsoff-issue-274 -->
+- #274: Restore `batch_register_callback` with the `MAX_BATCH_SIZE = 7` budget
+
+<!-- handsoff-issue-285 -->
+- #285: Restore fee accrual on `complete_transaction`
+
+<!-- handsoff-issue-309 -->
+- #309: Restore `post_upgrade_self_check` entry point and `SelfCheckFailed`
+
+<!-- handsoff-issue-311 -->
+- #311: Restore bounded `get_upgrade_history` end-to-end (integration pass)
+
+<!-- handsoff-issue-316 -->
+- #316: Restore `schema_compatibility_range` / `set_schema_compatibility_range`
+
+<!-- handsoff-issue-199 -->
+- #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
