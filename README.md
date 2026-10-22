@@ -297,3 +297,9 @@ wired.
 
 <!-- handsoff-issue-311 -->
 - #311: Restore bounded `get_upgrade_history` end-to-end (integration pass)
+
+<!-- handsoff-issue-316 -->
+- #316: Restore `schema_compatibility_range` / `set_schema_compatibility_range`
+
+<!-- handsoff-issue-199 -->
+- #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
