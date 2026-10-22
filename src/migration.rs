@@ -6,6 +6,31 @@
 //! planning a multi-version upgrade can mechanically assemble the cumulative
 //! diff instead of reading prose in `CHANGELOG.md`/`DECISIONS.md`.
 //!
+//! ## Design (ADR-0005)
+//!
+//! * Each `migration_id` maps to exactly one transformation shipped in this
+//!   WASM. Unknown IDs fail closed with [`ContractError::UnknownMigration`].
+//! * A single call may touch at most [`MAX_MIGRATION_STORAGE_TOUCHES`]
+//!   storage entries. Exceeding the cap fails with
+//!   [`ContractError::MigrationFailed`] before any further work —
+//!   so simulation/dry-run surfaces the failure rather than partial
+//!   mainnet execution.
+//! * Migrations larger than one call require a resumable multi-call state
+//!   machine; that is **out of scope for v1** and must be designed per
+//!   ADR-0005 before any production migration that would exceed the bound.
+//! * On any `Err`, Soroban aborts the invocation and rolls storage back, so
+//!   a failed migration leaves the ledger byte-for-byte identical to the
+//!   pre-call state (and the WASM swap never runs).
+//!
+//! ## Reversibility (issue #314)
+//!
+//! [`MigrationRegistry::is_reversible`] classifies a migration as reversible
+//! only when it is a purely additive / no-op transform. Structural schema
+//! changes (anything that rewrites or removes existing keys) cannot be
+//! reverted cleanly by restoring the previous WASM hash, so
+//! [`crate::SynapseCoreContract::rollback_upgrade`] refuses them with
+//! [`ContractError::UpgradeNotReversible`].
+//!
 //! The tooling here is strictly read-only and informational: it never performs
 //! or automates an upgrade.
 
