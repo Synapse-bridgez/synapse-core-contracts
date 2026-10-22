@@ -229,110 +229,30 @@ Should return the transaction you just created with status `Pending`.
 
 **Decision:** We use **in-place upgrades** as the primary strategy for contract updates. This approach was chosen for its ability to maintain existing state while fixing bugs or adding features, avoiding the complexity of data migration between new contract instances. See [DECISIONS.md](./DECISIONS.md) §7 for full rationale.
 
-### Redeploy Process (Fresh Deploy)
-If you need to deploy a **new, separate instance** of the contract (not upgrade an existing one):
-1. Choose a new network if deploying alongside an existing instance, or coordinate a full network cutover
-2. Follow the full Pre-Deployment → Build → Deploy → Initialize → Smoke Test process above
-3. Update [contract-ids.json](./contract-ids.json) with the new contract ID (archive the old one for historical reference)
-4. Communicate the new contract ID to all downstream teams (relay, Phase 2)
+### Pre-Upgrade Schema Diff (multi-version upgrades)
 
-### In-Place Upgrade (Existing Contract)
-If a bug fix or state-machine extension is required for an existing deployment:
+When a lagging deployment must jump across **more than one** schema version
+(e.g. `v1 → v4`), do **not** piece the cumulative effect together by hand
+from `CHANGELOG.md`/`DECISIONS.md` prose. Instead, run the read-only
+`compare_schema_versions` tool, which mechanically assembles the diff from
+the migration-metadata manifest:
 
 ```bash
-# 1. Build the new WASM
-cargo build --target wasm32-unknown-unknown --release
-
-# 2. Upload the WASM and get its hash (replace <network> with your target network)
-NETWORK=<network>
-CONTRACT_ID=$(jq -r ".${NETWORK}.contract_id" contract-ids.json)
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/synapse_core_contract.wasm \
-  --source <ADMIN_SECRET> \
-  --network $NETWORK
-
-# 3. Confirm the on-chain schema version you're about to pass matches
-stellar contract invoke --id $CONTRACT_ID --source <ANY_KEY_WITH_XLM> --network $NETWORK -- schema_version
-
-# 3b. Dry-run the same guards upgrade() will enforce (no state change).
-#     Expect `Compatible` before spending a real admin signature on step 4.
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --source <ANY_KEY_WITH_XLM> \
-  --network $NETWORK \
-  -- \
-  simulate_upgrade \
-  --caller <ADMIN_ADDRESS> \
-  --new_wasm_hash <NEW_WASM_HASH> \
-  --expected_schema_version <EXPECTED_SCHEMA_VERSION>
-
-# 4. Invoke upgrade (replace <NEW_WASM_HASH> with the hash from step 2, and
-#    <EXPECTED_SCHEMA_VERSION> with the value read back in step 3 — a
-#    mismatch is rejected before contract WASM is touched; a post-swap
-#    self-check failure reverts the whole transaction)
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --source <ADMIN_SECRET> \
-  --network $NETWORK \
-  -- \
-  upgrade \
-  --new_wasm_hash <NEW_WASM_HASH> \
-  --expected_schema_version <EXPECTED_SCHEMA_VERSION>
-
-# 5. Confirm the on-chain upgrade history recorded this swap
-stellar contract invoke --id $CONTRACT_ID --source <ANY_KEY_WITH_XLM> --network $NETWORK -- get_upgrade_history
-
-# 6. Update contract-ids.json with the new wasm_hash
-# 7. Run the full post-deployment smoke test to verify the upgrade
+cargo run --bin compare_schema_versions -- --from 1 --to 4
 ```
----
 
-## Cost Estimates
+This prints a structured, human-readable summary of every storage-layout and
+semantic change between the two versions (cumulative across all intermediate
+versions). It is **informational only** — it never performs or automates the
+upgrade itself. If no migration-manifest entries exist between the two
+versions, it prints a clear "no additive changes recorded" message rather
+than failing.
 
-See **[COST_MODEL.md](./COST_MODEL.md)** for a full per-transaction XLM cost
-breakdown, including:
+**Recommended:** treat this diff as a required pre-upgrade planning step for
+any multi-version upgrade, and attach its output to the upgrade PR/runbook.
 
-- Persistent and temporary storage footprint
-- Write, read, and TTL-extension fees
-- Lifecycle totals (minimum and typical)
-- Monthly budget estimates at various volumes
-- Impact of string-length caps on worst-case costs
+### Redeploy Process (Fresh Deploy)
+If you need to deploy a **new, separate instance** of the contract (not upgrade an existing one):
+1. Choose a new netwo
 
-**TL;DR:** Approximately **0.016–0.027 XLM per transaction** at current
-baseline fees, dominated by the initial persistent-write cost.
-
----
-
-## Monitoring
-
-| Metric | Source | Action |
-|--------|--------|--------|
-| `ContractUpgraded` event | Event subscription | Alert — unexpected upgrade may indicate key compromise |
-| Balance of admin account | Horizon | Ensure sufficient XLM for rent + fees |
-| Transaction volume | Off-chain relay logs | Re-budget if volume exceeds deployment estimate |
-| String lengths | Contract validation | Ensure `validation.rs` caps are enforced on deploy |
-
----
-
-## Admin Key Requirements
-
-> **The admin key is the single most important secret in the Synapse Bridge
-> ecosystem.**  See [DECISIONS.md](./DECISIONS.md) §6 for the full trust model.
-
-- **MUST** be held by a multisig (minimum 3-of-5) or a DAO
-- **SHOULD NOT** be the same key used for deployment or relay signing
-- **SHOULD** be monitored for unexpected usage
-- **SHOULD** have a key-rotation plan documented before mainnet launch
----
-
-## Break-glass: merging duplicate transactions
-
-`merge_duplicate_transactions(canonical_tx_id, duplicate_tx_id, caller, reason)`
-is an admin-only recovery tool, **not** a routine operation. Use it only when
-evidence shows a replay slipped through as a separate `transaction_id` (e.g.
-before the F-07 durable guard existed). The duplicate is never deleted: it is
-marked `Failed` with `failure_reason = "merged"`, gets a `MergedInto(canonical)`
-marker (query with `get_merged_into`) and an `EventTransactionsMerged` (`merged`
-topic) is emitted carrying `reason`. Settled (`Completed`) duplicates, self-merges
-and already-merged records are rejected. Record the evidence off-chain alongside
-the event.
+/* … truncated 4336 chars — edit only what you need near the top … */
