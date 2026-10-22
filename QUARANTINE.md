@@ -26,10 +26,6 @@ remove its row here.
 
 | File | Test | Missing feature |
 |------|------|-----------------|
-| `src/tests.rs` | `test_cancel_transaction_by_relay_and_admin` | `cancel_transaction`, `TransactionStatus::Cancelled` |
-| `src/tests.rs` | `test_cancel_transaction_rejects_stranger_and_illegal_states` | `cancel_transaction`, `CannotCancel`, `AlreadyCancelled` |
-| `src/tests.rs` | `test_retry_transaction_cycle_and_limit` | `retry_transaction`, `Transaction::retry_count` |
-| `src/tests.rs` | `test_retry_transaction_rejects_non_failed` | `retry_transaction` |
 | `src/tests.rs` | `test_get_transactions_by_status_pagination_and_transitions` | `get_transactions_by_status` |
 | `src/tests.rs` | `test_get_transactions_by_status_rejects_bad_limit` | `get_transactions_by_status` |
 | `src/test_pause.rs` | `test_post_upgrade_self_check_passes_on_healthy_state` | `StorageClient::post_upgrade_self_check` |
