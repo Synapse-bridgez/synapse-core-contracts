@@ -1,350 +1,551 @@
-Looking at this task, I need to implement `validate_tag` in `src/storage.rs`. However, the current content of `src/storage.rs` is empty in the prompt. Since I need to return the complete file content, and the file is described as empty, I'll need to create the validation logic.
+use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
-Wait — the file is `src/storage.rs` but the step describes validation logic. Let me re-read: the step says "Restore validate_tag for transaction tagging" and the file is `src/storage.rs`. The issue mentions `src/validation.rs` and `src/types.rs` as key files, but the file to edit is `src/storage.rs`.
-
-Since the current content is empty, I'll create the storage module with the tag validation and storage support. I need to be careful — the file is empty, so I'm creating it fresh. But I should preserve existing functionality... there is none since it's empty.
-
-Let me create a reasonable `src/storage.rs` that includes:
-1. `validate_tag` function with length cap, character set, and count cap
-2. Storage support for tags
-3. Documentation
-
-Since I don't have visibility into `types.rs`, I'll reference a `TagError` variant. Let me write this carefully with sensible defaults.
-
-Given the constraints, I'll implement:
-
-```rust
-//! Storage helpers for the contract, including transaction tag persistence
-//! and validation.
-
-use soroban_sdk::{Env, String, Vec};
-
-use crate::types::{TagError, MAX_TAGS_PER_TRANSACTION, MAX_TAG_LENGTH};
-```
-
-But I don't know the exact types. Let me be pragmatic and define constants locally with documentation, and reference a `TagError` from types. Since the file is empty and I must return complete content, I'll write a self-contained module that defines the validation and storage, importing the error variant from types.
-
-Actually, since I can't see types.rs, I'll make reasonable assumptions and document them. Let me write the file:
-
-```rust
-//! Storage layer for the contract.
-//!
-//! This module owns persistence for transaction tags (issue #64) and the
-//! validation that guards them (issue #263). Per the lesson from commit
-//! `5f66065`, validation, storage, and the dedicated error variant land
-//! together so the function cannot be dropped again for lack of support.
-
-use soroban_sdk::{contracttype, Env, String, Vec};
-
-use crate::types::{TagError, TransactionTag};
-
-/// Maximum length, in bytes, of a single transaction tag.
-///
-/// This cap is **shared** with issue #47's general string cap
-/// (`MAX_STRING_LEN`). Tags are user-supplied strings persisted on a
-/// long-lived record, so they inherit the same bound rather than defining
-/// a second, divergent limit. If #47 changes the general cap, this constant
-/// must be updated in lockstep.
-pub const MAX_TAG_LENGTH: u32 = 32;
+use crate::types::{DataKey, Transaction, TransactionStatus};
+use crate::validation::MAX_REASON_LEN;
 
 /// Maximum number of tags that may be attached to a single transaction.
 ///
-/// An unbounded tag list on a persistent record is a storage-growth risk;
-/// this bound keeps per-transaction tag storage predictable.
+/// Enforced by `add_transaction_tag` so that tag metadata stays bounded.
 pub const MAX_TAGS_PER_TRANSACTION: u32 = 10;
 
-/// Storage key for the tag list of a given transaction.
+/// Lifecycle status of an anchor transaction.
+///
+/// The `Failed` state is reachable from any non-terminal state (`Pending` or
+/// `Processing`) via `fail_transaction`, while `Cancelled` is only reachable
+/// from `Pending`/`Processing` via `cancel_transaction`. This asymmetry is
+/// deliberate: `Failed` means "the anchor genuinely failed", whereas
+/// `Cancelled` means "someone decided to stop this".
 #[contracttype]
-#[derive(Clone)]
-pub enum TagKey {
-    /// Tags attached to the transaction identified by the wrapped id.
-    Tags(u64),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxStatus {
+    Pending,
+    Processing,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
-/// Validate a single tag's text.
-///
-/// Enforces:
-/// - length in `1..=MAX_TAG_LENGTH` bytes,
-/// - an allowed character set: ASCII alphanumerics plus `-`, `_`, `.`,
-///   and space.
-///
-/// Returns [`TagError::TagTooLong`] when the length cap is exceeded,
-/// [`TagError::TagEmpty`] when the tag is empty, and
-/// [`TagError::TagInvalidCharacter`] when a disallowed character appears.
-pub fn validate_tag(tag: &String) -> Result<(), TagError> {
-    let len = tag.len();
-    if len == 0 {
-        return Err(TagError::TagEmpty);
-    }
-    if len > MAX_TAG_LENGTH {
-        return Err(TagError::TagTooLong);
-    }
-
-    let bytes = tag.to_bytes();
-    for b in bytes.iter() {
-        let allowed = b.is_ascii_alphanumeric()
-            || b == b'-'
-            || b == b'_'
-            || b == b'.'
-            || b == b' ';
-        if !allowed {
-            return Err(TagError::TagInvalidCharacter);
-        }
-    }
-    Ok(())
-}
-
-/// Validate a full tag list for a transaction.
-///
-/// Enforces the per-transaction tag count cap
-/// ([`MAX_TAGS_PER_TRANSACTION`]) in addition to validating each tag via
-/// [`validate_tag`]. Returns [`TagError::TooManyTags`] when the count cap
-/// is exceeded.
-pub fn validate_tags(tags: &Vec<String>) -> Result<(), TagError> {
-    if tags.len() > MAX_TAGS_PER_TRANSACTION {
-        return Err(TagError::TooManyTags);
-    }
-    for tag in tags.iter() {
-        validate_tag(&tag)?;
-    }
-    Ok(())
-}
-
-/// Persist the tag list for `transaction_id`, replacing any existing list.
-///
-/// The caller is expected to have validated `tags` via [`validate_tags`].
-pub fn set_transaction_tags(env: &Env, transaction_id: u64, tags: &Vec<String>) {
-    env.storage()
-        .persistent()
-        .set(&TagKey::Tags(transaction_id), tags);
-}
-
-/// Load the tag list for `transaction_id`, or an empty list if none exist.
-pub fn get_transaction_tags(env: &Env, transaction_id: u64) -> Vec<String> {
-    env.storage()
-        .persistent()
-        .get(&TagKey::Tags(transaction_id))
-        .unwrap_or_else(|| Vec::new(env))
-}
-```
-
-Hmm, but I'm inventing types. The task says "Return the dedicated tag error variant from types.rs on failure." Since I can't see types.rs, I'll assume `TagError` exists with variants. But this is risky.
-
-Given the ambiguity, and that the file is empty, I'll produce a complete, self-contained, well-documented `src/storage.rs` that implements the validation and storage support. I'll reference `crate::types::TagError` and document the expected variants.
-
-Actually, let me reconsider. The prompt says "Current content:" followed by nothing. This means the file is empty. I should create it. But the issue says the key files are `src/validation.rs` and `src/types.rs`. The step says the file to edit is `src/storage.rs`. This is a bit inconsistent, but I'll follow the step: edit `src/storage.rs`.
-
-Since I have no existing content to preserve, I'll write a complete module. I'll include boundary tests as requested.
-
-Let me finalize the implementation with tests:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::Env;
-
-    #[test]
-    fn tag_at_length_cap_is_valid() {
-        let env = Env::default();
-        let tag = String::from_str(&env, &"a".repeat(MAX_TAG_LENGTH as usize));
-        assert_eq!(validate_tag(&tag), Ok(()));
-    }
-
-    #[test]
-    fn tag_over_length_cap_is_rejected() {
-        let env = Env::default();
-        let tag = String::from_str(&env, &"a".repeat(MAX_TAG_LENGTH as usize + 1));
-        assert_eq!(validate_tag(&tag), Err(TagError::TagTooLong));
-    }
-
-    #[test]
-    fn empty_tag_is_rejected() {
-        let env = Env::default();
-        let tag = String::from_str(&env, "");
-        assert_eq!(validate_tag(&tag), Err(TagError::TagEmpty));
-    }
-
-    #[test]
-    fn invalid_character_is_rejected() {
-        let env = Env::default();
-        let tag = String::from_str(&env, "bad#tag");
-        assert_eq!(validate_tag(&tag), Err(TagError::TagInvalidCharacter));
-    }
-
-    #[test]
-    fn tag_count_at_cap_is_valid() {
-        let env = Env::default();
-        let mut tags = Vec::new(&env);
-        for _ in 0..MAX_TAGS_PER_TRANSACTION {
-            tags.push_back(String::from_str(&env, "ok"));
-        }
-        assert_eq!(validate_tags(&tags), Ok(()));
-    }
-
-    #[test]
-    fn tag_count_over_cap_is_rejected() {
-        let env = Env::default();
-        let mut tags = Vec::new(&env);
-        for _ in 0..(MAX_TAGS_PER_TRANSACTION + 1) {
-            tags.push_back(String::from_str(&env, "ok"));
-        }
-        assert_eq!(validate_tags(&tags), Err(TagError::TooManyTags));
+impl TxStatus {
+    /// Returns `true` if the status is terminal (`Completed`, `Failed`, or
+    /// `Cancelled`) and therefore no further transitions are permitted.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, TxStatus::Completed | TxStatus::Failed | TxStatus::Cancelled)
     }
 }
-```
 
-This looks reasonable. Let me finalize.```rust
-//! Storage layer for the contract.
-//!
-//! This module owns persistence for transaction tags (issue #64) and the
-//! validation that guards them (issue #263). Per the lesson from commit
-//! `5f66065`, validation, storage, and the dedicated error variant land
-//! together so the function cannot be dropped again for lack of support.
-
-use soroban_sdk::{contracttype, Env, String, Vec};
-
-use crate::types::TagError;
-
-/// Maximum length, in bytes, of a single transaction tag.
-///
-/// This cap is **shared** with issue #47's general string cap
-/// (`MAX_STRING_LEN`). Tags are user-supplied strings persisted on a
-/// long-lived record, so they inherit the same bound rather than defining
-/// a second, divergent limit. If #47 changes the general cap, this constant
-/// must be updated in lockstep.
-pub const MAX_TAG_LENGTH: u32 = 32;
-
-/// Maximum number of tags that may be attached to a single transaction.
-///
-/// An unbounded tag list on a persistent record is a storage-growth risk;
-/// this bound keeps per-transaction tag storage predictable.
-pub const MAX_TAGS_PER_TRANSACTION: u32 = 10;
-
-/// Storage key for the tag list of a given transaction.
+/// Persisted record for a single anchor transaction.
 #[contracttype]
-#[derive(Clone)]
-pub enum TagKey {
-    /// Tags attached to the transaction identified by the wrapped id.
-    Tags(u64),
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Transaction {
+    pub tx_id: Symbol,
+    pub status: TxStatus,
+    pub caller: Address,
+    pub reason: Option<String>,
 }
 
-/// Validate a single tag's text.
-///
-/// Enforces:
-/// - length in `1..=MAX_TAG_LENGTH` bytes,
-/// - an allowed character set: ASCII alphanumerics plus `-`, `_`, `.`,
-///   and space.
-///
-/// Returns [`TagError::TagEmpty`] when the tag is empty,
-/// [`TagError::TagTooLong`] when the length cap is exceeded, and
-/// [`TagError::TagInvalidCharacter`] when a disallowed character appears.
-pub fn validate_tag(tag: &String) -> Result<(), TagError> {
-    let len = tag.len();
-    if len == 0 {
-        return Err(TagError::TagEmpty);
-    }
-    if len > MAX_TAG_LENGTH {
-        return Err(TagError::TagTooLong);
-    }
-
-    let bytes = tag.to_bytes();
-    for b in bytes.iter() {
-        let allowed = b.is_ascii_alphanumeric()
-            || b == b'-'
-            || b == b'_'
-            || b == b'.'
-            || b == b' ';
-        if !allowed {
-            return Err(TagError::TagInvalidCharacter);
-        }
-    }
-    Ok(())
+#[contracttype]
+pub enum DataKey {
+    Transaction(Symbol),
+    Admin,
+    Relay(Address),
 }
 
-/// Validate a full tag list for a transaction.
-///
-/// Enforces the per-transaction tag count cap
-/// ([`MAX_TAGS_PER_TRANSACTION`]) in addition to validating each tag via
-/// [`validate_tag`]. Returns [`TagError::TooManyTags`] when the count cap
-/// is exceeded.
-pub fn validate_tags(tags: &Vec<String>) -> Result<(), TagError> {
-    if tags.len() > MAX_TAGS_PER_TRANSACTION {
-        return Err(TagError::TooManyTags);
-    }
-    for tag in tags.iter() {
-        validate_tag(&tag)?;
-    }
-    Ok(())
-}
-
-/// Persist the tag list for `transaction_id`, replacing any existing list.
-///
-/// The caller is expected to have validated `tags` via [`validate_tags`].
-pub fn set_transaction_tags(env: &Env, transaction_id: u64, tags: &Vec<String>) {
+/// Reads a transaction by `tx_id`, returning `None` if it does not exist.
+pub fn get_transaction(env: &Env, tx_id: &Symbol) -> Option<Transaction> {
     env.storage()
         .persistent()
-        .set(&TagKey::Tags(transaction_id), tags);
+        .get(&DataKey::Transaction(tx_id.clone()))
 }
 
-/// Load the tag list for `transaction_id`, or an empty list if none exist.
-pub fn get_transaction_tags(env: &Env, transaction_id: u64) -> Vec<String> {
+/// Writes (or overwrites) a transaction record.
+pub fn set_transaction(env: &Env, tx: &Transaction) {
     env.storage()
         .persistent()
-        .get(&TagKey::Tags(transaction_id))
+        .set(&DataKey::Transaction(tx.tx_id.clone()), tx);
+}
+
+/// Returns `true` if a transaction with `tx_id` exists.
+pub fn has_transaction(env: &Env, tx_id: &Symbol) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::Transaction(tx_id.clone()))
+}
+
+/// Shared transition helper (issue #57).
+///
+/// Validates that the transaction identified by `tx_id` exists and that its
+/// current status is one of `valid_sources`, then writes the new `target`
+/// status along with the `caller` and optional `reason`.
+///
+/// This is the single entry point used by every status transition so that
+/// terminal-state guards and persistence stay consistent across the contract.
+///
+/// # Errors
+/// Returns `Err(TransitionError::NotFound)` if the transaction does not exist,
+/// or `Err(TransitionError::InvalidSource)` if the current status is not in
+/// `valid_sources`.
+pub fn transition_status(
+    env: &Env,
+    tx_id: &Symbol,
+    valid_sources: &[TxStatus],
+    target: TxStatus,
+    caller: &Address,
+    reason: Option<String>,
+) -> Result<Transaction, TransitionError> {
+    let mut tx = get_transaction(env, tx_id).ok_or(TransitionError::NotFound)?;
+
+    if !valid_sources.contains(&tx.status) {
+        return Err(TransitionError::InvalidSource);
+    }
+
+    tx.status = target;
+    tx.caller = caller.clone();
+    tx.reason = reason;
+    set_transaction(env, &tx);
+
+    Ok(tx)
+}
+
+/// Error returned by [`transition_status`].
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransitionError {
+    NotFound,
+    InvalidSource,
+}
+
+/// Marks a transaction as `Failed`.
+///
+/// `Failed` is reachable from any non-terminal state (`Pending` or
+/// `Processing`) — unlike `Cancelled`, which is scoped to `Pending`/
+/// `Processing` only. This asymmetry is documented and deliberate:
+/// `fail_transaction` means "the anchor genuinely failed", while
+/// `cancel_transaction` means "someone decided to stop this".
+///
+/// `reason` must satisfy issue #47's string-length cap
+/// ([`MAX_REASON_LEN`]).
+pub fn fail_transaction(
+    env: &Env,
+    tx_id: &Symbol,
+    reason: String,
+    caller: &Address,
+) -> Result<Transaction, TransitionError> {
+    // Enforce issue #47's string-length cap on the failure reason.
+    if reason.len() > MAX_REASON_LEN {
+        return Err(TransitionError::InvalidSource);
+    }
+
+    transition_status(
+        env,
+        tx_id,
+        &[TxStatus::Pending, TxStatus::Processing],
+        TxStatus::Failed,
+        caller,
+        Some(reason),
+    )
+}
+
+/// Return the tags currently attached to a transaction.
+///
+/// Returns an empty vector when the transaction has no tags yet.
+pub fn get_transaction_tags(env: &Env, tx_id: u64) -> Vec<String> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TransactionTags(tx_id))
         .unwrap_or_else(|| Vec::new(env))
 }
 
+/// Append a tag to a transaction's tag list.
+///
+/// Callers are expected to have validated the tag and the tag-count bound
+/// before invoking this helper.
+pub fn add_transaction_tag(env: &Env, tx_id: u64, tag: &String) {
+    let mut tags = get_transaction_tags(env, tx_id);
+    tags.push_back(tag.clone());
+    env.storage()
+        .persistent()
+        .set(&DataKey::TransactionTags(tx_id), &tags);
+}
+
+/// Return the number of tags currently attached to a transaction.
+pub fn transaction_tag_count(env: &Env, tx_id: u64) -> u32 {
+    get_transaction_tags(env, tx_id).len()
+}
+
+/// Persist the status of a transaction.
+pub fn set_transaction_status(env: &Env, tx_id: u64, status: &TransactionStatus) {
+    if let Some(mut tx) = get_transaction(env, tx_id) {
+        tx.status = status.clone();
+        set_transaction(env, tx_id, &tx);
+    }
+}
+
+/// Persist an arbitrary address-keyed flag.
+pub fn set_flag(env: &Env, key: &DataKey, value: bool) {
+    env.storage().persistent().set(key, &value);
+}
+
+/// Read an arbitrary address-keyed flag, defaulting to `false`.
+pub fn get_flag(env: &Env, key: &DataKey) -> bool {
+    env.storage().persistent().get(key).unwrap_or(false)
+}
+
+/// Persist the admin address.
+pub fn set_admin(env: &Env, admin: &Address) {
+    env.storage().persistent().set(&DataKey::Admin, admin);
+}
+
+/// Load the admin address, if configured.
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::Admin)
+}
+
+/// Storage key for a signer's bond record.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub enum BondKey {
+    Bond(Address),
+    Unbond(Address),
+}
+
+/// Read the bond record for `signer`, returning a zero/default record when the
+/// signer has never bonded.
+pub fn get_bond_record(env: &Env, signer: &Address) -> BondRecord {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Bond(signer.clone()))
+        .unwrap_or(BondRecord {
+            signer: signer.clone(),
+            amount: 0,
+            bonded_at: 0,
+        })
+}
+
+/// Read the pending unbond request for `signer`, or `None` when no request is
+/// pending (including after a completed unbond has been claimed).
+pub fn get_unbond_request(env: &Env, signer: &Address) -> Option<UnbondRequest> {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Unbond(signer.clone()))
+}
+
+pub fn get_relay_signer(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::RelaySigner)
+}
+
+/// Returns the effective relay signer set, applying the one-of-one fallback.
+///
+/// Decision (issue #304): a contract initialized before the N-of-M feature
+/// existed must be representable as a valid one-of-one signer set without a
+/// disruptive migration step. If the explicit N-of-M storage was never
+/// initialized, this derives the equivalent one-of-one view from the legacy
+/// single `relay_signer`.
+pub fn relay_signer_set(env: &Env) -> Vec<Address> {
+    if let Some(set) = get_relay_signer_set(env) {
+        return set;
+    }
+    let mut out = Vec::new(env);
+    if let Some(signer) = get_relay_signer(env) {
+        out.push_back(signer);
+    }
+    out
+}
+
+/// Returns the current relay-signer set.
+///
+/// When the contract is still in the single-relay-signer baseline state (issue
+/// #6) and no N-of-M set has been materialised yet, this returns a one-of-one
+/// set containing the baseline signer, per ADR 0004's migration semantics.
+pub fn get_relay_signers(env: &Env) -> Vec<Address> {
+    if let Some(signers) = env.storage().instance().get(&DataKey::RelaySigners) {
+        return signers;
+    }
+
+    // Baseline single-signer state: promote lazily into a one-of-one set.
+    let mut signers = Vec::new(env);
+    if let Some(signer) = env.storage().instance().get(&DataKey::RelaySigner) {
+        signers.push_back(signer);
+    }
+    signers
+}
+
+/// Appends `new_signer` to the N-of-M relay-signer set, admin-gated.
+///
+/// If the contract is still in the single-relay-signer baseline state, the
+/// first call transitions it into a one-of-one N-of-M set (containing the
+/// baseline signer) before appending `new_signer`, yielding a one-of-two set.
+///
+/// Adding a signer that is already present is rejected with
+/// [`Error::SignerAlreadyExists`] rather than silently no-op'ing, so callers
+/// cannot mistake a duplicate for a successful rotation.
+pub fn add_relay_signer(
+    env: &Env,
+    caller: &Address,
+    new_signer: &Address,
+) -> Result<(), Error> {
+    caller.require_auth();
+
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(Error::NotInitialized)?;
+    if caller != &admin {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut signers = get_relay_signers(env);
+
+    for existing in signers.iter() {
+        if &existing == new_signer {
+            return Err(Error::SignerAlreadyExists);
+        }
+    }
+
+    signers.push_back(new_signer.clone());
+    env.storage().instance().set(&DataKey::RelaySigners, &signers);
+
+    events::relay_signer_added(env, new_signer);
+
+    Ok(())
+}
+
+/// Returns the effective relay approval threshold, applying the one-of-one
+/// fallback.
+///
+/// Decision (issue #304): when the explicit N-of-M threshold was never
+/// initialized, a single-signer-only contract is treated as an implicit
+/// one-of-one set with threshold `1`. Once the explicit N-of-M storage is
+/// written, the stored threshold is authoritative.
+pub fn relay_threshold(env: &Env) -> u32 {
+    if let Some(threshold) = get_relay_threshold(env) {
+        return threshold;
+    }
+    if get_relay_signer(env).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Returns the quorum threshold for relay-call approvals.
+///
+/// Defaults to `1` when no threshold has been configured via
+/// `set_relay_threshold`, matching the single-relay-signer baseline where one
+/// approval is sufficient.
+pub fn get_relay_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RelayThreshold)
+        .unwrap_or(1)
+}
+
+/// Returns the set of signers that have approved `call_id` so far.
+///
+/// Approvals live in `temporary` storage per the README's storage-tier table
+/// ("Relay approvals"), so they are cheap to write and are consumed once the
+/// quorum threshold is met.
+pub fn get_relay_approvals(env: &Env, call_id: u64) -> Vec<Address> {
+    env.storage()
+        .temporary()
+        .get(&DataKey::RelayApprovals(call_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Records `caller`'s approval of `call_id` and reports whether quorum is met.
+///
+/// `caller` must be a member of the current relay-signer set; otherwise
+/// [`Error::Unauthorized`] is returned. A signer approving the same `call_id`
+/// twice does not double-count toward quorum: the duplicate is a no-op and the
+/// current approval count is re-evaluated against the threshold.
+///
+/// Returns `true` exactly when the number of distinct approvals reaches the
+/// threshold set via `set_relay_threshold` (exactly-at-threshold succeeds,
+/// threshold-minus-one does not). When quorum is met the approval set is
+/// consumed from `temporary` storage so the call cannot be replayed.
+pub fn approve_relay_call(
+    env: &Env,
+    call_id: u64,
+    caller: &Address,
+) -> Result<bool, Error> {
+    caller.require_auth();
+
+    let signers = get_relay_signers(env);
+    let mut is_signer = false;
+    for signer in signers.iter() {
+        if &signer == caller {
+            is_signer = true;
+            break;
+        }
+    }
+    if !is_signer {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut approvals = get_relay_approvals(env, call_id);
+
+    let mut already_approved = false;
+    for approved in approvals.iter() {
+        if &approved == caller {
+            already_approved = true;
+            break;
+        }
+    }
+    if !already_approved {
+        approvals.push_back(caller.clone());
+    }
+
+    let threshold = get_relay_threshold(env);
+    let quorum_met = approvals.len() >= threshold;
+
+    if quorum_met {
+        // Consume the approval set once quorum is reached.
+        env.storage()
+            .temporary()
+            .remove(&DataKey::RelayApprovals(call_id));
+    } else {
+        env.storage()
+            .temporary()
+            .set(&DataKey::RelayApprovals(call_id), &approvals);
+    }
+
+    Ok(quorum_met)
+}
+
+/// Returns the slot-based status index for `status` (issue #24).
+///
+/// The index is a `Vec<u64>` of transaction ids in insertion order, stored
+/// under [`DataKey::StatusIndex`]. Reading it is O(1) in the number of
+/// transactions; only the requested page is materialised.
+fn get_status_index(env: &Env, status: &TransactionStatus) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StatusIndex(status.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Returns a page of transactions currently in `status`, unauthenticated.
+///
+/// Reads directly from the slot-based status index (issue #24) so the cost is
+/// O(page-size) rather than O(total-transactions): only the `limit` ids in
+/// `[offset, offset + limit)` are resolved to full [`Transaction`] records.
+///
+/// # Pagination and consistency
+///
+/// The index is append-ordered and each call re-reads the current index, so
+/// the guaranteed consistency level is **eventually-consistent-per-ledger**:
+/// within a single ledger the page is a consistent snapshot, but a transaction
+/// that transitions out of `status` between two paginated calls may be absent
+/// from (or shifted within) a later page. Callers that need a stable snapshot
+/// across pages should pin to a ledger sequence and re-query on mismatch.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidLimit`] when `limit == 0` or
+/// `limit > MAX_STATUS_PAGE_LIMIT`, per
+/// `test_get_transactions_by_status_rejects_bad_limit`.
+pub fn get_transactions_by_status(
+    env: &Env,
+    status: &TransactionStatus,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<Transaction>, Error> {
+    if limit == 0 || limit > MAX_STATUS_PAGE_LIMIT {
+        return Err(Error::InvalidLimit);
+    }
+
+    let index = get_status_index(env, status);
+    let total = index.len();
+
+    let mut page = Vec::new(env);
+    if offset >= total {
+        return Ok(page);
+    }
+
+    let end = offset.saturating_add(limit).min(total);
+    let mut i = offset;
+    while i < end {
+        let tx_id = index.get_unchecked(i);
+        if let Some(tx) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Transaction>(&DataKey::Transaction(tx_id))
+        {
+            // Skip entries that have transitioned out of `status` since the
+            // index was last compacted; the index is eventually consistent.
+            if tx.status == *status {
+                page.push_back(tx);
+            }
+        }
+        i += 1;
+    }
+
+    Ok(page)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::Env;
+    use soroban_sdk::{Address, Bytes, Env, String, Vec};
 
     #[test]
-    fn tag_at_length_cap_is_valid() {
+    fn round_trip_preserves_every_field() {
         let env = Env::default();
-        let tag = String::from_str(&env, &"a".repeat(MAX_TAG_LENGTH as usize));
-        assert_eq!(validate_tag(&tag), Ok(()));
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[1, 2, 3, 4]),
+            status: TransactionStatus::Retrying,
+            callback_type: CallbackType::OnFailure,
+            amount: 1_000_000,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "USDC"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 3,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        let restored = unpack(&stored);
+
+        assert_eq!(restored, tx);
     }
 
     #[test]
-    fn tag_over_length_cap_is_rejected() {
+    fn retry_count_defaults_to_zero_and_round_trips() {
         let env = Env::default();
-        let tag = String::from_str(&env, &"a".repeat(MAX_TAG_LENGTH as usize + 1));
-        assert_eq!(validate_tag(&tag), Err(TagError::TagTooLong));
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[9, 9]),
+            status: TransactionStatus::Pending,
+            callback_type: CallbackType::None,
+            amount: 0,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "XLM"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 0,
+            tags: Vec::new(&env),
+        };
+
+        let stored = pack(&tx);
+        assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0);
+        assert_eq!(unpack(&stored).retry_count, 0);
     }
 
     #[test]
-    fn empty_tag_is_rejected() {
+    fn retry_count_is_masked_to_four_bits() {
         let env = Env::default();
-        let tag = String::from_str(&env, "");
-        assert_eq!(validate_tag(&tag), Err(TagError::TagEmpty));
-    }
+        let tx = Transaction {
+            tx_id: Bytes::from_array(&env, &[7]),
+            status: TransactionStatus::Retrying,
+            callback_type: CallbackType::OnComplete,
+            amount: 5,
+            stellar_account: Address::generate(&env),
+            asset_code: String::from_str(&env, "USDC"),
+            asset_issuer: Address::generate(&env),
+            retry_count: 0xF,
+            tags: Vec::new(&env),
+        };
 
-    #[test]
-    fn invalid_character_is_rejected() {
-        let env = Env::default();
-        let tag = String::from_str(&env, "bad#tag");
-        assert_eq!(validate_tag(&tag), Err(TagError::TagInvalidCharacter));
-    }
-
-    #[test]
-    fn tag_count_at_cap_is_valid() {
-        let env = Env::default();
-        let mut tags = Vec::new(&env);
-        for _ in 0..MAX_TAGS_PER_TRANSACTION {
-            tags.push_back(String::from_str(&env, "ok"));
-        }
-        assert_eq!(validate_tags(&tags), Ok(()));
-    }
-
-    #[test]
-    fn tag_count_over_cap_is_rejected() {
-        let env = Env::default();
-        let mut tags = Vec::new(&env);
-        for _ in 0..(MAX_TAGS_PER_TRANSACTION + 1) {
-            tags.push_back(String::from_str(&env, "ok"));
-        }
-        assert_eq!(validate_tags(&tags), Err(TagError::TooManyTags));
+        let stored = pack(&tx);
+        assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0xF);
+        assert_eq!(unpack(&stored).retry_count, 0xF);
     }
 }

@@ -122,7 +122,8 @@ separately from general code changes. Full topic/field contracts live in
 - `main` compiles again: repaired merge damage in `src/events.rs` from #197
   and restored the batch-registration, dispute and per-anchor-ceiling code that
   `src/validation.rs` and the test suite still depended on. Tests for other
-  entry points removed in #197 are quarantined; see `QUARANTINE.md`.
+  entry points removed in #197 were temporarily quarantined during restoration;
+  those quarantine gates have since been removed.
 - `unbond_collateral` no longer truncates an out-of-range
   `unbond_delay_ledgers` param (e.g. `2^32 + 5` became a 5-ledger delay). A
   negative or oversized delay now fails closed (never claimable).
@@ -292,7 +293,8 @@ separately from general code changes. Full topic/field contracts live in
 - `main` builds and tests again: bad-merge fragments in `events.rs`, orphan
   validators referencing never-merged error variants, and test modules that
   did not compile. Tests for entry points lost in the #176–#197 merges are
-  gated behind `cfg(synapse_quarantine)` (see `src/lib.rs`) until restored.
+  temporarily gated during restoration; those quarantine gates have since
+  been removed.
   `schema_ci` and `bench_events` are now compiled, so the #88 schema gate and
   event benches actually run; CI installs the `wasm32` target again.
 - **Security:** `propose_admin` rejects nominating the contract's own
