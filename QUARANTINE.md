@@ -32,8 +32,6 @@ remove its row here.
 | `src/tests.rs` | `test_retry_transaction_rejects_non_failed` | `retry_transaction` |
 | `src/tests.rs` | `test_get_transactions_by_status_pagination_and_transitions` | `get_transactions_by_status` |
 | `src/tests.rs` | `test_get_transactions_by_status_rejects_bad_limit` | `get_transactions_by_status` |
-| `src/test_pause.rs` | `test_post_upgrade_self_check_passes_on_healthy_state` | `StorageClient::post_upgrade_self_check` |
-| `src/test_pause.rs` | `test_post_upgrade_self_check_fails_when_relay_missing` | `post_upgrade_self_check`, `SelfCheckFailed` |
 | `src/test_pause.rs` | `test_upgrade_self_check_failure_reverts_without_history` | self-check, `get_upgrade_history` |
 | `src/test_pause.rs` | `test_self_check_events_topics` | `EventUpgradeSelfCheckPassed` / `Failed` emitters |
 | `src/test_pause.rs` | `test_simulate_upgrade_*` (5 tests) | `simulate_upgrade`, `UpgradeCompatibility` |
