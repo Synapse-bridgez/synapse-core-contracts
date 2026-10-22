@@ -1,12 +1,17 @@
-//! Ledger storage helpers for the transaction contract.
+//! Storage helpers for the contract.
 //!
-//! This module owns the pack/unpack conversion between the public
+//! Centralises the storage keys and accessors used across the contract so
+//! that the auth, upgrade, and migration flows all read/write the same
+//! locations. See `docs/adr/0004-timelocked-upgrade.md` for the timelocked
+//! upgrade state machine.
+//!
+//! This module also owns the pack/unpack conversion between the public
 //! [`Transaction`] type and the packed [`StoredTransaction`] form persisted to
-//! ledger storage, and also centralises the storage keys and small read/write
+//! ledger storage, and centralises the storage keys and small read/write
 //! helpers used by the contract entry points.
 
 use crate::types::{CallbackType, StoredTransaction, Transaction, TransactionStatus};
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 /// Bit offset of the `status` field within `StoredTransaction::packed`.
 const STATUS_SHIFT: u32 = 0;
@@ -36,10 +41,44 @@ const RETRY_MASK: u32 = 0xF;
 pub enum DataKey {
     /// Contract administrator address.
     Admin,
+    /// Pending admin transfer proposal (issue #5).
+    PendingAdmin,
+    /// Pending relay-signer rotation proposal (issue #87).
+    PendingRelaySigner,
+    /// Pending timelocked upgrade proposal (issue #312).
+    PendingUpgrade,
+    /// Ledger timestamp at which the pending upgrade becomes finalizable.
+    UpgradeReadyAt,
+    /// Current schema version of 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    /// Contract administrator address.
+    Admin,
+    /// Pending admin transfer proposal (issue #5).
+    PendingAdmin,
+    /// Pending relay-signer rotation proposal (issue #87).
+    PendingRelaySigner,
+    /// Pending timelocked upgrade proposal (issue #312).
+    PendingUpgrade,
+    /// Ledger timestamp at which the pending upgrade becomes finalizable.
+    UpgradeReadyAt,
+    /// Current schema version of the stored contract state.
+    SchemaVersion,
     /// Relay signer address authorised to submit relayed operations.
     RelaySigner,
     /// Whether the contract has been initialised.
     Initialized,
+}
+
+/// A pending timelocked upgrade proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    /// The new WASM hash to install on finalize.
+    pub new_wasm_hash: BytesN<32>,
+    /// The schema version the new WASM is expected to produce.
+    pub expected_schema_version: u32,
 }
 
 /// Map a `u32` discriminant back to a [`TransactionStatus`].
@@ -97,6 +136,60 @@ pub fn unpack(stored: &StoredTransaction) -> Transaction {
         retry_count,
         tags: stored.tags.clone(),
     }
+}
+
+/// Returns the configured upgrade delay in seconds (issue #84/#105).
+pub fn upgrade_delay(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::UpgradeDelay)
+        .unwrap_or(0)
+}
+
+/// Stores a pending upgrade proposal and starts the timelock.
+///
+/// The proposal becomes finalizable once `upgrade_delay()` seconds have
+/// elapsed from the current ledger timestamp.
+pub fn set_pending_upgrade(env: &Env, proposal: &PendingUpgrade) {
+    let ready_at = env.ledger().timestamp().saturating_add(upgrade_delay(env));
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingUpgrade, proposal);
+    env.storage()
+        .instance()
+        .set(&DataKey::UpgradeReadyAt, &ready_at);
+}
+
+/// Returns the pending upgrade proposal, if any.
+pub fn get_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+/// Returns the ledger timestamp at which the pending upgrade becomes
+/// finalizable, if a proposal is pending.
+pub fn get_upgrade_ready_at(env: &Env) -> Option<u64> {
+    env.storage().instance().get(&DataKey::UpgradeReadyAt)
+}
+
+/// Clears any pending upgrade proposal and its timelock.
+pub fn clear_pending_upgrade(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingUpgrade);
+    env.storage().instance().remove(&DataKey::UpgradeReadyAt);
+}
+
+/// Returns the current schema version of the stored contract state.
+pub fn get_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::SchemaVersion)
+        .unwrap_or(0)
+}
+
+/// Persists the schema version of the stored contract state.
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
 }
 
 /// Returns whether the contract has been initialised.
