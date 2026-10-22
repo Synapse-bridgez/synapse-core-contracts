@@ -1,7 +1,10 @@
-//! # Migration registry
+//! Migration-metadata manifest and schema-version diffing.
 //!
-//! Versioned, auditable on-chain migration routines invoked by
-//! [`crate::SynapseCoreContract::upgrade_and_migrate`].
+//! This module provides the on-chain-adjacent metadata used by the off-chain
+//! `compare_schema_versions()` tooling. It records, per schema version, the
+//! additive storage/semantic changes introduced by that version so operators
+//! planning a multi-version upgrade can mechanically assemble the cumulative
+//! diff instead of reading prose in `CHANGELOG.md`/`DECISIONS.md`.
 //!
 //! ## Design (ADR-0005)
 //!
@@ -27,88 +30,78 @@
 //! reverted cleanly by restoring the previous WASM hash, so
 //! [`crate::SynapseCoreContract::rollback_upgrade`] refuses them with
 //! [`ContractError::UpgradeNotReversible`].
+//!
+//! The tooling here is strictly read-only and informational: it never performs
+//! or automates an upgrade.
 
-use soroban_sdk::Env;
+use soroban_sdk::{contracttype, Env, String, Vec};
 
-use crate::storage::StorageClient;
-use crate::types::ContractError;
+/// A single documented change introduced by a schema version.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaChange {
+    /// The schema version that introduced this change.
+    pub version: u32,
+    /// Short machine-readable kind, e.g. `"storage_key"`, `"encoding"`.
+    pub kind: String,
+    /// Human-readable description of the change.
+    pub description: String,
+}
 
-/// Hard cap on persistent/instance keys a single migration invocation may
-/// read or write. Chosen to stay well inside typical Soroban resource
-/// limits while still allowing small additive schema transforms.
-pub const MAX_MIGRATION_STORAGE_TOUCHES: u32 = 64;
+/// The migration-metadata manifest: an ordered list of documented changes.
+///
+/// Entries are expected to be ordered by ascending `version`. The manifest is
+/// the single data source for the off-chain diff tool.
+pub type MigrationManifest = Vec<SchemaChange>;
 
-/// Sentinel `migration_id` for a no-op migration (useful for exercising the
-/// atomic upgrade+migrate path without transforming storage).
-pub const MIGRATION_NOOP: u32 = 0;
+/// Result of comparing two schema versions.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaDiff {
+    /// The lower (source) schema version of the comparison.
+    pub from_version: u32,
+    /// The higher (target) schema version of the comparison.
+    pub to_version: u32,
+    /// Changes with `from_version < version <= to_version`, in order.
+    pub changes: Vec<SchemaChange>,
+    /// True when no additive changes were recorded in the range.
+    pub empty: bool,
+}
 
-/// Test-only / scaffolding id: writes one marker key then succeeds.
-/// Real schema migrations claim subsequent ids in this match arms list.
-pub const MIGRATION_WRITE_MARKER: u32 = 1;
+/// Compare two schema versions against the migration manifest.
+///
+/// Returns the ordered list of changes introduced strictly after
+/// `from_version` and up to and including `to_version`. When the range contains
+/// no manifest entries the returned [`SchemaDiff`] has `empty == true` and an
+/// empty `changes` list — callers should render a clear "no additive changes
+/// recorded" message rather than treating this as an error.
+///
+/// This is a read-only, informational helper for operator planning; it does not
+/// perform or automate any upgrade.
+pub fn compare_schema_versions(
+    env: &Env,
+    manifest: &MigrationManifest,
+    from_version: u32,
+    to_version: u32,
+) -> SchemaDiff {
+    let (lo, hi) = if from_version <= to_version {
+        (from_version, to_version)
+    } else {
+        (to_version, from_version)
+    };
 
-/// Test-only id that writes a marker then fails — used to prove atomic
-/// revert leaves storage unchanged.
-pub const MIGRATION_FAIL_AFTER_WRITE: u32 = 2;
-
-pub struct MigrationRegistry;
-
-impl MigrationRegistry {
-    /// Dispatch `migration_id` to its routine. Returns the number of storage
-    /// touches performed (for audit / events).
-    pub fn run(env: &Env, migration_id: u32) -> Result<u32, ContractError> {
-        match migration_id {
-            MIGRATION_NOOP => Ok(0),
-            MIGRATION_WRITE_MARKER => {
-                Self::assert_within_bound(1)?;
-                StorageClient::set_migration_marker(env, migration_id);
-                Ok(1)
-            }
-            MIGRATION_FAIL_AFTER_WRITE => {
-                Self::assert_within_bound(1)?;
-                StorageClient::set_migration_marker(env, migration_id);
-                // Deliberate failure after a write — caller must observe
-                // full rollback of this marker when the invoke returns Err.
-                Err(ContractError::MigrationFailed)
-            }
-            _ => Err(ContractError::UnknownMigration),
+    let mut changes: Vec<SchemaChange> = Vec::new(env);
+    for change in manifest.iter() {
+        if change.version > lo && change.version <= hi {
+            changes.push_back(change);
         }
     }
 
-    /// Validate that `migration_id` is a known routine without executing it.
-    ///
-    /// Used by [`crate::SynapseCoreContract::upgrade_and_migrate`] to fail
-    /// closed on [`ContractError::UnknownMigration`] *before* committing the
-    /// WASM swap, so an unknown id never leaves the contract on the new WASM.
-    pub fn validate(migration_id: u32) -> Result<(), ContractError> {
-        match migration_id {
-            MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
-            _ => Err(ContractError::UnknownMigration),
-        }
-    }
-
-    /// Whether the migration identified by `migration_id` can be cleanly
-    /// reverted by restoring the previous WASM hash.
-    ///
-    /// Only purely additive / no-op transforms are reversible: they leave
-    /// pre-existing keys untouched, so the older WASM can still read the
-    /// ledger after the swap is undone. Structural schema changes (marker
-    /// rewrites, key removals, etc.) are not reversible and must be rejected
-    /// by [`crate::SynapseCoreContract::rollback_upgrade`] with
-    /// [`ContractError::UpgradeNotReversible`].
-    pub fn is_reversible(migration_id: u32) -> Result<(), ContractError> {
-        match migration_id {
-            MIGRATION_NOOP => Ok(()),
-            MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => {
-                Err(ContractError::UpgradeNotReversible)
-            }
-            _ => Err(ContractError::UnknownMigration),
-        }
-    }
-
-    fn assert_within_bound(planned_touches: u32) -> Result<(), ContractError> {
-        if planned_touches > MAX_MIGRATION_STORAGE_TOUCHES {
-            return Err(ContractError::MigrationFailed);
-        }
-        Ok(())
+    let empty = changes.is_empty();
+    SchemaDiff {
+        from_version: lo,
+        to_version: hi,
+        changes,
+        empty,
     }
 }
