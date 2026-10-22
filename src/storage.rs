@@ -610,4 +610,3 @@ mod tests {
         assert_eq!(unpack(&stored).retry_count, 0xF);
     }
 }
-

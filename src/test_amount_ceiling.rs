@@ -173,3 +173,174 @@ fn ceiling_setters_require_admin_auth() {
         .try_set_anchor_amount_ceiling(&String::from_str(&env, ANCHOR_A), &1)
         .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Global default ceiling: unset default and at/above/below an admin value.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unset_global_ceiling_falls_back_to_documented_default() {
+    let (env, client, _relay) = setup();
+    // "Unset" is not "no ceiling": the documented default applies.
+    assert_eq!(client.get_global_max_amount(), DEFAULT_GLOBAL_MAX_AMOUNT);
+    assert_boundary(&env, &client, ANCHOR_A, DEFAULT_GLOBAL_MAX_AMOUNT);
+}
+
+#[test]
+fn configured_global_ceiling_below_at_above() {
+    let (env, client, _relay) = setup();
+    set_global(&env, &client, 7_500);
+    // Below.
+    assert!(client
+        .try_register_callback(&payload(&env, "g-below", ANCHOR_A, 7_499))
+        .is_ok());
+    // At.
+    assert!(client
+        .try_register_callback(&payload(&env, "g-at", ANCHOR_A, 7_500))
+        .is_ok());
+    // Above.
+    assert_eq!(
+        client.try_register_callback(&payload(&env, "g-above", ANCHOR_A, 7_501)),
+        Err(Ok(ContractError::AmountCeilingExceeded))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per-anchor overrides: at/above/below the override and the global fallback.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn per_anchor_override_below_at_above() {
+    let (env, client, _relay) = setup();
+    set_global(&env, &client, 10_000);
+    client.set_anchor_amount_ceiling(&String::from_str(&env, ANCHOR_A), &2_000);
+    // Below the override.
+    assert!(client
+        .try_register_callback(&payload(&env, "a-below", ANCHOR_A, 1_999))
+        .is_ok());
+    // At the override.
+    assert!(client
+        .try_register_callback(&payload(&env, "a-at", ANCHOR_A, 2_000))
+        .is_ok());
+    // Above the override (still under the global ceiling).
+    assert_eq!(
+        client.try_register_callback(&payload(&env, "a-above", ANCHOR_A, 2_001)),
+        Err(Ok(ContractError::AmountCeilingExceeded))
+    );
+    // The unconfigured anchor is bound only by the global fallback.
+    assert!(client
+        .try_register_callback(&payload(&env, "b-below", ANCHOR_B, 9_999))
+        .is_ok());
+    assert!(client
+        .try_register_callback(&payload(&env, "b-at", ANCHOR_B, 10_000))
+        .is_ok());
+    assert_eq!(
+        client.try_register_callback(&payload(&env, "b-above", ANCHOR_B, 10_001)),
+        Err(Ok(ContractError::AmountCeilingExceeded))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exhaustive 2^8 invalid-field combination test (COST_MODEL.md §12.5).
+//
+// Eight independently invalidatable fields. For every one of the 256 subsets
+// we assert (a) the accept/reject outcome is unchanged versus the baseline
+// (reject iff at least one field is invalid) and (b) the first-reported error
+// follows the documented cheapest-first order:
+//   amount -> host-length checks -> asset_code -> stellar_account/asset_issuer
+// ---------------------------------------------------------------------------
+
+/// The eight invalidatable fields, in documented cheapest-first order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BadField {
+    Amount,
+    TxIdTooLong,
+    AnchorTxIdTooLong,
+    AssetCode,
+    StellarAccount,
+    AssetIssuer,
+    IdempotencyKeyEmpty,
+    CallbackStatus,
+}
+
+const BAD_FIELDS: [BadField; 8] = [
+    BadField::Amount,
+    BadField::TxIdTooLong,
+    BadField::AnchorTxIdTooLong,
+    BadField::AssetCode,
+    BadField::StellarAccount,
+    BadField::AssetIssuer,
+    BadField::IdempotencyKeyEmpty,
+    BadField::CallbackStatus,
+];
+
+fn valid_payload(env: &Env, tx_id: &str) -> CallbackPayload {
+    payload(env, tx_id, ANCHOR_A, 100)
+}
+
+fn apply_bad(env: &Env, p: &mut CallbackPayload, field: BadField) {
+    match field {
+        BadField::Amount => p.amount = -1,
+        BadField::TxIdTooLong => p.transaction_id = String::from_str(env, &"x".repeat(200)),
+        BadField::AnchorTxIdTooLong => {
+            p.anchor_transaction_id = String::from_str(env, &"y".repeat(200))
+        }
+        BadField::AssetCode => p.asset_code = String::from_str(env, "TOOLONGCODE"),
+        BadField::StellarAccount => p.stellar_account = String::from_str(env, "not-a-strkey"),
+        BadField::AssetIssuer => p.asset_issuer = String::from_str(env, "not-a-strkey"),
+        BadField::IdempotencyKeyEmpty => p.idempotency_key = String::from_str(env, ""),
+        BadField::CallbackStatus => p.callback_status = String::from_str(env, ""),
+    }
+}
+
+/// Expected first error for a single invalid field, per the documented order.
+fn expected_error(field: BadField) -> ContractError {
+    match field {
+        BadField::Amount => ContractError::InvalidAmount,
+        BadField::TxIdTooLong | BadField::AnchorTxIdTooLong => ContractError::InvalidPayload,
+        BadField::AssetCode => ContractError::InvalidAssetCode,
+        BadField::StellarAccount | BadField::AssetIssuer => ContractError::InvalidStellarAccount,
+        BadField::IdempotencyKeyEmpty => ContractError::InvalidPayload,
+        BadField::CallbackStatus => ContractError::InvalidPayload,
+    }
+}
+
+#[test]
+fn exhaustive_2_pow_8_invalid_field_combinations() {
+    let (env, client, _relay) = setup();
+    // Generous ceiling so amount-ceiling never masks the field checks.
+    set_global(&env, &client, 1_000_000);
+
+    for mask in 0u32..256 {
+        let mut p = valid_payload(&env, &std::format!("combo-{mask}"));
+        let mut first: Option<BadField> = None;
+        for (i, field) in BAD_FIELDS.iter().enumerate() {
+            if mask & (1 << i) != 0 {
+                apply_bad(&env, &mut p, *field);
+                if first.is_none() {
+                    first = Some(*field);
+                }
+            }
+        }
+
+        let result = client.try_register_callback(&p);
+        match first {
+            None => {
+                // No invalid field: must be accepted.
+                assert!(
+                    result.is_ok(),
+                    "mask {mask}: expected accept, got {result:?}"
+                );
+            }
+            Some(f) => {
+                // At least one invalid field: must be rejected with the
+                // cheapest-first error for the earliest invalid field.
+                assert_eq!(
+                    result,
+                    Err(Ok(expected_error(f))),
+                    "mask {mask}: expected first error for {f:?}"
+                );
+            }
+        }
+    }
+}
