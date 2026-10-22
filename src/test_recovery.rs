@@ -2,7 +2,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
@@ -144,7 +144,7 @@ fn quorum_met_allowed_one_short_rejected() {
             .unwrap(),
         ContractError::QuorumNotMet
     );
-    client.approve_relay_call(&s2);
+    client.approve_relay_call(&a, &s2);
     client.start_processing(&a, &primary);
     assert_eq!(client.get_status(&a), TransactionStatus::Processing);
     let _ = admin;
@@ -153,14 +153,20 @@ fn quorum_met_allowed_one_short_rejected() {
 #[test]
 fn threshold_bounds_enforced() {
     let (env, client, _admin) = setup();
+    // Reject threshold == 0 (quorum would be trivially met).
     assert_eq!(
         client.try_set_relay_threshold(&0).unwrap_err().unwrap(),
         ContractError::InvalidThreshold
     );
+    // Reject threshold > current signer count (quorum unreachable).
     assert_eq!(
         client.try_set_relay_threshold(&2).unwrap_err().unwrap(),
         ContractError::InvalidThreshold
     );
+    // Accept threshold == signer count (full consensus required).
+    client.set_relay_threshold(&1);
+    assert_eq!(client.relay_signer_set().threshold, 1);
+    // Removing the last signer would leave threshold > signer count.
     let primary = client.relay_signer();
     assert_eq!(
         client
