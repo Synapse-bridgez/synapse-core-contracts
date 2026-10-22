@@ -9,6 +9,10 @@ description = "Synapse Core – on-chain transaction registry and phase router f
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "compare-schema-versions"
+path = "src/bin/compare_schema_versions.rs"
+
 [dependencies]
 soroban-sdk = { version = "22.0.0", features = ["alloc"] }
 
@@ -28,9 +32,3 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
-
-# `synapse_quarantine` gates tests whose entry points were lost from `lib.rs`
-# by the #176–#197 squash merges. It is never set in CI; see the QUARANTINE
-# note at the top of `src/lib.rs`.
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(synapse_quarantine)'] }
