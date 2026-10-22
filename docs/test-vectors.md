@@ -16,6 +16,10 @@ paths. It is not a dump of every test.
 The vectors are defined in
 [`tools/export-test-vectors/src/main.rs`](../tools/export-test-vectors/src/main.rs).
 That crate is standalone and is not part of the contract build.
+It serializes the curated expectations below; it does not execute the contract
+or verify those expectations against the current implementation. Validate
+behavior with the contract test suite and review vector changes when behavior
+changes.
 
 ```bash
 cd tools/export-test-vectors
