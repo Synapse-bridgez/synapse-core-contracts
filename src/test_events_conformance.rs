@@ -249,6 +249,74 @@ fn dispute_resolution_emits_raised_before_resolved() {
 }
 
 // ---------------------------------------------------------------------------
+// Event decoder coverage: every catalogued topic must be decodable off-chain.
+// ---------------------------------------------------------------------------
+
+/// The event conformance manifest, embedded at compile time.
+///
+/// This is the same source of truth `EVENTS.md` is generated from, so the
+/// coverage set below is derived from the manifest rather than hardcoded.
+const EVENT_CONFORMANCE_MANIFEST: &str = include_str!("../event_conformance_manifest.toml");
+
+/// Extract the catalogued event topics from the conformance manifest.
+///
+/// Each `[[event]]` table declares a `topic = "..."` entry. Returns the
+/// topics in manifest order.
+fn catalogued_topics() -> std::vec::Vec<&'static str> {
+    let mut topics = std::vec::Vec::new();
+    for line in EVENT_CONFORMANCE_MANIFEST.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("topic") {
+            let rest = rest.trim_start();
+            if let Some(value) = rest.strip_prefix('=') {
+                let value = value.trim();
+                if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+                    topics.push(inner);
+                }
+            }
+        }
+    }
+    topics
+}
+
+/// Assert every topic catalogued in `event_conformance_manifest.toml` has a
+/// corresponding decode path in `src/events.rs`.
+///
+/// A topic is considered decodable when `src/events.rs` declares a matching
+/// `EVENT_*` topic constant (the canonical symbol used both when emitting and
+/// when decoding off-chain). Adding a new event to the manifest without adding
+/// its constant/decoder helper makes this test fail, which is exactly the gap
+/// this test exists to catch.
+#[test]
+fn event_decoder_covers_catalogued_topics() {
+    let topics = catalogued_topics();
+    assert!(
+        !topics.is_empty(),
+        "event_conformance_manifest.toml must catalogue at least one event topic"
+    );
+
+    // The canonical topic constants declared by the events module.
+    let known: [&str; 7] = [
+        events::EVENT_STATUS,
+        events::EVENT_DONE,
+        events::EVENT_REG,
+        events::EVENT_BATCH,
+        events::EVENT_UP_FIN,
+        events::EVENT_DISPUTE_RAISED,
+        events::EVENT_DISPUTE_RESOLVED,
+    ];
+
+    for topic in topics {
+        assert!(
+            known.contains(&topic),
+            "catalogued topic `{}` has no decode path in src/events.rs; \
+             add a matching EVENT_* constant / decoder helper",
+            topic
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sanity: events module helpers exist and are used by the entry points above.
 // ---------------------------------------------------------------------------
 

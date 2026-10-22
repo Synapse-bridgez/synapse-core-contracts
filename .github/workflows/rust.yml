@@ -40,6 +40,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
 
+  event-decoder-covers-catalogued-topics:
+    name: event_decoder_covers_catalogued_topics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The filter string below MUST match the test name in
+      # src/test_events_conformance.rs. A filter that matches zero tests
+      # exits 0 and looks green, so we first assert the test is actually
+      # discovered via `--list` before running it.
+      - name: Assert the filtered test is discovered
+        run: |
+          set -euo pipefail
+          listed="$(cargo test event_decoder_covers_catalogued_topics -- --list)"
+          echo "$listed"
+          if ! grep -q 'event_decoder_covers_catalogued_topics' <<<"$listed"; then
+            echo "::error::Filter 'event_decoder_covers_catalogued_topics' matched 0 tests"
+            exit 1
+          fi
+      - name: Run event decoder coverage test
+        run: cargo test event_decoder_covers_catalogued_topics
+
   doc-coverage:
     name: Doc coverage (missing_docs gate)
     runs-on: ubuntu-latest
