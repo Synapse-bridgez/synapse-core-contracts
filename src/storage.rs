@@ -1,68 +1,116 @@
-use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
-
-use crate::types::{DataKey, Transaction, TransactionStatus};
-use crate::validation::MAX_REASON_LEN;
-
-/// Maximum number of tags that may be attached to a single transaction.
-///
-/// Enforced by `add_transaction_tag` so that tag metadata stays bounded.
-pub const MAX_TAGS_PER_TRANSACTION: u32 = 10;
-
-/// Lifecycle status of an anchor transaction.
-///
-/// The `Failed` state is reachable from any non-terminal state (`Pending` or
-/// `Processing`) via `fail_transaction`, while `Cancelled` is only reachable
-/// from `Pending`/`Processing` via `cancel_transaction`. This asymmetry is
-/// deliberate: `Failed` means "the anchor genuinely failed", whereas
-/// `Cancelled` means "someone decided to stop this".
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TxStatus {
-    Pending,
-    Processing,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl TxStatus {
-    /// Returns `true` if the status is terminal (`Completed`, `Failed`, or
-    /// `Cancelled`) and therefore no further transitions are permitted.
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, TxStatus::Completed | TxStatus::Failed | TxStatus::Cancelled)
-    }
-}
-
-/// Persisted record for a single anchor transaction.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Transaction {
-    pub tx_id: Symbol,
-    pub status: TxStatus,
-    pub caller: Address,
-    pub reason: Option<String>,
-}
-
-#[contracttype]
-pub enum DataKey {
-    Transaction(Symbol),
-    Admin,
-    Relay(Address),
-}
-
-/// Reads a transaction by `tx_id`, returning `None` if it does not exist.
-pub fn get_transaction(env: &Env, tx_id: &Symbol) -> Option<Transaction> {
+/// Writes (or overwrites) a transaction record.
+pub fn set_transaction(env: &Env, tx: &Transaction) {
     env.storage()
         .persistent()
         .get(&DataKey::Transaction(tx_id.clone()))
 }
 
 /// Writes (or overwrites) a transaction record.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx` - The transaction record to store.
 pub fn set_transaction(env: &Env, tx: &Transaction) {
     env.storage()
         .persistent()
         .set(&DataKey::Transaction(tx.tx_id.clone()), tx);
 }
+
+/// Records the Stellar transaction hash on an existing `Transaction` record.
+///
+/// This is the audit hook used by `complete_transaction`: it persists the
+/// `stellar_tx_hash` so subsequent `get_transaction` calls return it, matching
+/// the assertions in `test_recovery.rs` and `test_rotation_chaos.rs`.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction identifier to update.
+/// * `stellar_tx_hash` - The Stellar ledger transaction hash to record.
+///
+/// # Panics
+/// Panics if no `Transaction` record exists for `tx_id`.
+pub fn set_stellar_tx_hash(env: &Env, tx_id: &BytesN<32>, stellar_tx_hash: &BytesN<32>) {
+    let mut tx = get_transaction(env, tx_id)
+        .unwrap_or_else(|| panic!("transaction not found"));
+    tx.stellar_tx_hash = Some(stellar_tx_hash.clone());
+    put_transaction(env, &tx);
+}
+
+/// Returns the currently accrued treasury fee total.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+///
+/// # Returns
+/// The accumulated fee in stroops, or `0` if none has been accrued.
+pub fn get_treasury_accrued(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TreasuryAccrued)
+        .unwrap_or(0)
+}
+
+/// Persists the accrued treasury fee total.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `amount` - The new accumulated fee total in stroops.
+pub fn set_treasury_accrued(env: &Env, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::TreasuryAccrued, &amount);
+}
+
+/// Fee-accrual hook stub for issue #73.
+///
+/// Called by `complete_transaction` after the status transition succeeds. When
+/// issue #73 lands, this function will compute the fee owed for `tx_id` and add
+/// it to the treasury accumulator. For now it is a no-op placeholder so that
+/// issue #73 does not require re-opening the `complete_transaction` entry point.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction that just completed.
+pub fn accrue_completion_fee(_env: &Env, _tx_id: &BytesN<32>) {
+    // TODO(#73): compute fee for `tx_id` and add to `DataKey::TreasuryAccrued`.
+}
+
+/// Returns whether `addr` is an authorized relayer.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `addr` - The address to check.
+pub fn is_relayer(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Relayer(addr.clone()))
+        .unwrap_or(false)
+}
+
+/// Marks `addr` as an authorized relayer.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `addr` - The address to authorize.
+pub fn set_relayer(env: &Env, addr: &Address) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Relayer(addr.clone()), &true);
+}
+
+/// Returns the configured admin address, if any.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::Admin)
+}
+
+/// Persists the admin address.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `admin` - The address to set as admin.
 
 /// Returns `true` if a transaction with `tx_id` exists.
 pub fn has_transaction(env: &Env, tx_id: &Symbol) -> bool {
@@ -193,6 +241,19 @@ pub fn get_flag(env: &Env, key: &DataKey) -> bool {
 /// Persist the admin address.
 pub fn set_admin(env: &Env, admin: &Address) {
     env.storage().persistent().set(&DataKey::Admin, admin);
+}
+
+/// Emits a contract event with the given topics and data.
+///
+/// Thin wrapper kept here so storage/transition helpers can emit without
+/// importing the events module directly.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `topics` - The event topics.
+/// * `data` - The event payload.
+pub fn emit(env: &Env, topics: &soroban_sdk::Vec<Symbol>, data: &soroban_sdk::Val) {
+    env.events().publish(topics.clone(), data.clone());
 }
 
 /// Load the admin address, if configured.
