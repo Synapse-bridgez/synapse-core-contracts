@@ -35,6 +35,9 @@ remove its row here.
 | `src/test_pause.rs` | `test_post_upgrade_self_check_passes_on_healthy_state` | `StorageClient::post_upgrade_self_check` |
 | `src/test_pause.rs` | `test_post_upgrade_self_check_fails_when_relay_missing` | `post_upgrade_self_check`, `SelfCheckFailed` |
 | `src/test_pause.rs` | `test_upgrade_history_*` (3 tests) | `get_upgrade_history`, `UpgradeRecord`, `MAX_UPGRADE_HISTORY` |
+| `src/test_pause.rs` | `test_upgrade_self_check_failure_reverts_without_history` | self-check, `get_upgrade_history` |
+| `src/test_pause.rs` | `test_self_check_events_topics` | `EventUpgradeSelfCheckPassed` / `Failed` emitters |
+| `src/test_pause.rs` | `test_simulate_upgrade_*` (5 tests) | `simulate_upgrade`, `UpgradeCompatibility` |
 
 ## Unwired files
 
