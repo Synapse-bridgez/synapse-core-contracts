@@ -16,8 +16,12 @@
 //!
 //! Relay signer rotation events are emitted under the `relay` topic and mirror
 //! the schema in `EVENTS.md`; keep them in sync.
+//!
+//! Transaction failure events are emitted under the `fail` topic. This is
+//! deliberately distinct from the `cancel` topic: `fail` means "the anchor
+//! genuinely failed", while `cancel` means "someone decided to stop this".
 
-use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol};
 
 /// Topic symbol for the contract-initialized event ("init" per README).
 pub const TOPIC_INIT: Symbol = symbol_short!("init");
@@ -31,6 +35,13 @@ pub const GUARDIAN_REVOKE_TOPIC: Symbol = symbol_short!("guardian_revoke");
 /// Topic symbol used for relay-related events (matches the "relay" topic in
 /// `EVENTS.md`).
 pub const RELAY_TOPIC: Symbol = symbol_short!("relay");
+
+/// Topic symbol used for transaction failure events.
+///
+/// Emitted by `fail_transaction` when an anchor genuinely fails. This is
+/// deliberately distinct from the `cancel` topic: `fail` means "the anchor
+/// genuinely failed", while `cancel` means "someone decided to stop this".
+pub const FAIL_TOPIC: Symbol = symbol_short!("fail");
 
 /// Payload emitted when the contract is initialized for the first time.
 #[contracttype]
@@ -131,4 +142,21 @@ pub fn emit_relay_signer_rotated(env: &Env, old_signer: Address, new_signer: Add
     };
     env.events().publish((RELAY_TOPIC,), event);
 }
+
+/// Emit the `fail` event for a transaction.
+///
+/// Publishes the `fail` topic with a payload of `(tx_id, reason)`, allowing
+/// off-chain consumers to observe both the affected transaction and the
+/// human-readable failure reason.
+///
+/// # Arguments
+///
+/// * `env` - The contract environment used to publish the event.
+/// * `tx_id` - Identifier of the transaction that failed.
+/// * `reason` - Human-readable reason for the failure. Callers are
+///   responsible for validating `reason` against the string-length cap
+///   (issue #47) before invoking this helper.
+pub fn emit_fail(env: &Env, tx_id: u64, reason: &String) {
+    env.events()
+        .publish((FAIL_TOPIC, tx_id), reason.clone());
 }
