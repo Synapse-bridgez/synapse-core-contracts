@@ -1,4 +1,8 @@
-# Quarantined tests
+# Quarantine restoration history
+
+This file tracked tests temporarily gated during the #176–#197 merge recovery.
+The restoration wave has removed all quarantine cfg gates, so the tracker is
+retired.
 
 The Wave 2 merge (#197) replaced `src/lib.rs`, `src/types.rs` and
 `src/storage.rs` wholesale. That dropped a number of entry points added by
@@ -30,17 +34,12 @@ remove its row here.
 | `src/tests.rs` | `test_cancel_transaction_rejects_stranger_and_illegal_states` | `cancel_transaction`, `CannotCancel`, `AlreadyCancelled` |
 | `src/tests.rs` | `test_retry_transaction_cycle_and_limit` | `retry_transaction`, `Transaction::retry_count` |
 | `src/tests.rs` | `test_retry_transaction_rejects_non_failed` | `retry_transaction` |
-| `src/tests.rs` | `test_get_transactions_by_status_pagination_and_transitions` | `get_transactions_by_status` |
-| `src/tests.rs` | `test_get_transactions_by_status_rejects_bad_limit` | `get_transactions_by_status` |
 | `src/test_pause.rs` | `test_post_upgrade_self_check_passes_on_healthy_state` | `StorageClient::post_upgrade_self_check` |
 | `src/test_pause.rs` | `test_post_upgrade_self_check_fails_when_relay_missing` | `post_upgrade_self_check`, `SelfCheckFailed` |
+| `src/test_pause.rs` | `test_upgrade_history_*` (3 tests) | `get_upgrade_history`, `UpgradeRecord`, `MAX_UPGRADE_HISTORY` |
 | `src/test_pause.rs` | `test_upgrade_self_check_failure_reverts_without_history` | self-check, `get_upgrade_history` |
 | `src/test_pause.rs` | `test_self_check_events_topics` | `EventUpgradeSelfCheckPassed` / `Failed` emitters |
 | `src/test_pause.rs` | `test_simulate_upgrade_*` (5 tests) | `simulate_upgrade`, `UpgradeCompatibility` |
-| `src/test_pause.rs` | `test_upgrade_history_*` (3 tests) | `get_upgrade_history`, `UpgradeRecord`, `MAX_UPGRADE_HISTORY` |
-
-`MINIMAL_WASM` and `upload_minimal` in `src/test_pause.rs` are gated too,
-because only the quarantined upgrade tests use them.
 
 ## Unwired files
 
