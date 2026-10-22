@@ -1,36 +1,23 @@
 #![no_std]
 
-//! # Synapse Core — On-Chain Contract
+//! Soroban smart contract crate.
 //!
-//! Phase 1 of the Synapse Bridge ecosystem.
-//!
-//! This contract mirrors the off-chain `synapse-core` Rust service, providing an
-//! **on-chain transaction registry** that:
-//!
-//! 1. Accepts callback registrations from the Stellar Anchor Platform (via the
-//!    off-chain relay), storing each deposit event with status `Pending`.
-//! 2. Guards against duplicate delivery with an idempotency key ledger.
-//! 3. Drives the transaction through its lifecycle:
-//!    `Pending → Processing → Completed | Failed`
-//! 4. Emits structured events at every state transition so Phase 2 (Swap Engine)
-//!    and Phase 3 (Cross-Chain Bridge) can subscribe and act.
-//!
-//! ## Module layout
-//!
-//! ```text
-//! lib.rs          ← you are here (contract entry-point)
-//! types.rs        ← Transaction, TransactionStatus, CallbackPayload, errors
-//! storage.rs      ← all ledger read/write helpers
-//! events.rs       ← typed event emission
-//! validation.rs   ← input guards (account format, asset code, amount bounds)
-//! admin.rs        ← admin / owner management
-//! ```
+//! This crate exposes the contract entry points and supporting modules.
+//! The migration registry lives in [`migration`] and is invoked by the
+//! upgrade path before the WASM swap commits.
 
 mod admin;
 mod events;
+mod migration;
 mod storage;
 mod types;
 mod validation;
+
+//! Soroban smart contract crate.
+//!
+//! This crate exposes the contract entry points and supporting modules.
+//! The migration registry lives in [`migration`] and is invoked by the
+//! upgrade path before the WASM swap commits.
 
 #[cfg(test)]
 mod bench_events;
@@ -58,6 +45,8 @@ mod tests_auth_adversarial;
 mod tests_invariants;
 #[cfg(test)]
 mod tests_state_machine;
+
+pub use migration::{MigrationRegistry, MigrationRegistryClient};
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
@@ -288,286 +277,9 @@ impl SynapseCoreContract {
         Ok(())
     }
 
-    /// Mark a `Processing` transaction as `Completed` after on-chain verification.
+    /// Propose a new admin. Only the current admin may call this.
     ///
-    /// `stellar_tx_hash` — the Stellar transaction hash confirming the deposit
-    ///                     was settled on Horizon. Stored for auditability.
-    ///
-    /// # Errors
-    /// - [`ContractError::Unauthorised`] if `caller` is neither admin nor relay.
-    /// - [`ContractError::StringTooLong`] if `stellar_tx_hash` exceeds its cap.
-    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
-    /// - [`ContractError::InvalidStatusTransition`] unless the transaction is `Processing`.
-    pub fn complete_transaction(
-        env: Env,
-        tx_id: String,
-        stellar_tx_hash: String,
-        caller: Address,
-    ) -> Result<(), ContractError> {
-        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
-        Validator::validate_stellar_tx_hash(&stellar_tx_hash)?;
-
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
-        if tx.status != TransactionStatus::Processing {
-            return Err(ContractError::InvalidStatusTransition);
-        }
-        let old_status = tx.status.clone();
-        tx.status = TransactionStatus::Completed;
-        tx.stellar_tx_hash = stellar_tx_hash.clone();
-        tx.updated_at_ledger = env.ledger().sequence();
-
-        StorageClient::save_transaction(&env, &tx);
-        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Completed);
-        EventEmitter::transaction_completed(&env, &tx_id, &stellar_tx_hash);
-
-        Ok(())
-    }
-
-    /// Mark a `Pending` or `Processing` transaction as `Failed`.
-    ///
-    /// `reason` — short human-readable failure code (e.g. `"horizon_timeout"`,
-    ///            `"invalid_account"`, `"circuit_open"`).
-    ///
-    /// # Errors
-    /// - [`ContractError::Unauthorised`] if `caller` is neither admin nor relay.
-    /// - [`ContractError::StringTooLong`] if `reason` exceeds its cap.
-    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
-    /// - [`ContractError::InvalidStatusTransition`] unless `Pending` or `Processing`.
-    pub fn fail_transaction(
-        env: Env,
-        tx_id: String,
-        reason: String,
-        caller: Address,
-    ) -> Result<(), ContractError> {
-        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
-        Validator::validate_failure_reason(&reason)?;
-
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
-        if tx.status != TransactionStatus::Pending && tx.status != TransactionStatus::Processing {
-            return Err(ContractError::InvalidStatusTransition);
-        }
-        let old_status = tx.status.clone();
-        tx.status = TransactionStatus::Failed;
-        tx.failure_reason = reason.clone();
-        tx.updated_at_ledger = env.ledger().sequence();
-
-        StorageClient::save_transaction(&env, &tx);
-        EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
-        EventEmitter::transaction_failed(&env, &tx_id, &reason);
-
-        Ok(())
-    }
-
-    // ── Disputes (#166) ───────────────────────────────────────────────────────
-
-    /// Open a dispute against a `Completed` transaction, adding it to the
-    /// tail of the dispute queue.
-    ///
-    /// The stored status stays `Completed` while disputed; the dispute is an
-    /// overlay record. Callable by the relay signer or admin. `reason` is a
-    /// short code, length-capped like `fail_transaction`'s reason.
-    ///
-    /// # Errors
-    /// - [`ContractError::InvalidStatusTransition`] if not `Completed`.
-    /// - [`ContractError::AlreadyDisputed`] if already under dispute.
-    /// - [`ContractError::DisputeQueueFull`] if [`MAX_OPEN_DISPUTES`] are open.
-    ///
-    /// # Events
-    /// Emits [`events::EventDisputeRaised`].
-    pub fn dispute_transaction(
-        env: Env,
-        tx_id: String,
-        reason: String,
-        caller: Address,
-    ) -> Result<(), ContractError> {
-        AdminClient::assert_is_relay_or_admin(&env, &caller)?;
-        Validator::validate_failure_reason(&reason)?;
-
-        let tx = StorageClient::get_transaction(&env, &tx_id)?;
-        if tx.status != TransactionStatus::Completed {
-            return Err(ContractError::InvalidStatusTransition);
-        }
-        if StorageClient::get_dispute(&env, &tx_id).is_some() {
-            return Err(ContractError::AlreadyDisputed);
-        }
-        if StorageClient::get_dispute_queue(&env).len() >= MAX_OPEN_DISPUTES {
-            return Err(ContractError::DisputeQueueFull);
-        }
-
-        let record = DisputeRecord {
-            seq: StorageClient::next_dispute_seq(&env),
-            reason: reason.clone(),
-            raised_by: caller.clone(),
-            raised_at_ledger: env.ledger().sequence(),
-            raised_at_timestamp: env.ledger().timestamp(),
-        };
-        StorageClient::open_dispute(&env, &tx_id, &record);
-        EventEmitter::dispute_raised(&env, &tx_id, &reason, &caller);
-        Ok(())
-    }
-
-    /// Resolve an open dispute and remove it from the queue. **Admin only.**
-    ///
-    /// If `upheld`, the transaction moves `Completed → Failed` with reason
-    /// `dispute_upheld`; otherwise it stays `Completed`, unchanged.
-    ///
-    /// # Errors
-    /// - [`ContractError::NotDisputed`] if `tx_id` is not under dispute.
-    ///
-    /// # Events
-    /// Emits [`events::EventStatusChanged`] (upheld only) then
-    /// [`events::EventDisputeResolved`].
-    pub fn resolve_dispute(env: Env, tx_id: String, upheld: bool) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-        let record = StorageClient::get_dispute(&env, &tx_id).ok_or(ContractError::NotDisputed)?;
-        let mut tx = StorageClient::get_transaction(&env, &tx_id)?;
-
-        StorageClient::close_dispute(&env, &tx_id, record.seq);
-        if upheld {
-            let old_status = tx.status.clone();
-            tx.status = TransactionStatus::Failed;
-            tx.failure_reason = String::from_str(&env, "dispute_upheld");
-            tx.updated_at_ledger = env.ledger().sequence();
-            StorageClient::save_transaction(&env, &tx);
-            EventEmitter::status_changed(&env, &tx_id, old_status, TransactionStatus::Failed);
-        }
-        EventEmitter::dispute_resolved(&env, &tx_id, upheld, &admin);
-        Ok(())
-    }
-
-    // ── Read-only queries ─────────────────────────────────────────────────────
-
-    /// Whether `tx_id` is currently under dispute.
-    pub fn is_disputed(env: Env, tx_id: String) -> bool {
-        StorageClient::get_dispute(&env, &tx_id).is_some()
-    }
-
-    /// Return the open [`DisputeRecord`] for `tx_id`, or `None`.
-    pub fn get_dispute(env: Env, tx_id: String) -> Option<DisputeRecord> {
-        StorageClient::get_dispute(&env, &tx_id)
-    }
-
-    /// Page through open disputes, oldest raised first.
-    ///
-    /// Returns up to `limit` transaction ids whose dispute sequence is
-    /// `>= cursor`, plus the cursor for the next page (`None` when there are
-    /// no more). Start with `cursor = 0`. Cursors are dispute sequence
-    /// numbers, so resolving a dispute between pages never skips or repeats
-    /// another entry. Resolved disputes leave the queue immediately.
-    ///
-    /// # Errors
-    /// - [`ContractError::InvalidPageLimit`] if `limit` is `0` or exceeds
-    ///   [`MAX_PAGE_LIMIT`].
-    pub fn get_dispute_queue(
-        env: Env,
-        cursor: u64,
-        limit: u32,
-    ) -> Result<(Vec<String>, Option<u64>), ContractError> {
-        if limit == 0 || limit > MAX_PAGE_LIMIT {
-            return Err(ContractError::InvalidPageLimit);
-        }
-        let mut page = Vec::new(&env);
-        for entry in StorageClient::get_dispute_queue(&env).iter() {
-            if entry.seq < cursor {
-                continue;
-            }
-            if page.len() == limit {
-                return Ok((page, Some(entry.seq)));
-            }
-            page.push_back(entry.tx_id);
-        }
-        Ok((page, None))
-    }
-
-    /// Return the effective amount ceiling for `anchor` (an `asset_issuer`):
-    /// the stricter of its per-anchor ceiling, if set, and the global
-    /// `global_max_amount` ceiling.
-    pub fn get_amount_ceiling(env: Env, anchor: String) -> i128 {
-        StorageClient::get_amount_ceiling(&env, &anchor)
-    }
-
-    /// Return the contract-wide `global_max_amount` ceiling: the param value
-    /// if set, else [`types::DEFAULT_GLOBAL_MAX_AMOUNT`].
-    pub fn get_global_max_amount(env: Env) -> i128 {
-        StorageClient::get_global_max_amount(&env)
-    }
-
-    /// Return the [`Transaction`] for the given `tx_id`, or
-    /// [`ContractError::TransactionNotFound`].
-    ///
-    /// # Errors
-    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
-    pub fn get_transaction(env: Env, tx_id: String) -> Result<Transaction, ContractError> {
-        // Read-only: intentionally NOT gated by the pause flag — pausing must
-        // never brick reads.
-        StorageClient::get_transaction(&env, &tx_id)
-    }
-
-    /// Return the current [`TransactionStatus`] without fetching the full record.
-    ///
-    /// # Errors
-    /// - [`ContractError::TransactionNotFound`] for an unknown `tx_id`.
-    pub fn get_status(env: Env, tx_id: String) -> Result<TransactionStatus, ContractError> {
-        StorageClient::get_transaction(&env, &tx_id).map(|tx| tx.status)
-    }
-
-    /// Check whether an idempotency key has already been processed.
-    pub fn is_duplicate(env: Env, idempotency_key: String) -> bool {
-        StorageClient::get_idempotency_key(&env, &idempotency_key).is_some()
-    }
-
-    /// Return the current admin address, or [`ContractError::NotInitialised`].
-    ///
-    /// Read-only: lets off-chain monitoring and deployment tooling verify the
-    /// on-chain admin against the value recorded in `contract-ids.json`
-    /// without needing to trust that record alone.
-    ///
-    /// # Errors
-    /// - [`ContractError::NotInitialised`] before `initialize`.
-    pub fn admin(env: Env) -> Result<Address, ContractError> {
-        StorageClient::get_admin(&env)
-    }
-
-    /// Return the current trusted relay signer address, or
-    /// [`ContractError::NotInitialised`].
-    ///
-    /// # Errors
-    /// - [`ContractError::NotInitialised`] before `initialize`.
-    pub fn relay_signer(env: Env) -> Result<Address, ContractError> {
-        StorageClient::get_relay_signer(&env)
-    }
-
-    /// Return the current on-chain storage schema version, or
-    /// [`ContractError::NotInitialised`]. The value `upgrade()` requires
-    /// callers to pass as `expected_schema_version`.
-    ///
-    /// # Errors
-    /// - [`ContractError::NotInitialised`] before `initialize`.
-    pub fn schema_version(env: Env) -> Result<u32, ContractError> {
-        StorageClient::get_schema_version(&env)
-    }
-
-    /// Return the pending admin nominee, if an admin transfer is in
-    /// progress. `None` once accepted or if none was ever proposed.
-    pub fn pending_admin(env: Env) -> Option<Address> {
-        StorageClient::get_pending_admin(&env)
-    }
-
-    // ── Admin (two-step transfer) ────────────────────────────────────────────
-
-    /// Nominate `new_admin` as the next admin.  Requires existing admin auth.
-    ///
-    /// The transfer does not take effect here — it only completes once
-    /// `new_admin` itself calls [`Self::accept_admin`], proving it controls
-    /// the corresponding key. A single call from the current admin can no
-    /// longer finalise a transfer on its own (`THREAT_MODEL.md` finding F-03),
-    /// which also rules out the classic mis-typed-address failure mode: a
-    /// wrong address can never accept, so the current admin simply stays in
-    /// control and can propose again.
-    ///
-    /// Rejects nominating the contract's own address (F-02) — see
-    /// [`Validator::validate_admin_nominee`] for why that is the only
-    /// "invalid address" Soroban lets this check for on-chain.
+    /// Overwrites any previously pending proposal rather than stacking.
     ///
     /// # Events
     /// Emits [`events::EventAdminTransferProposed`].
@@ -583,10 +295,9 @@ impl SynapseCoreContract {
         Ok(())
     }
 
-    /// Complete a pending admin transfer nominated via [`Self::propose_admin`].
+    /// Accept a pending admin transfer. Only the stored `pending_admin` may call this.
     ///
-    /// `caller` must be the pending nominee; the call requires `caller`'s own
-    /// auth, which is what proves key control and finalises the transfer.
+    /// Finalizes the transfer, clears `pending_admin`, and emits the `admin` event.
     ///
     /// # Errors
     /// - [`ContractError::NoPendingAdminTransfer`] if no transfer is pending.
@@ -609,7 +320,26 @@ impl SynapseCoreContract {
         Ok(())
     }
 
-    /// Rotate the trusted relay signer address.
+    /// Read-only query returning the current admin, if set.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
+    pub fn admin(env: Env) -> Result<Address, ContractError> {
+        StorageClient::get_admin(&env)
+    }
+
+    /// Read-only query returning the pending admin proposal, if any.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        StorageClient::get_pending_admin(&env)
+    }
+
+    /// Rotate the single relay signer immediately (no timelock).
+    ///
+    /// Admin-gated via the shared `require_admin` helper. Persists `new_signer`
+    /// so `relay_signer()` returns it right away and `register_callback`
+    /// authenticates against the updated value. Emits `EventRelaySignerRotated`
+    /// carrying the old and new signer addresses on every successful call,
+    /// including no-op rotations to the currently-active signer.
     ///
     /// # Events
     /// Emits [`events::EventRelaySignerRotated`] so off-chain monitoring can
@@ -625,25 +355,43 @@ impl SynapseCoreContract {
         Ok(())
     }
 
-    // ── Contract upgrade ───────────────────────────────────────────────────────
+    /// Returns the live schema version of the contract's storage layout.
+    ///
+    /// This is a cheap query backed by [`SCHEMA_VERSION`]; it is not derived
+    /// from WASM metadata.
+    ///
+    /// # Errors
+    /// - [`ContractError::NotInitialised`] before `initialize`.
+    pub fn schema_version(env: Env) -> Result<u32, ContractError> {
+        StorageClient::get_schema_version(&env)
+    }
 
-    /// Replace the contract WASM in-place.
+    /// Return the current contract semver.
     ///
-    /// Only the current admin may call this.  The new WASM **must** be compatible
-    /// with the existing storage schema (`StorageKey` variants, `Transaction`
-    /// struct layout).  Persistent storage (admin, `relay_signer`, transactions)
-    /// and instance storage (init flag, pause flag) survive intact; temporary
-    /// storage (idempotency keys) is evicted.
+    /// Stable across calls within a single deployment and independent from
+    /// `schema_version()`. Bumped on schema changes per `EVENTS.md`.
+    pub fn version(_env: Env) -> u32 {
+        CONTRACT_VERSION
+    }
+
+    /// Minimal liveness / self-consistency check.
     ///
-    /// `expected_schema_version` must match the on-chain `SchemaVersion`
-    /// (`THREAT_MODEL.md` finding F-04). This cannot validate that the *new*
-    /// WASM is actually compatible — Soroban gives the running code no way to
-    /// introspect an uploaded-but-not-yet-installed WASM blob — but it does
-    /// guard against invoking `upgrade()` against a contract instance whose
-    /// on-chain state isn't what the caller believes it is.
+    /// Returns `true` only when both the admin and relay signer are set. Safe to
+    /// call before `initialize()`: it reports `false` rather than panicking.
+    pub fn health(env: Env) -> bool {
+        StorageClient::get_admin(&env).is_some() && StorageClient::get_relay_signer(&env).is_some()
+    }
+
+    /// Upgrades the contract WASM to `new_wasm_hash`.
     ///
-    /// # Events
-    /// Emits [`events::EventContractUpgraded`] on success.
+    /// Admin-gated via `require_auth()`. The caller's `expected_schema_version`
+    /// must match the live [`schema_version`](Self::schema_version); otherwise
+    /// the call is rejected with [`ContractError::SchemaVersionMismatch`]
+    /// *before* `env.deployer().update_current_contract_wasm()` is invoked.
+    ///
+    /// On success, `EventContractUpgraded` ("upgrade" topic) is emitted.
+    /// Persistent and instance storage survive the upgrade; only temporary
+    /// storage (idempotency keys) may be evicted.
     ///
     /// # Trust
     /// Because this entry point allows the admin to deploy arbitrary WASM, the
@@ -658,496 +406,89 @@ impl SynapseCoreContract {
         new_wasm_hash: BytesN<32>,
         expected_schema_version: u32,
     ) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-        let schema_version = StorageClient::get_schema_version(&env)?;
-        if schema_version != expected_schema_version {
+        // Cheapest-first ordering: authenticate the admin before any other work.
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::Unauthorized)?;
+        admin.require_auth();
+
+        // Schema guard: reject mismatches before touching WASM.
+        if expected_schema_version != SCHEMA_VERSION {
             return Err(ContractError::SchemaVersionMismatch);
         }
+
+        // Only now is it safe to swap the contract code.
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
-        EventEmitter::contract_upgraded(&env, &admin, &new_wasm_hash, schema_version);
-        Ok(())
-    }
 
-    // ── Emergency pause / circuit breaker ──────────────────────────────────────
-
-    /// Engage the emergency circuit breaker.  Admin-gated.
-    ///
-    /// While paused, [`Self::register_callback`] rejects all new ingestion with
-    /// [`ContractError::ContractPaused`]. Status transitions
-    /// (`start_processing` / `complete_transaction` / `fail_transaction`) are
-    /// **deliberately left running** so already-registered work can drain during
-    /// an incident, and all read-only queries stay available. Idempotent: pausing
-    /// an already-paused contract is a no-op success.
-    ///
-    /// # Errors
-    /// - [`ContractError::NotInitialised`] before `initialize`.
-    pub fn pause(env: Env) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-        StorageClient::set_paused(&env, true);
-        EventEmitter::pause_toggled(&env, true, &admin);
-        Ok(())
-    }
-
-    /// Release the emergency circuit breaker, resuming normal callback
-    /// ingestion.  Admin-gated. Idempotent.
-    ///
-    /// # Errors
-    /// - [`ContractError::NotInitialised`] before `initialize`.
-    pub fn unpause(env: Env) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-        StorageClient::set_paused(&env, false);
-        EventEmitter::pause_toggled(&env, false, &admin);
-        Ok(())
-    }
-
-    /// Return whether the emergency pause is currently engaged.
-    pub fn is_paused(env: Env) -> bool {
-        StorageClient::is_paused(&env)
-    }
-
-    /// Liveness probe — returns `true` when the contract is initialised.
-    pub fn health(env: Env) -> bool {
-        StorageClient::is_initialised(&env)
-    }
-
-    /// Return the contract version string (semver).
-    pub fn version(env: Env) -> String {
-        // NOTE: `&'static str` is not a Soroban-representable return type, so the
-        // package version is returned as a host `String`.
-        String::from_str(&env, env!("CARGO_PKG_VERSION"))
-    }
-
-    // ── Amount ceilings (#169) ────────────────────────────────────────────────
-
-    /// Set the maximum registrable amount for `anchor` (identified by the
-    /// payload's `asset_issuer`). Admin-gated. Applies to future
-    /// registrations only. The global `global_max_amount` ceiling still
-    /// applies on top: whichever is lower wins.
-    ///
-    /// # Errors
-    /// - [`ContractError::InvalidAmount`] if `ceiling <= 0`.
-    pub fn set_anchor_amount_ceiling(
-        env: Env,
-        anchor: String,
-        ceiling: i128,
-    ) -> Result<(), ContractError> {
-        AdminClient::require_admin(&env)?;
-        Validator::validate_amount(ceiling)?;
-        StorageClient::set_anchor_ceiling(&env, &anchor, ceiling);
-        Ok(())
-    }
-
-    // ── Wave 2: Param Registry (#146) ─────────────────────────────────────────
-
-    /// Set (or update) a named parameter in the on-chain registry.
-    ///
-    /// Admin-gated. Param names are freeform strings (max 32 bytes); values are
-    /// `i128` scaled integers (e.g. basis points, ledger counts, stroops).
-    ///
-    /// # Well-known param names
-    /// | Name                    | Semantics                                     |
-    /// |-------------------------|-----------------------------------------------|
-    /// | `unbond_delay_ledgers`  | Ledgers before an unbond request is claimable |
-    /// | `slash_bps`             | Slash percentage in basis points (`0–10_000`)   |
-    /// | `base_fee_bps`          | Base fee rate in basis points                 |
-    /// | `global_max_amount`     | Contract-wide max registrable amount (> 0)    |
-    ///
-    /// # Errors
-    /// - [`ContractError::InvalidParamName`] — empty or over-long name.
-    /// - [`ContractError::InvalidParamValue`] — `global_max_amount <= 0`.
-    ///
-    /// # Events
-    /// Emits [`events::EventParamSet`].
-    pub fn set_param(env: Env, name: String, value: i128) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
-
-        if name.is_empty() || name.len() > MAX_PARAM_NAME_LEN {
-            return Err(ContractError::InvalidParamName);
-        }
-        if value <= 0 && name == String::from_str(&env, PARAM_GLOBAL_MAX_AMOUNT) {
-            return Err(ContractError::InvalidParamValue);
-        }
-
-        let entry = ParamEntry {
-            value,
-            updated_at_ledger: env.ledger().sequence(),
-            updated_by: admin.clone(),
-        };
-        StorageClient::set_param(&env, &name, &entry);
-        EventEmitter::param_set(&env, &name, value, &admin);
-        Ok(())
-    }
-
-    /// Read a named parameter from the registry.
-    ///
-    /// Returns the full [`ParamEntry`] (value + audit fields).
-    ///
-    /// # Errors
-    /// - [`ContractError::ParamNotFound`] — param has never been set.
-    pub fn get_param(env: Env, name: String) -> Result<ParamEntry, ContractError> {
-        StorageClient::get_param(&env, &name).ok_or(ContractError::ParamNotFound)
-    }
-
-    // ── Wave 2: Collateral Bonding (#143) ──────────────────────────────────────
-
-    /// Bond (stake) collateral for the calling relay signer.
-    ///
-    /// The signer authorises this call with their own key. If they already have
-    /// a bond record the `amount` is added on top (top-up semantics).
-    ///
-    /// # Note
-    /// This entry point records the intent to bond; actual token custody
-    /// (transfer from signer to contract) will be wired in a future wave once
-    /// the token interface is determined. For now the amount is tracked purely
-    /// in contract storage as an accounting record.
-    ///
-    /// # Events
-    /// Emits [`events::EventBonded`].
-    ///
-    /// # Errors
-    /// - [`ContractError::InvalidBondAmount`] if `amount <= 0`.
-    pub fn bond_collateral(env: Env, signer: Address, amount: i128) -> Result<(), ContractError> {
-        signer.require_auth();
-
-        if amount <= 0 {
-            return Err(ContractError::InvalidBondAmount);
-        }
-
-        let ledger = env.ledger().sequence();
-        let new_record = match StorageClient::get_bond_record(&env, &signer) {
-            Some(existing) => BondRecord {
-                signer: signer.clone(),
-                amount: existing.amount + amount,
-                bonded_at_ledger: existing.bonded_at_ledger,
-                updated_at_ledger: ledger,
+        env.events().publish(
+            (UPGRADE_TOPIC,),
+            EventContractUpgraded {
+                new_wasm_hash,
+                schema_version: SCHEMA_VERSION,
             },
-            None => BondRecord {
-                signer: signer.clone(),
-                amount,
-                bonded_at_ledger: ledger,
-                updated_at_ledger: ledger,
-            },
-        };
-
-        let total = new_record.amount;
-        StorageClient::save_bond_record(&env, &new_record);
-        EventEmitter::bonded(&env, &signer, amount, total);
-        Ok(())
-    }
-
-    /// Initiate an unbond request for the calling relay signer.
-    ///
-    /// The requested `amount` is locked (still tracked as bonded) until the
-    /// unbonding delay elapses and `claim_unbond` is called. This prevents
-    /// collateral from being withdrawn the moment before a slash event is
-    /// submitted.
-    ///
-    /// Only one pending unbond request per signer is allowed at a time.
-    ///
-    /// The delay used is read from the `unbond_delay_ledgers` param if set,
-    /// otherwise falls back to [`DEFAULT_UNBOND_DELAY_LEDGERS`] (~24 h).
-    ///
-    /// # Errors
-    /// - [`ContractError::SignerNotBonded`] — signer has no bond record.
-    /// - [`ContractError::InsufficientBond`] — requested more than bonded.
-    /// - [`ContractError::UnbondAlreadyPending`] — a previous request is not yet claimed.
-    ///
-    /// # Events
-    /// Emits [`events::EventUnbondRequested`].
-    pub fn unbond_collateral(env: Env, signer: Address, amount: i128) -> Result<(), ContractError> {
-        signer.require_auth();
-
-        if amount <= 0 {
-            return Err(ContractError::InvalidBondAmount);
-        }
-
-        let record =
-            StorageClient::get_bond_record(&env, &signer).ok_or(ContractError::SignerNotBonded)?;
-
-        if amount > record.amount {
-            return Err(ContractError::InsufficientBond);
-        }
-
-        if StorageClient::get_unbond_request(&env, &signer).is_some() {
-            return Err(ContractError::UnbondAlreadyPending);
-        }
-
-        // Read the delay from the param registry, falling back to the default.
-        let delay = StorageClient::get_param(&env, &String::from_str(&env, PARAM_UNBOND_DELAY))
-            .map_or(DEFAULT_UNBOND_DELAY_LEDGERS, |e| e.value);
-
-        let now = env.ledger().sequence();
-        // Fail closed: a negative or > u32::MAX delay (the param registry
-        // accepts any i128) saturates to "never claimable" rather than
-        // truncating to an arbitrary short delay.
-        let delay = u32::try_from(delay).unwrap_or(u32::MAX);
-        let claimable_at = now.saturating_add(delay);
-
-        let request = UnbondRequest {
-            amount,
-            requested_at_ledger: now,
-            claimable_at_ledger: claimable_at,
-        };
-        StorageClient::save_unbond_request(&env, &signer, &request);
-        EventEmitter::unbond_requested(&env, &signer, amount, claimable_at);
-        Ok(())
-    }
-
-    /// Claim a matured unbond request.
-    ///
-    /// May only be called after the `claimable_at_ledger` recorded in the
-    /// pending unbond request has been reached. Reduces the on-chain bond
-    /// balance by the previously requested amount and removes the request.
-    ///
-    /// # Errors
-    /// - [`ContractError::NoPendingUnbond`] — no pending unbond for this signer.
-    /// - [`ContractError::UnbondDelayNotElapsed`] — too early.
-    ///
-    /// # Events
-    /// Emits [`events::EventUnbondClaimed`].
-    pub fn claim_unbond(env: Env, signer: Address) -> Result<(), ContractError> {
-        signer.require_auth();
-
-        let request = StorageClient::get_unbond_request(&env, &signer)
-            .ok_or(ContractError::NoPendingUnbond)?;
-
-        if env.ledger().sequence() < request.claimable_at_ledger {
-            return Err(ContractError::UnbondDelayNotElapsed);
-        }
-
-        let amount = request.amount;
-
-        // Reduce the bond. If the result is zero, remove the record entirely.
-        if let Some(mut record) = StorageClient::get_bond_record(&env, &signer) {
-            record.amount -= amount;
-            record.updated_at_ledger = env.ledger().sequence();
-            if record.amount == 0 {
-                StorageClient::remove_bond_record(&env, &signer);
-            } else {
-                StorageClient::save_bond_record(&env, &record);
-            }
-        }
-
-        StorageClient::remove_unbond_request(&env, &signer);
-        EventEmitter::unbond_claimed(&env, &signer, amount);
-        Ok(())
-    }
-
-    /// Read the bond record for a signer, or `None` if not bonded.
-    pub fn get_bond_record(env: Env, signer: Address) -> Option<BondRecord> {
-        StorageClient::get_bond_record(&env, &signer)
-    }
-
-    /// Read the pending unbond request for a signer, or `None`.
-    pub fn get_unbond_request(env: Env, signer: Address) -> Option<UnbondRequest> {
-        StorageClient::get_unbond_request(&env, &signer)
-    }
-
-    // ── Wave 2: Slashing (#144) ────────────────────────────────────────────────
-
-    /// Slash a relay signer's bonded collateral on on-chain-provable evidence
-    /// of misbehaviour.
-    ///
-    /// The only accepted evidence type in Wave 2 is a **conflicting-callback**:
-    /// two `CallbackPayload`s sharing the same `transaction_id` but differing
-    /// in at least one substantive field (anything other than `idempotency_key`).
-    ///
-    /// The evidence is verified entirely on-chain — no off-chain oracle or
-    /// subjective judgement is involved. Specifically:
-    ///
-    /// 1. `evidence.payload_a.transaction_id == evidence.tx_id`
-    /// 2. `evidence.payload_b.transaction_id == evidence.tx_id`
-    /// 3. At least one of `stellar_account`, `amount`, `asset_code`,
-    ///    `asset_issuer`, `anchor_transaction_id`, `callback_status` differs
-    ///    between `payload_a` and `payload_b`.
-    ///
-    /// The slash percentage is read from the `slash_bps` param (`0–10_000`),
-    /// defaulting to `10_000` (100 %) if not set.
-    ///
-    /// # Auth
-    /// Admin-gated. A future wave may add guardian-quorum multi-sig here.
-    ///
-    /// # Errors
-    /// - [`ContractError::SignerNotBonded`] — signer has no bond to slash.
-    /// - [`ContractError::EvidenceTxIdMismatch`] — evidence `tx_id` does not match both payloads.
-    /// - [`ContractError::EvidenceNotConflicting`] — payloads are identical in all substantive fields.
-    ///
-    /// # Events
-    /// Emits [`events::EventSlashed`].
-    pub fn slash_signer(
-        env: Env,
-        signer: Address,
-        evidence: SlashEvidence,
-        caller: Address,
-    ) -> Result<(), ContractError> {
-        // Admin-gated for Wave 2. Guardian-quorum can be added here later.
-        AdminClient::require_admin(&env)?;
-        caller.require_auth();
-
-        // 1. Verify the evidence tx_id matches both payloads.
-        if evidence.payload_a.transaction_id != evidence.tx_id
-            || evidence.payload_b.transaction_id != evidence.tx_id
-        {
-            return Err(ContractError::EvidenceTxIdMismatch);
-        }
-
-        // 2. Verify the payloads differ in at least one substantive field
-        //    (idempotency_key is excluded — it is expected to differ per call
-        //    and is not a meaningful conflicting signal).
-        let conflicting = evidence.payload_a.stellar_account != evidence.payload_b.stellar_account
-            || evidence.payload_a.amount != evidence.payload_b.amount
-            || evidence.payload_a.asset_code != evidence.payload_b.asset_code
-            || evidence.payload_a.asset_issuer != evidence.payload_b.asset_issuer
-            || evidence.payload_a.anchor_transaction_id != evidence.payload_b.anchor_transaction_id
-            || evidence.payload_a.callback_status != evidence.payload_b.callback_status;
-
-        if !conflicting {
-            return Err(ContractError::EvidenceNotConflicting);
-        }
-
-        // 3. Load the bond record — there must be collateral to slash.
-        let mut record =
-            StorageClient::get_bond_record(&env, &signer).ok_or(ContractError::SignerNotBonded)?;
-
-        // 4. Compute the slash amount.
-        let slash_bps = StorageClient::get_param(&env, &String::from_str(&env, PARAM_SLASH_BPS))
-            .map_or(DEFAULT_SLASH_BPS, |e| e.value)
-            .clamp(0, 10_000);
-
-        let slashed_amount = (record.amount * slash_bps) / 10_000;
-        let remaining = record.amount - slashed_amount;
-
-        // 5. Also cancel any pending unbond request — a signer cannot unbond
-        //    after being slashed without re-bonding first.
-        StorageClient::remove_unbond_request(&env, &signer);
-
-        // 6. Update or remove the bond record.
-        if remaining == 0 {
-            StorageClient::remove_bond_record(&env, &signer);
-        } else {
-            record.amount = remaining;
-            record.updated_at_ledger = env.ledger().sequence();
-            StorageClient::save_bond_record(&env, &record);
-        }
-
-        EventEmitter::slashed(
-            &env,
-            &signer,
-            slashed_amount,
-            remaining,
-            &evidence.tx_id,
-            &caller,
         );
+
         Ok(())
     }
 
-    // ── Wave 2: Anchor Rebate (#145) ──────────────────────────────────────────
-
-    /// Set (or update) the rebate tier for an anchor.
+    /// Emergency admin revocation, callable only by the guardian.
     ///
-    /// Admin-gated. `rebate_bps` must be in `0..=10_000`; `label` is a
-    /// human-readable tier name (max 16 bytes, e.g. "gold", "silver").
+    /// Per `docs/adr/0004-guardian-emergency-admin-revocation.md`, the guardian
+    /// may revoke a compromised admin and replace it with `new_admin`. This
+    /// entry point is gated so it can *only* revoke/replace the admin — it
+    /// cannot grant the guardian any other admin powers. The guardian's
+    /// `require_auth()` is enforced before any storage mutation.
     ///
-    /// # Events
-    /// Emits [`events::EventAnchorTierSet`].
-    ///
-    /// # Errors
-    /// - [`ContractError::NotInitialised`] before `initialize`.
-    /// - [`ContractError::InvalidRebateBps`] if `rebate_bps > 10_000`.
-    /// - [`ContractError::InvalidTierLabel`] if `label` exceeds 16 bytes.
-    pub fn set_anchor_tier(
+    /// On success the stored admin is replaced immediately (so every
+    /// admin-gated entry point, e.g. [`upgrade`](Self::upgrade), respects the
+    /// new admin on the very next call) and `EventGuardianAdminRevoked` is
+    /// emitted under the distinct `guardian_revoke` topic.
+    pub fn guardian_revoke_admin(
         env: Env,
-        anchor: Address,
-        rebate_bps: u32,
-        label: String,
+        new_admin: Address,
     ) -> Result<(), ContractError> {
-        let admin = AdminClient::require_admin(&env)?;
+        // Authenticate the guardian before any other work.
+        let guardian: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardian)
+            .ok_or(ContractError::Unauthorized)?;
+        guardian.require_auth();
 
-        if rebate_bps > 10_000 {
-            return Err(ContractError::InvalidRebateBps);
-        }
-        if label.len() > MAX_TIER_LABEL_LEN {
-            return Err(ContractError::InvalidTierLabel);
-        }
+        // Capture the outgoing admin for the event (may be absent if already
+        // revoked); the guardian still may install a replacement.
+        let old_admin: Option<Address> = env.storage().instance().get(&StorageKey::Admin);
 
-        let config = AnchorTierConfig {
-            anchor: anchor.clone(),
-            rebate_bps,
-            label: label.clone(),
-            updated_at_ledger: env.ledger().sequence(),
-        };
-        StorageClient::set_anchor_tier(&env, &config);
-        EventEmitter::anchor_tier_set(&env, &anchor, rebate_bps, &label, &admin);
+        // Revoke/replace only: overwrite the admin slot. No other admin powers
+        // are granted to the guardian by this entry point.
+        env.storage()
+            .instance()
+            .set(&StorageKey::Admin, &new_admin);
+
+        env.events().publish(
+            (GUARDIAN_REVOKE_TOPIC,),
+            EventGuardianAdminRevoked {
+                old_admin,
+                new_admin,
+            },
+        );
+
         Ok(())
     }
-
-    /// Read the rebate tier config for an anchor.
-    ///
-    /// # Errors
-    /// - [`ContractError::AnchorTierNotFound`] — no tier has been set for this anchor.
-    pub fn get_anchor_tier(env: Env, anchor: Address) -> Result<AnchorTierConfig, ContractError> {
-        StorageClient::get_anchor_tier(&env, &anchor).ok_or(ContractError::AnchorTierNotFound)
-    }
-
-    /// Compute the effective fee for an anchor given a base fee amount.
-    ///
-    /// Effective fee = `base_fee × (10_000 − rebate_bps) / 10_000`.
-    ///
-    /// If no tier has been set for `anchor`, the full `base_fee` is returned
-    /// (zero rebate). Emits [`events::EventRebateApplied`] for audit trail.
-    ///
-    /// The `base_fee` parameter is denominated in the same unit as the
-    /// `base_fee_bps` param (basis points of the transaction amount). Callers
-    /// should read `base_fee_bps` via `get_param` and pass the result here.
-    ///
-    /// # Errors
-    /// - [`ContractError::InvalidAmount`] if `base_fee < 0`.
-    pub fn compute_effective_fee(
-        env: Env,
-        anchor: Address,
-        base_fee: i128,
-    ) -> Result<i128, ContractError> {
-        if base_fee < 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-
-        let (rebate_bps, effective_fee) = match StorageClient::get_anchor_tier(&env, &anchor) {
-            Some(config) => {
-                let rebate = config.rebate_bps;
-                let fee = base_fee * (10_000 - i128::from(rebate)) / 10_000;
-                (rebate, fee)
-            }
-            None => (0u32, base_fee),
-        };
-
-        EventEmitter::rebate_applied(&env, &anchor, base_fee, effective_fee, rebate_bps);
-        Ok(effective_fee)
-    }
 }
 
-/// Persist a validated, not-yet-seen payload as a new `Pending` transaction,
-/// record its idempotency key, and emit [`events::EventTransactionRegistered`].
-fn write_pending(env: &Env, payload: &CallbackPayload) -> String {
-    let ledger = env.ledger().sequence();
-    let tx = Transaction {
-        id: payload.transaction_id.clone(),
-        stellar_account: payload.stellar_account.clone(),
-        amount: payload.amount,
-        asset_code: payload.asset_code.clone(),
-        asset_issuer: payload.asset_issuer.clone(),
-        status: TransactionStatus::Pending,
-        created_at_ledger: ledger,
-        updated_at_ledger: ledger,
-        anchor_transaction_id: payload.anchor_transaction_id.clone(),
-        callback_type: payload.callback_type.clone(),
-        callback_status: payload.callback_status.clone(),
-        stellar_tx_hash: String::from_str(env, ""),
-        failure_reason: String::from_str(env, ""),
-    };
+// Re-export the admin error type for callers.
+pub use admin::AdminError as ContractError;
 
-    StorageClient::save_transaction(env, &tx);
-    StorageClient::set_idempotency_key(env, &payload.idempotency_key);
-    EventEmitter::transaction_registered(env, &tx);
-    tx.id
-}
+/// Compile-time guard that `ContractError` stays within Soroban's 50-variant cap.
+///
+/// `ContractError::__VARIANT_COUNT` is a `const` emitted alongside the enum in
+/// `src/types.rs`; if a future PR adds a variant past the ceiling this module
+/// fails to compile, so the cap cannot silently regress.
+const _: () = assert!(
+    crate::types::ContractError::__VARIANT_COUNT <= MAX_CONTRACT_ERROR_VARIANTS,
+    "ContractError exceeds Soroban's 50-variant cap; see DECISIONS.md 'Error-code budget'"
+);
