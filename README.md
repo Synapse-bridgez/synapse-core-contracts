@@ -249,8 +249,11 @@ emission order are a **cross-repo API**. They do not share this repository’s
 PR review or release cadence.
 
 - **Catalogue + ordering:** [`EVENTS.md`](./EVENTS.md) — topics, `#[contracttype]`
-  fields, emitting entry-points, and guaranteed order (e.g. `complete_transaction`
-  emits `status` then `done`).
+  fields, emitting entry-points, and the guaranteed multi-event emission order for
+  every entry point that emits 2+ events (see
+  [`EVENTS.md` → Multi-event emission order](./EVENTS.md#6-multi-event-emission-order)).
+  Each ordering is enforced by a dedicated integration test asserting the events
+  vector's order, not just presence.
 - **Semver:** Additive trailing fields / new events → minor or patch bump of
   `version()`. Removal, rename, reorder, type change, or emission-order change →
   **major** bump with advance notice to subscriber teams
@@ -268,9 +271,6 @@ wired.
 - #92: [High] Add upgrade-simulation testnet tooling replaying mainnet storage snapshots
 <!-- handsoff-issue-102 -->
 - #102: [High] Add a cold-storage export entry point for pre-eviction off-chain archival
-<!-- handsoff-issue-109 -->
-- #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
-
 <!-- handsoff-issue-170 -->
 - #170: [High] Add a `get_contract_invariants_report()` self-verifying audit query
 

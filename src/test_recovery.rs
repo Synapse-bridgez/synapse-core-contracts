@@ -2,7 +2,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
@@ -87,6 +87,7 @@ fn merge_rejects_self_double_and_settled() {
 // ─── #64 forwarding intent ────────────────────────────────────────────────────
 
 use soroban_sdk::testutils::Events;
+use soroban_sdk::Symbol;
 
 fn complete(env: &Env, client: &SynapseCoreContractClient, admin: &Address, tx: &String) {
     client.start_processing(tx, admin);
@@ -101,6 +102,30 @@ fn no_route_emits_no_forwarding_event() {
     client.complete_transaction(&a, &String::from_str(&env, &"a".repeat(64)), &admin);
     // status + done only
     assert_eq!(env.events().all().len(), 2);
+}
+
+#[test]
+fn complete_transaction_emits_status_then_done() {
+    let (env, client, admin) = setup();
+    let a = reg(&env, &client, "tx-a");
+    client.start_processing(&a, &admin);
+    let hash = String::from_str(&env, &"b".repeat(64));
+    client.complete_transaction(&a, &hash, &admin);
+
+    // Assert exact event order: `status` before `done`.
+    let evs = env.events().all();
+    assert_eq!(evs.len(), 2);
+    let status_topic = Symbol::new(&env, "status");
+    let done_topic = Symbol::new(&env, "done");
+    let (_, first_topics, _) = evs.get(0).unwrap();
+    let (_, second_topics, _) = evs.get(1).unwrap();
+    assert_eq!(first_topics.get(0).unwrap(), status_topic.to_val());
+    assert_eq!(second_topics.get(0).unwrap(), done_topic.to_val());
+
+    // The recorded transaction carries the hash and the Completed status.
+    let tx = client.get_transaction(&a);
+    assert_eq!(tx.status, TransactionStatus::Completed);
+    assert_eq!(tx.stellar_tx_hash, hash);
 }
 
 #[test]
