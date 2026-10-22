@@ -291,3 +291,6 @@ wired.
 
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling
+
+<!-- handsoff-issue-199 -->
+- #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
