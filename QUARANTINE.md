@@ -1,4 +1,8 @@
-# Quarantined tests
+# Quarantine restoration history
+
+This file tracked tests temporarily gated during the #176–#197 merge recovery.
+The restoration wave has removed all quarantine cfg gates, so the tracker is
+retired.
 
 The Wave 2 merge (#197) replaced `src/lib.rs`, `src/types.rs` and
 `src/storage.rs` wholesale. That dropped a number of entry points added by
