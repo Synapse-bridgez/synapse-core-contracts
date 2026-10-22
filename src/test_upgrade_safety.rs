@@ -312,6 +312,34 @@ fn test_bucket9_error_variant_budget() {
     );
 }
 
+#[test]
+fn test_upgrade_rollback_history_round_trip() {
+    // Seed current hash, then mimic perform_upgrade's history write (without
+    // a WASM swap) and assert rollback targets the pre-upgrade snapshot.
+    let (env, client, contract_id) = setup();
+    let pre = hash(&env, 0x01);
+    let post = hash(&env, 0x02);
+    client.register_installed_wasm(&pre);
+
+    env.as_contract(&contract_id, || {
+        let current = StorageClient::get_current_wasm_hash(&env).unwrap();
+        assert_eq!(current, pre);
+        StorageClient::set_previous_upgrade(
+            &env,
+            &UpgradeSnapshot {
+                wasm_hash: current,
+                schema_version: SCHEMA_VERSION,
+            },
+        );
+        StorageClient::set_current_wasm_hash(&env, &post);
+        StorageClient::set_last_upgrade_migrated(&env, false);
+    });
+
+    assert_eq!(client.previous_upgrade().unwrap().wasm_hash, pre);
+    assert!(!client.last_upgrade_migrated());
+
+    // Rollback guard path is clear; attempting the swap 
+
 // ─── #82 upgrade_and_migrate ──────
 
 /* … truncated 3289 chars — edit only what you need near the top … */

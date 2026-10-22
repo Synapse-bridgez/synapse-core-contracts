@@ -9,6 +9,10 @@ description = "Synapse Core – on-chain transaction registry and phase router f
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "compare-schema-versions"
+path = "src/bin/compare_schema_versions.rs"
+
 [dependencies]
 soroban-sdk = { version = "22.0.0", features = ["alloc"] }
 
