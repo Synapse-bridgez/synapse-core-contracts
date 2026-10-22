@@ -2,7 +2,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
 
 use crate::types::{CallbackPayload, CallbackType, ContractError, TransactionStatus};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
@@ -144,7 +144,7 @@ fn quorum_met_allowed_one_short_rejected() {
             .unwrap(),
         ContractError::QuorumNotMet
     );
-    client.approve_relay_call(&s2);
+    client.approve_relay_call(&a, &s2);
     client.start_processing(&a, &primary);
     assert_eq!(client.get_status(&a), TransactionStatus::Processing);
     let _ = admin;
