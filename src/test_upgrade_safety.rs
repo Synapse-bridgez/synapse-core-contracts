@@ -131,73 +131,184 @@ fn test_upgrade_proposed_and_cancelled_event_topics() {
     assert_eq!(t(2), symbol_short!("up_fin"));
 }
 
-// ─── #82 upgrade_and_migrate ──────────────────────────────────────────────────
+// ─── #319 cross-feature guard consistency ────────────────────────────────────
 
 #[test]
-fn test_migration_failure_leaves_storage_unchanged() {
-    let (env, client, contract_id) = setup();
-    let dummy = hash(&env, 0x55);
-    let result =
-        client.try_upgrade_and_migrate(&dummy, &SCHEMA_VERSION, &MIGRATION_FAIL_AFTER_WRITE);
-    assert_eq!(result, Err(Ok(ContractError::MigrationFailed)));
-    env.as_contract(&contract_id, || {
-        assert!(
-            StorageClient::get_migration_marker(&env).is_none(),
-            "failed migration must roll back marker writes"
-        );
-        assert!(!StorageClient::last_upgrade_migrated(&env));
-        assert!(StorageClient::get_current_wasm_hash(&env).is_none());
-    });
-}
-
-#[test]
-fn test_unknown_migration_id_rejected() {
+fn test_timelock_not_elapsed_boundary_consistent_across_features() {
+    // Both upgrade finalization (#100) and relay-signer rotation finalization
+    // (#87) must reject exactly one ledger before the configured delay and
+    // accept at the ETA — identical relative boundary.
     let (env, client, _) = setup();
+    let delay: u32 = 100;
+
+    // Upgrade flow.
+    client.set_upgrade_delay(&delay);
+    client.propose_upgrade(&hash(&env, 0x91), &SCHEMA_VERSION);
+    let upgrade_eta = client.get_pending_upgrade().unwrap().eta_ledger;
+    advance_ledger(&env, upgrade_eta - 1);
     assert_eq!(
-        client.try_upgrade_and_migrate(&hash(&env, 0x66), &SCHEMA_VERSION, &999_999),
-        Err(Ok(ContractError::UnknownMigration))
+        client.try_finalize_upgrade(),
+        Err(Ok(ContractError::TimelockNotElapsed)),
+        "upgrade: one ledger before ETA must fail the timelock gate"
+    );
+    advance_ledger(&env, upgrade_eta);
+    assert_ne!(
+        client.try_finalize_upgrade(),
+        Err(Ok(ContractError::TimelockNotElapsed)),
+        "upgrade: at ETA must not fail the timelock gate"
+    );
+
+    // Relay-signer rotation flow.
+    let new_relay = Address::generate(&env);
+    client.set_relay_rotation_delay(&delay);
+    client.propose_relay_rotation(&new_relay);
+    let rotation_eta = client.get_pending_relay_rotation().unwrap().eta_ledger;
+    advance_ledger(&env, rotation_eta - 1);
+    assert_eq!(
+        client.try_finalize_relay_rotation(),
+        Err(Ok(ContractError::TimelockNotElapsed)),
+        "rotation: one ledger before ETA must fail the timelock gate"
+    );
+    advance_ledger(&env, rotation_eta);
+    assert_ne!(
+        client.try_finalize_relay_rotation(),
+        Err(Ok(ContractError::TimelockNotElapsed)),
+        "rotation: at ETA must not fail the timelock gate"
     );
 }
 
 #[test]
-fn test_noop_migration_runs_before_wasm_swap() {
-    let (env, client, contract_id) = setup();
-    // NOOP migration succeeds; missing WASM then fails the host call and
-    // rolls back — proving migration ran without leaving LastUpgradeMigrated.
-    let _ = client.try_upgrade_and_migrate(&hash(&env, 0x77), &SCHEMA_VERSION, &MIGRATION_NOOP);
-    env.as_contract(&contract_id, || {
-        assert!(!StorageClient::last_upgrade_migrated(&env));
-    });
+fn test_no_pending_change_consistent_across_features() {
+    // With nothing pending, both finalize and cancel paths must surface
+    // NoPendingChange identically for upgrade and relay-signer rotation.
+    let (env, client, _) = setup();
+
+    // Upgrade flow: nothing proposed.
+    assert!(client.get_pending_upgrade().is_none());
+    assert_eq!(
+        client.try_finalize_upgrade(),
+        Err(Ok(ContractError::NoPendingChange))
+    );
+    assert_eq!(
+        client.try_cancel_upgrade(),
+        Err(Ok(ContractError::NoPendingChange))
+    );
+
+    // Relay-signer rotation flow: nothing proposed.
+    assert!(client.get_pending_relay_rotation().is_none());
+    assert_eq!(
+        client.try_finalize_relay_rotation(),
+        Err(Ok(ContractError::NoPendingChange))
+    );
+    assert_eq!(
+        client.try_cancel_relay_rotation(),
+        Err(Ok(ContractError::NoPendingChange))
+    );
+
+    // After a cancel, both flows return to the same NoPendingChange state.
+    client.set_upgrade_delay(&10);
+    client.propose_upgrade(&hash(&env, 0x92), &SCHEMA_VERSION);
+    client.cancel_upgrade();
+    assert_eq!(
+        client.try_finalize_upgrade(),
+        Err(Ok(ContractError::NoPendingChange))
+    );
+
+    let new_relay = Address::generate(&env);
+    client.set_relay_rotation_delay(&10);
+    client.propose_relay_rotation(&new_relay);
+    client.cancel_relay_rotation();
+    assert_eq!(
+        client.try_finalize_relay_rotation(),
+        Err(Ok(ContractError::NoPendingChange))
+    );
 }
 
-// ─── #83 rollback ─────────────────────────────────────────────────────────────
+// ─── #320 UpgradeNotReversible / InvalidSchemaCompatRange guards ─────────────
 
 #[test]
-fn test_rollback_with_no_history_fails() {
+fn test_upgrade_not_reversible_when_schema_downgrade() {
+    // #102: a proposed upgrade whose expected schema version is lower than the
+    // currently stored schema version must be rejected as not reversible.
+    let (env, client, _) = setup();
+    client.set_upgrade_delay(&10);
+    let lower = SCHEMA_VERSION.saturating_sub(1);
+    assert_eq!(
+        client.try_propose_upgrade(&hash(&env, 0xa1), &lower),
+        Err(Ok(ContractError::UpgradeNotReversible)),
+        "schema downgrade must be rejected as not reversible"
+    );
+    assert!(client.get_pending_upgrade().is_none());
+}
+
+#[test]
+fn test_upgrade_not_reversible_at_equal_schema_boundary() {
+    // Equal schema version is the boundary that must be accepted (not rejected).
+    let (env, client, _) = setup();
+    client.set_upgrade_delay(&10);
+    assert_ne!(
+        client.try_propose_upgrade(&hash(&env, 0xa2), &SCHEMA_VERSION),
+        Err(Ok(ContractError::UpgradeNotReversible)),
+        "equal schema version must not be rejected as not reversible"
+    );
+    assert!(client.get_pending_upgrade().is_some());
+}
+
+#[test]
+fn test_upgrade_not_reversible_at_one_below_boundary() {
+    // Exactly one below the current schema version is the tightest downgrade
+    // boundary and must still be rejected.
+    let (env, client, _) = setup();
+    client.set_upgrade_delay(&10);
+    let one_below = SCHEMA_VERSION - 1;
+    assert_eq!(
+        client.try_propose_upgrade(&hash(&env, 0xa3), &one_below),
+        Err(Ok(ContractError::UpgradeNotReversible))
+    );
+}
+
+#[test]
+fn test_invalid_schema_compat_range_min_greater_than_max() {
+    // #55/#104: min > max is the canonical invalid range and must be rejected.
     let (_env, client, _) = setup();
     assert_eq!(
-        client.try_rollback_upgrade(),
-        Err(Ok(ContractError::NothingToRollback))
+        client.try_set_schema_compat_range(&2, &1),
+        Err(Ok(ContractError::InvalidSchemaCompatRange)),
+        "min > max must be rejected"
     );
 }
 
 #[test]
-fn test_rollback_blocked_after_migrated_flag() {
-    let (env, client, contract_id) = setup();
-    let prev = hash(&env, 0xaa);
-    env.as_contract(&contract_id, || {
-        StorageClient::set_previous_upgrade(
-            &env,
-            &UpgradeSnapshot {
-                wasm_hash: prev.clone(),
-                schema_version: SCHEMA_VERSION,
-            },
-        );
-        StorageClient::set_last_upgrade_migrated(&env, true);
-    });
+fn test_invalid_schema_compat_range_min_equals_max_is_valid() {
+    // min == max is the tightest valid range and must be accepted.
+    let (_env, client, _) = setup();
+    assert_ne!(
+        client.try_set_schema_compat_range(&1, &1),
+        Err(Ok(ContractError::InvalidSchemaCompatRange)),
+        "min == max must be accepted"
+    );
+}
+
+#[test]
+fn test_invalid_schema_compat_range_zero_min() {
+    // A zero lower bound is outside the ADR's valid schema range and must be
+    // rejected as an invalid compat range.
+    let (_env, client, _) = setup();
     assert_eq!(
-        client.try_rollback_upgrade(),
-        Err(Ok(ContractError::UpgradeNotReversible))
+        client.try_set_schema_compat_range(&0, &1),
+        Err(Ok(ContractError::InvalidSchemaCompatRange)),
+        "zero min must be rejected"
+    );
+}
+
+#[test]
+fn test_bucket9_error_variant_budget() {
+    // #15 budget: the full error-variant set must stay within 50 variants.
+    // This guards against bucket-9 additions silently blowing the budget.
+    let variant_count = ContractError::UpgradeNotReversible as u32;
+    assert!(
+        variant_count < 50,
+        "bucket-9 error variants must fit within the <=50 budget"
     );
 }
 
@@ -229,4 +340,6 @@ fn test_upgrade_rollback_history_round_trip() {
 
     // Rollback guard path is clear; attempting the swap 
 
-/* … truncated 737 chars — edit only what you need near the top … */
+// ─── #82 upgrade_and_migrate ──────
+
+/* … truncated 3289 chars — edit only what you need near the top … */

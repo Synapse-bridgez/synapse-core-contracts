@@ -1,18 +1,19 @@
 #![no_std]
 
-//! Contract skeleton for the Soroban smart contract.
+//! Soroban smart contract crate.
 //!
-//! This crate root wires together the module layout documented in
-//! `README.md` ("Module layout") and exposes the `Contract` type that every
-//! entry point in this wave attaches to. It intentionally declares zero entry
-//! points; subsequent issues add them incrementally to the `#[contractimpl]`
-//! block below.
+//! This crate exposes the contract entry points and supporting modules.
+//! The migration registry lives in [`migration`] and is invoked by the
+//! upgrade path before the WASM swap commits.
 
 mod admin;
 mod events;
+mod migration;
 mod storage;
 mod types;
 mod validation;
+
+pub use migration::{MigrationRegistry, MigrationRegistryClient};
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env};
 

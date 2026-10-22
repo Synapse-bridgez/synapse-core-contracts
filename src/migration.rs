@@ -96,6 +96,8 @@ pub fn compare_schema_versions(
             changes.push_back(change);
         }
     }
+        }
+    }
 
     let empty = changes.is_empty();
     SchemaDiff {
