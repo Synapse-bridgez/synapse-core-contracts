@@ -292,6 +292,12 @@ wired.
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling
 
+<!-- handsoff-issue-273 -->
+- #273: Restore `retry_transaction(tx_id, caller)` with a bounded retry counter
+
+<!-- handsoff-issue-274 -->
+- #274: Restore `batch_register_callback` with the `MAX_BATCH_SIZE = 7` budget
+
 <!-- handsoff-issue-285 -->
 - #285: Restore fee accrual on `complete_transaction`
 

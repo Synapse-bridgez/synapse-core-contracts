@@ -3,7 +3,7 @@
 //! These types describe the on-chain transaction records and the auxiliary
 //! markers used by the manual recovery tooling (e.g. duplicate merging).
 
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env, String, Vec};
 
 /// Lifecycle status of a transaction record.
 #[contracttype]
@@ -16,6 +16,12 @@ pub enum TxStatus {
     /// Record was merged into another record (see [`MergedInto`]).
     Merged,
 }
+
+/// Maximum number of tags that may be attached to a single transaction.
+///
+/// Enforced by `add_transaction_tag`; once a transaction holds this many tags
+/// further additions are rejected. See issue #51.
+pub const MAX_TAGS_PER_TRANSACTION: u32 = 10;
 
 /// A single transaction record.
 ///
@@ -35,6 +41,10 @@ pub struct Transaction {
     pub data: BytesN<32>,
     /// If this record was merged away, the primary transaction id it points to.
     pub merged_into: Option<u64>,
+    /// Additive operational metadata managed via `add_transaction_tag` /
+    /// `get_transaction_tags`. Tags never affect `status` or any other entry
+    /// point's behavior.
+    pub tags: Vec<String>,
 }
 
 /// Marker stored alongside a duplicate record indicating the primary it was
