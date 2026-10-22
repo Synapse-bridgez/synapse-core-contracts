@@ -37,10 +37,6 @@ remove its row here.
 | `src/test_pause.rs` | `test_upgrade_self_check_failure_reverts_without_history` | self-check, `get_upgrade_history` |
 | `src/test_pause.rs` | `test_self_check_events_topics` | `EventUpgradeSelfCheckPassed` / `Failed` emitters |
 | `src/test_pause.rs` | `test_simulate_upgrade_*` (5 tests) | `simulate_upgrade`, `UpgradeCompatibility` |
-| `src/test_pause.rs` | `test_upgrade_history_*` (3 tests) | `get_upgrade_history`, `UpgradeRecord`, `MAX_UPGRADE_HISTORY` |
-
-`MINIMAL_WASM` and `upload_minimal` in `src/test_pause.rs` are gated too,
-because only the quarantined upgrade tests use them.
 
 ## Unwired files
 
