@@ -17,6 +17,11 @@
 //! Relay signer rotation events are emitted under the `relay` topic and mirror
 //! the schema in `EVENTS.md`; keep them in sync.
 //!
+//! Events are emitted via `env.events().publish(...)`. Ordering matters for
+//! consumers that rely on a specific sequence (e.g. `complete_transaction`
+//! guarantees "status then done", and `set_forwarding_route` guarantees the
+//! forwarding-intent event fires strictly last).
+//!
 //! Transaction failure events are emitted under the `fail` topic. This is
 //! deliberately distinct from the `cancel` topic: `fail` means "the anchor
 //! genuinely failed", while `cancel` means "someone decided to stop this".
@@ -32,6 +37,29 @@
 //!
 //! In particular, `complete_transaction` emits `status` **then** `done`; see
 //! [`emit_status_then_done`].
+//!
+//! The `guardian_revoke` topic is emitted by the guardian emergency admin
+//! revocation entry point described in
+//! `docs/adr/0004-guardian-emergency-admin-revocation.md`. It is deliberately
+//! distinct from the normal `propose_admin`/`accept_admin` transfer events so
+//! downstream monitoring can tell a planned handoff apart from an emergency
+//! revocation.
+//!
+//! Relay signer rotation events are emitted under the `relay` topic and mirror
+//! the schema in `EVENTS.md`; keep them in sync.
+
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol};
+
+/// Topic symbol for the contract-initialized event ("init" per README).
+pub const TOPIC_INIT: Symbol = symbol_short!("init");
+
+/// Topic symbol used for contract-upgrade events.
+pub const UPGRADE_TOPIC: Symbol = symbol_short!("upgrade");
+
+/// Topic symbol used for guardian emergency admin revocation events.
+pub const GUARDIAN_REVOKE_TOPIC: Symbol = symbol_short!("guardian_revoke");
+
+/// Topic symbol used for
 
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol};
 
@@ -47,6 +75,18 @@ pub const GUARDIAN_REVOKE_TOPIC: Symbol = symbol_short!("guardian_revoke");
 /// Topic symbol used for relay-related events (matches the "relay" topic in
 /// `EVENTS.md`).
 pub const RELAY_TOPIC: Symbol = symbol_short!("relay");
+
+/// Topic used for forwarding-intent events emitted by `set_forwarding_route`.
+pub const FORWARDING_INTENT: Symbol = symbol_short!("fwd_intent");
+
+/// Topic used for collateral-bonded events emitted by `bond_collateral`.
+pub const COLLATERAL_BONDED: Symbol = symbol_short!("bonded");
+
+/// Topic used for collateral-unbonded events emitted by `unbond_collateral`.
+pub const COLLATERAL_UNBONDED: Symbol = symbol_short!("unbonded");
+
+/// Topic used for unbond-claimed events emitted by `claim_unbond`.
+pub const UNBOND_CLAIMED: Symbol = symbol_short!("claimed");
 
 /// Topic symbol used for transaction failure events.
 ///
@@ -105,6 +145,19 @@ pub struct EventRelaySignerRotated {
     pub new_signer: Address,
 }
 
+/// Payload for a forwarding-intent event.
+///
+/// Emitted strictly last by `set_forwarding_route` so downstream consumers
+/// (future Phase 2/3 pollers) can rely on it being the final event of the call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForwardingIntent {
+    /// The transaction id the forwarding route was set for.
+    pub tx_id: BytesN<32>,
+    /// The caller that set the route (relay or admin).
+    pub caller: Address,
+}
+
 /// Emit the `EventContractInitialized` event under the "init" topic.
 ///
 /// Called exactly once from `initialize`; the one-time-init guard in the
@@ -158,6 +211,42 @@ pub fn emit_relay_signer_rotated(env: &Env, old_signer: Address, new_signer: Add
         new_signer,
     };
     env.events().publish((RELAY_TOPIC,), event);
+}
+
+/// Emit a forwarding-intent event.
+///
+/// Callers MUST invoke this only after every other event the surrounding
+/// operation produces, to preserve the `route_emits_forwarding_intent_last`
+/// ordering guarantee. When no route is set (or a route is cleared), this
+/// helper must not be called at all.
+pub fn emit_forwarding_intent(env: &Env, tx_id: BytesN<32>, caller: Address) {
+    let intent = ForwardingIntent { tx_id, caller };
+    env.events().publish((FORWARDING_INTENT,), intent);
+}
+
+/// Emit a collateral-bonded event.
+///
+/// `amount` is the amount added by this call (the additive top-up), and
+/// `total` is the signer's resulting bonded balance after the top-up.
+pub fn emit_collateral_bonded(env: &Env, signer: Address, amount: i128, total: i128) {
+    env.events()
+        .publish((COLLATERAL_BONDED, signer), (amount, total));
+}
+
+/// Emit a collateral-unbonded event.
+///
+/// `amount` is the amount moved into the pending unbond request, and
+/// `unlock_ledger` is the ledger at which `claim_unbond` becomes callable.
+pub fn emit_collateral_unbonded(env: &Env, signer: Address, amount: i128, unlock_ledger: u32) {
+    env.events()
+        .publish((COLLATERAL_UNBONDED, signer), (amount, unlock_ledger));
+}
+
+/// Emit an unbond-claimed event.
+///
+/// `amount` is the amount released back to the signer by `claim_unbond`.
+pub fn emit_unbond_claimed(env: &Env, signer: Address, amount: i128) {
+    env.events().publish((UNBOND_CLAIMED, signer), amount);
 }
 
 /// Emit the `fail` event for a transaction.
@@ -241,4 +330,5 @@ where
 pub fn emit_address(env: &Env, topic: &str, tx_id: u64, payload: &Address) {
     let topics = (Symbol::new(env, topic), tx_id);
     env.events().publish(topics, payload.clone());
+}
 }
