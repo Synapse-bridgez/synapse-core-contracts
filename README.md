@@ -249,8 +249,11 @@ emission order are a **cross-repo API**. They do not share this repository’s
 PR review or release cadence.
 
 - **Catalogue + ordering:** [`EVENTS.md`](./EVENTS.md) — topics, `#[contracttype]`
-  fields, emitting entry-points, and guaranteed order (e.g. `complete_transaction`
-  emits `status` then `done`).
+  fields, emitting entry-points, and the guaranteed multi-event emission order for
+  every entry point that emits 2+ events (see
+  [`EVENTS.md` → Multi-event emission order](./EVENTS.md#6-multi-event-emission-order)).
+  Each ordering is enforced by a dedicated integration test asserting the events
+  vector's order, not just presence.
 - **Semver:** Additive trailing fields / new events → minor or patch bump of
   `version()`. Removal, rename, reorder, type change, or emission-order change →
   **major** bump with advance notice to subscriber teams
@@ -268,9 +271,6 @@ wired.
 - #92: [High] Add upgrade-simulation testnet tooling replaying mainnet storage snapshots
 <!-- handsoff-issue-102 -->
 - #102: [High] Add a cold-storage export entry point for pre-eviction off-chain archival
-<!-- handsoff-issue-109 -->
-- #109: [High] Add guaranteed event-ordering tests for every multi-event entry point
-
 <!-- handsoff-issue-170 -->
 - #170: [High] Add a `get_contract_invariants_report()` self-verifying audit query
 
@@ -291,3 +291,36 @@ wired.
 
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling
+
+<!-- handsoff-issue-281 -->
+- #281: Restore `slash_signer` for provable relay-signer misbehavior
+
+<!-- handsoff-issue-282 -->
+- #282: Restore `set_anchor_tier` / `get_anchor_tier` / `compute_effective_fee`
+
+<!-- handsoff-issue-283 -->
+- #283: Restore `set_param` / `get_param` on-chain parameter registry
+
+<!-- handsoff-issue-277 -->
+- #277: Restore `dispute_transaction` / `resolve_dispute` / `is_disputed`
+
+<!-- handsoff-issue-273 -->
+- #273: Restore `retry_transaction(tx_id, caller)` with a bounded retry counter
+
+<!-- handsoff-issue-274 -->
+- #274: Restore `batch_register_callback` with the `MAX_BATCH_SIZE = 7` budget
+
+<!-- handsoff-issue-285 -->
+- #285: Restore fee accrual on `complete_transaction`
+
+<!-- handsoff-issue-309 -->
+- #309: Restore `post_upgrade_self_check` entry point and `SelfCheckFailed`
+
+<!-- handsoff-issue-311 -->
+- #311: Restore bounded `get_upgrade_history` end-to-end (integration pass)
+
+<!-- handsoff-issue-316 -->
+- #316: Restore `schema_compatibility_range` / `set_schema_compatibility_range`
+
+<!-- handsoff-issue-199 -->
+- #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
