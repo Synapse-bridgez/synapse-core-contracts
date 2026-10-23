@@ -39,6 +39,13 @@
 //! Gaps are explicit entries in [`KNOWN_GAPS`] / [`UNCATALOGUED_TOPICS`]; the
 //! test fails if a new gap appears *or* if a tracked gap is closed without
 //! updating the list.
+//!
+//! ## Multi-event ordering (#257)
+//!
+//! Snapshots pin the *bytes* of each event but not the *order* between
+//! events emitted by a single entry point. The ordering guarantees documented
+//! in EVENTS.md §2.1 are asserted explicitly by
+//! [`crate::test_event_ordering`]; the tests below only cover the payloads.
 
 #![cfg(test)]
 
@@ -238,7 +245,8 @@ fn event_snapshot_start_processing() {
     assert_snapshot("start_processing", "start_processing", &c.env);
 }
 
-/// Documented ordering: `status` then `done`.
+/// Documented ordering: `status` then `done` (asserted in
+/// [`crate::test_event_ordering`]).
 #[test]
 fn event_snapshot_complete_transaction() {
     let c = setup();
