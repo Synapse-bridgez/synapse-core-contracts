@@ -39,6 +39,21 @@
 
 extern crate std;
 
+use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, String};
+
+use crate::{CallbackRegistry, CallbackRegistryClient};
+
+/// A valid 56-character Stellar account strkey (G...).
+const VALID_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+/// A valid 56-character asset issuer strkey (G...).
+const VALID_ISSUER: &str = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+/// A valid 4-character asset code.
+c
+
+#![cfg(test)]
+
+extern crate std;
+
 use std::{
     borrow::ToOwned,
     collections::BTreeMap,

@@ -38,6 +38,12 @@ mod test_events_conformance;
 #[cfg(test)]
 mod test_pause;
 #[cfg(test)]
+mod test_recovery;
+#[cfg(test)]
+mod test_rotation_chaos;
+#[cfg(test)]
+mod test_upgrade_safety;
+#[cfg(test)]
 mod test_wave2;
 #[cfg(test)]
 mod tests;
@@ -538,3 +544,14 @@ const _: () = assert!(
     crate::types::ContractError::__VARIANT_COUNT <= MAX_CONTRACT_ERROR_VARIANTS,
     "ContractError exceeds Soroban's 50-variant cap; see DECISIONS.md 'Error-code budget'"
 );
+
+mod admin;
+mod events;
+mod migration;
+mod relay_signer;
+mod storage;
+mod types;
+mod validation;
+
+#[cfg(test)]
+
