@@ -294,6 +294,130 @@ pub enum TransitionError {
     InvalidSource,
 }
 
+/// Asserts that the transaction's current status is `from`, then transitions
+/// it to `to` (issue #57).
+///
+/// This is the single shared state-machine guard used by every status
+/// transition entry point (`start_processing`, `complete_transaction`,
+/// `fail_transaction`, `cancel_transaction`). Centralising the guard keeps
+/// `THREAT_MODEL.md` §5's invariants — `Pending → Processing`,
+/// `Processing → Completed`, `Pending`/`Processing → Failed`,
+/// `Pending`/`Processing → Cancelled`, and terminal states unreachable —
+/// enforced identically everywhere instead of in five duplicated match blocks.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction to transition.
+/// * `from` - The only status the transaction may currently be in.
+/// * `to` - The status to transition to.
+/// * `caller` - The address performing the transition (recorded on the record).
+/// * `reason` - Optional human-readable reason (recorded on the record).
+///
+/// # Errors
+/// Returns `Err(TransitionError::NotFound)` when no transaction exists for
+/// `tx_id` (distinct from an illegal source state), or
+/// `Err(TransitionError::InvalidSource)` when the current status is not
+/// `from`.
+pub fn assert_status_and_transition(
+    env: &Env,
+    tx_id: &Symbol,
+    from: TxStatus,
+    to: TxStatus,
+    caller: &Address,
+    reason: Option<String>,
+) -> Result<Transaction, TransitionError> {
+    transition_status(env, tx_id, &[from], to, caller, reason)
+}
+
+/// Transitions a transaction from `Pending` to `Processing` (issue #57).
+///
+/// Auth (relay-or-admin) is enforced by the `start_processing` entry point;
+/// this helper only owns the state-machine guard and persistence.
+///
+/// # Errors
+/// Returns `Err(TransitionError::NotFound)` for an unknown `tx_id`, or
+/// `Err(TransitionError::InvalidSource)` when the transaction is not
+/// `Pending` (e.g. already `Processing`, `Completed`, `Failed`, or
+/// `Cancelled`).
+pub fn start_processing(
+    env: &Env,
+    tx_id: &Symbol,
+    caller: &Address,
+) -> Result<Transaction, TransitionError> {
+    assert_status_and_transition(
+        env,
+        tx_id,
+        TxStatus::Pending,
+        TxStatus::Processing,
+        caller,
+        None,
+    )
+}
+
+/// Transitions a transaction from `Processing` to `Completed` (issue #58).
+///
+/// # Errors
+/// Returns `Err(TransitionError::NotFound)` for an unknown `tx_id`, or
+/// `Err(TransitionError::InvalidSource)` when the transaction is not
+/// `Processing`.
+pub fn complete_transaction(
+    env: &Env,
+    tx_id: &Symbol,
+    caller: &Address,
+) -> Result<Transaction, TransitionError> {
+    assert_status_and_transition(
+        env,
+        tx_id,
+        TxStatus::Processing,
+        TxStatus::Completed,
+        caller,
+        None,
+    )
+}
+
+/// Transitions a transaction to `Cancelled` (issue #59).
+///
+/// `Cancelled` is reachable only from `Pending` or `Processing` — never from
+/// the terminal `Completed`/`Failed` states, and never from `Cancelled`
+/// itself. Auth (admin or the transaction's *registering* relay signer) is
+/// enforced by the `cancel_transaction` entry point; this helper only owns
+/// the state-machine guard and persistence.
+///
+/// # Errors
+/// Returns `Err(TransitionError::NotFound)` for an unknown `tx_id`, or
+/// `Err(TransitionError::InvalidSource)` when the transaction is not
+/// `Pending`/`Processing`.
+pub fn cancel_transaction(
+    env: &Env,
+    tx_id: &Symbol,
+    reason: String,
+    caller: &Address,
+) -> Result<Transaction, TransitionError> {
+    // Enforce issue #47's string-length cap on the cancellation reason.
+    if reason.len() > MAX_REASON_LEN {
+        return Err(TransitionError::InvalidSource);
+    }
+
+    transition_status(
+        env,
+        tx_id,
+        &[TxStatus::Pending, TxStatus::Processing],
+        TxStatus::Cancelled,
+        caller,
+        Some(reason),
+    )
+}
+
+/// Returns the relay signer that registered `tx_id`, if recorded.
+///
+/// Used by the `cancel_transaction` entry point to scope cancellation to the
+/// transaction's *registering* relay signer (not just any valid relay signer).
+/// Returns `None` when the transaction does not exist or has no recorded
+/// registering signer.
+pub fn get_registering_relay(env: &Env, tx_id: &Symbol) -> Option<Address> {
+    get_transaction(env, tx_id).and_then(|tx| tx.relay_signer)
+}
+
 /// Marks a transaction as `Failed`.
 ///
 /// `Failed` is reachable from any non-terminal state (`Pending` or
@@ -742,3 +866,4 @@ mod tests {
         assert_eq!(unpack(&stored).retry_count, 0xF);
     }
 }
+

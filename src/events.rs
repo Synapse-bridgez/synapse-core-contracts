@@ -26,6 +26,16 @@
 //! deliberately distinct from the `cancel` topic: `fail` means "the anchor
 //! genuinely failed", while `cancel` means "someone decided to stop this".
 //!
+//! Transaction registration events are emitted under the `reg` topic by
+//! `register_callback`; the payload is the newly allocated `tx_id`.
+//!
+//! Transaction cancellation events are emitted under the `cancel` topic by
+//! `cancel_transaction`. The payload is an [`EventTransactionCancelled`]
+//! carrying the `tx_id` and the human-readable cancellation reason. `cancel`
+//! is a terminal branch alongside `fail` (see README's lifecycle diagram) and
+//! is deliberately kept separate so indexers can distinguish an operator
+//! decision from an anchor failure.
+//!
 //! # Guaranteed multi-event emission order
 //!
 //! Several entry points emit more than one event per invocation. For those
@@ -95,6 +105,17 @@ pub const UNBOND_CLAIMED: Symbol = symbol_short!("claimed");
 /// genuinely failed", while `cancel` means "someone decided to stop this".
 pub const FAIL_TOPIC: Symbol = symbol_short!("fail");
 
+/// Topic symbol used for transaction cancellation events.
+///
+/// Emitted by `cancel_transaction` when an operator stops a `Pending` or
+/// `Processing` transaction. Deliberately distinct from [`FAIL_TOPIC`].
+pub const CANCEL_TOPIC: Symbol = symbol_short!("cancel");
+
+/// Topic symbol used for transaction registration events.
+///
+/// Emitted by `register_callback` on success (README's live-emitters list).
+pub const REG_TOPIC: Symbol = symbol_short!("reg");
+
 /// Topic symbol for the `status` event.
 pub const TOPIC_STATUS: &str = "status";
 /// Topic symbol for the `done` event.
@@ -143,6 +164,18 @@ pub struct EventRelaySignerRotated {
     pub old_signer: Address,
     /// The relay signer that is active after the rotation.
     pub new_signer: Address,
+}
+
+/// Payload emitted when a transaction is cancelled.
+///
+/// `tx_id` identifies the cancelled transaction and `reason` is the
+/// human-readable justification supplied by the caller. The reason is
+/// validated against the string-length cap before this event is emitted.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventTransactionCancelled {
+    pub tx_id: u64,
+    pub reason: String,
 }
 
 /// Payload for a forwarding-intent event.
@@ -267,11 +300,50 @@ pub fn emit_fail(env: &Env, tx_id: u64, reason: &String) {
         .publish((FAIL_TOPIC, tx_id), reason.clone());
 }
 
+/// Emit the `reg` event for a newly registered transaction.
+///
+/// Publishes the `reg` topic with the newly allocated `tx_id` as payload.
+/// Called by `register_callback` only after validation, the idempotency check,
+/// and the durable write have all succeeded, so a duplicate call that returns
+/// the original `tx_id` never emits a second `reg` event.
+///
+/// # Arguments
+///
+/// * `env` - The contract environment used to publish the event.
+/// * `tx_id` - Identifier allocated for the newly registered transaction.
+pub fn emit_reg(env: &Env, tx_id: u64) {
+    env.events().publish((REG_TOPIC,), tx_id);
+}
+
+/// Emit the `cancel` event for a cancelled transaction.
+///
+/// Publishes the `cancel` topic with an [`EventTransactionCancelled`] payload
+/// carrying the `tx_id` and the cancellation reason. Called by
+/// `cancel_transaction` after the state transition to `Cancelled` has been
+/// persisted.
+///
+/// # Arguments
+///
+/// * `env` - The contract environment used to publish the event.
+/// * `tx_id` - Identifier of the cancelled transaction.
+/// * `reason` - Human-readable reason for the cancellation. Callers are
+///   responsible for validating `reason` against the string-length cap before
+///   invoking this helper.
+pub fn emit_cancel(env: &Env, tx_id: u64, reason: &String) {
+    let payload = EventTransactionCancelled {
+        tx_id,
+        reason: reason.clone(),
+    };
+    env.events().publish((CANCEL_TOPIC, tx_id), payload);
+}
+
 /// Emit the `status` event.
 ///
 /// Publishes a `status` event with the given `tx_id` and `status` payload.
-/// This is a low-level helper; callers that must also emit `done` should use
-/// [`emit_status_then_done`] so the documented ordering is preserved.
+/// This is the helper used by `start_processing` (`Pending → Processing`) and
+/// by the other state-transition entry points. It is a low-level helper;
+/// callers that must also emit `done` should use [`emit_status_then_done`] so
+/// the documented ordering is preserved.
 pub fn emit_status(env: &Env, tx_id: u64, status: u32) {
     let topics = (Symbol::new(env, TOPIC_STATUS), tx_id);
     env.events().publish(topics, status);

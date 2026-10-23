@@ -1200,7 +1200,6 @@ fn test_full_lifecycle_pending_to_processing_to_completed() {
 
 // ─── cancel_transaction ───────────────────────────────────────────────────────
 
-#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_cancel_transaction_by_relay_and_admin() {
     let (env, client, admin, relay) = setup();
@@ -1214,7 +1213,6 @@ fn test_cancel_transaction_by_relay_and_admin() {
     assert_eq!(client.get_status(&b), TransactionStatus::Cancelled);
 }
 
-#[cfg(quarantine)] // entry point removed by #197; see QUARANTINE.md
 #[test]
 fn test_cancel_transaction_rejects_stranger_and_illegal_states() {
     let (env, client, _admin, relay) = setup();
@@ -1251,6 +1249,95 @@ fn test_cancel_transaction_rejects_stranger_and_illegal_states() {
         client.try_cancel_transaction(&missing, &reason, &relay),
         Err(Ok(ContractError::TransactionNotFound))
     );
+}
+
+#[test]
+fn test_cancel_transaction_rejects_different_valid_relay_signer() {
+    // The caller check is scoped to the *registering* relay signer, not "any
+    // valid relay signer": a different, legitimate relay signer must be
+    // rejected even though they are a real relay signer generally.
+    let env = Env::default();
+    let contract_id = env.register(SynapseCoreContract, ());
+    let client = SynapseCoreContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let relay = Address::generate(&env);
+    client.initialize(&admin, &relay);
+
+    let payload = payload_with(&env, "tx-c6", "k-c6");
+    let tx_id = client
+        .mock_auths(&[MockAuth {
+            address: &relay,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "register_callback",
+                args: (payload.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .register_callback(&payload);
+
+    // Rotate the relay signer: `other_relay` is now a fully legitimate relay
+    // signer, but it did not register `tx_id`.
+    let other_relay = Address::generate(&env);
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_relay_signer",
+                args: (other_relay.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .set_relay_signer(&other_relay);
+
+    let reason = String::from_str(&env, "duplicate");
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &other_relay,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "cancel_transaction",
+                args: (tx_id.clone(), reason.clone(), other_relay.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_cancel_transaction(&tx_id, &reason, &other_relay);
+    assert_eq!(result, Err(Ok(ContractError::Unauthorised)));
+    assert_eq!(client.get_status(&tx_id), TransactionStatus::Pending);
+}
+
+#[test]
+fn test_cancel_transaction_unreachable_from_completed() {
+    // `Cancelled` must never be reachable from `Completed` — explicit
+    // negative test for the terminal-state guard.
+    let (env, client, admin, relay) = setup();
+    let tx_id = client.register_callback(&payload_with(&env, "tx-c7", "k-c7"));
+    client.start_processing(&tx_id, &relay);
+    client.complete_transaction(&tx_id, &String::from_str(&env, "hash-c7"), &relay);
+
+    let reason = String::from_str(&env, "too_late");
+    assert_eq!(
+        client.try_cancel_transaction(&tx_id, &reason, &relay),
+        Err(Ok(ContractError::CannotCancel))
+    );
+    assert_eq!(
+        client.try_cancel_transaction(&tx_id, &reason, &admin),
+        Err(Ok(ContractError::CannotCancel))
+    );
+    assert_eq!(client.get_status(&tx_id), TransactionStatus::Completed);
+}
+
+#[test]
+fn test_cancel_transaction_emits_event() {
+    let (env, client, _admin, relay) = setup();
+    let tx_id = client.register_callback(&payload_with(&env, "tx-c8", "k-c8"));
+    let reason = String::from_str(&env, "duplicate");
+    client.cancel_transaction(&tx_id, &reason, &relay);
+
+    let events = env.events().all();
+    let last = events.get_unchecked(events.len() - 1);
+    assert_topics(&env, &last.1, &symbol_short!("cancel"));
 }
 
 // ─── retry_transaction ────────────────────────────────────────────────────────

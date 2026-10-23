@@ -167,6 +167,25 @@ type = "u32"
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[event]]
+struct_name = "EventTransactionCancelled"
+topic       = "cancel"
+emitter_fn  = "transaction_cancelled"
+
+[[event.fields]]
+name = "tx_id"
+type = "String"
+
+[[event.fields]]
+name = "reason"
+type = "String"
+
+[[event.fields]]
+name = "ledger"
+type = "u32"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[event]]
 struct_name = "EventAdminTransferProposed"
 topic       = "propose"
 emitter_fn  = "admin_transfer_proposed"
