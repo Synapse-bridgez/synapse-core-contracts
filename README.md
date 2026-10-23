@@ -292,6 +292,15 @@ wired.
 <!-- handsoff-issue-156 -->
 - #156: [High] Add a phase-router forwarding-intent query for future Swap Engine polling
 
+<!-- handsoff-issue-281 -->
+- #281: Restore `slash_signer` for provable relay-signer misbehavior
+
+<!-- handsoff-issue-282 -->
+- #282: Restore `set_anchor_tier` / `get_anchor_tier` / `compute_effective_fee`
+
+<!-- handsoff-issue-283 -->
+- #283: Restore `set_param` / `get_param` on-chain parameter registry
+
 <!-- handsoff-issue-277 -->
 - #277: Restore `dispute_transaction` / `resolve_dispute` / `is_disputed`
 

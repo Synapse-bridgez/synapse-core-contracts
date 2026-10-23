@@ -1,4 +1,136 @@
+use soroban_sdk::{contracttype, Address, Env, String, Vec};
+
+use crate::types::{DataKey, Transaction, TransactionStatus};
+
+/// Maximum number of tags that may be attached to a single transaction.
+///
+/// Enforced by `add_transaction_tag` so that tag metadata stays bounded.
+pub const MAX_TAGS_PER_TRANSACTION: u32 = 10;
+
+/// Storage keys for the treasury two-party withdrawal flow (issue #284).
+///
+/// The two-party model is documented as accepted risk R-06 in
+/// `THREAT_MODEL.md` §8: a withdrawal requires one authorized party to
+/// propose and a *second, distinct* authorized party to authorize before
+/// funds move.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TreasuryKey {
+    /// Monotonic counter used to allocate withdrawal ids.
+    WithdrawalCounter,
+    /// Pending withdrawal record keyed by withdrawal id.
+    PendingWithdrawal(u64),
+    /// Treasury configuration (authorized parties, epoch cap, etc.).
+    TreasuryConfig,
+    /// Current treasury balance.
+    TreasuryBalance,
+    /// Running total withdrawn in the current epoch.
+    EpochWithdrawn,
+}
+
+/// A pending treasury withdrawal awaiting a second-party authorization.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingWithdrawal {
+    /// Amount requested for withdrawal.
+    pub amount: i128,
+    /// Destination address that will receive the funds.
+    pub destination: Address,
+    /// The authorized party that proposed the withdrawal.
+    pub proposer: Address,
+}
+
+/// Treasury configuration describing the authorized parties and epoch cap.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryConfig {
+    /// First authorized party (e.g. admin).
+    pub party_a: Address,
+    /// Second authorized party (e.g. treasury role).
+    pub party_b: Address,
+    /// Maximum amount that may be withdrawn per epoch.
+    pub epoch_cap: i128,
+}
+
+/// Returns the current treasury balance.
+pub fn treasury_balance(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&TreasuryKey::TreasuryBalance)
+        .unwrap_or(0)
+}
+
+/// Persists the treasury balance.
+pub fn set_treasury_balance(env: &Env, balance: i128) {
+    env.storage()
+        .instance()
+        .set(&TreasuryKey::TreasuryBalance, &balance);
+}
+
+/// Returns the treasury configuration, if configured.
+pub fn treasury_config(env: &Env) -> Option<TreasuryConfig> {
+    env.storage().instance().get(&TreasuryKey::TreasuryConfig)
+}
+
+/// Persists the treasury configuration.
+pub fn set_treasury_config(env: &Env, config: &TreasuryConfig) {
+    env.storage().instance().set(&TreasuryKey::TreasuryConfig, config);
+}
+
+/// Returns the amount already withdrawn in the current epoch.
+pub fn epoch_withdrawn(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&TreasuryKey::EpochWithdrawn)
+        .unwrap_or(0)
+}
+
+/// Persists the amount withdrawn in the current epoch.
+pub fn set_epoch_withdrawn(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&TreasuryKey::EpochWithdrawn, &amount);
+}
+
+/// Allocates and returns the next withdrawal id.
+pub fn next_withdrawal_id(env: &Env) -> u64 {
+    let id: u64 = env
+        .storage()
+        .instance()
+        .get(&TreasuryKey::WithdrawalCounter)
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&TreasuryKey::WithdrawalCounter, &(id + 1));
+    id
+}
+
+/// Stores a pending withdrawal under its id.
+pub fn set_pending_withdrawal(env: &Env, id: u64, withdrawal: &PendingWithdrawal) {
+    env.storage()
+        .persistent()
+        .set(&TreasuryKey::PendingWithdrawal(id), withdrawal);
+}
+
+/// Returns the pending withdrawal for `id`, if any.
+pub fn pending_withdrawal(env: &Env, id: u64) -> Option<PendingWithdrawal> {
+    env.storage()
+        .persistent()
+        .get(&TreasuryKey::PendingWithdrawal(id))
+}
+
+/// Removes a pending withdrawal once it has been authorized and settled.
+pub fn remove_pending_withdrawal(env: &Env, id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&TreasuryKey::PendingWithdrawal(id));
+}
+
 /// Writes (or overwrites) a transaction record.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx` - The transaction record to store.
 pub fn set_transaction(env: &Env, tx: &Transaction) {
     env.storage()
         .persistent()
