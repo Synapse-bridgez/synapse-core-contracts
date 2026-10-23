@@ -249,6 +249,272 @@ fn dispute_resolution_emits_raised_before_resolved() {
 }
 
 // ---------------------------------------------------------------------------
+// 5 drift-detection fixtures (negative tests)
+// ---------------------------------------------------------------------------
+
+/// **Drift fixture #1** — an event struct present in code but absent from the
+/// manifest must be rejected.
+#[test]
+fn drift_fixture_code_event_missing_from_manifest() {
+    let code = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+    let docs = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+    let manifest = vec![];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(
+        !report.is_conformant(),
+        "drift fixture #1: missing manifest entry must be detected"
+    );
+    assert_eq!(report.missing_from_manifest, vec!["Transfer".to_string()]);
+}
+
+/// **Drift fixture #2** — an event present in the manifest but absent from
+/// code must be rejected.
+#[test]
+fn drift_fixture_manifest_event_missing_from_code() {
+    let code = vec![];
+    let docs = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+    let manifest = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(
+        !report.is_conformant(),
+        "drift fixture #2: manifest entry missing from code must be detected"
+    );
+    assert_eq!(report.missing_from_code, vec!["Transfer".to_string()]);
+}
+
+/// **Drift fixture #3** — an event present in code but absent from docs must
+/// be rejected.
+#[test]
+fn drift_fixture_code_event_missing_from_docs() {
+    let code = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+    let docs = vec![];
+    let manifest = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(
+        !report.is_conformant(),
+        "drift fixture #3: missing docs entry must be detected"
+    );
+    assert_eq!(report.missing_from_docs, vec!["Transfer".to_string()]);
+}
+
+/// **Drift fixture #4** — an event documented but absent from code must be
+/// rejected.
+#[test]
+fn drift_fixture_docs_event_missing_from_code() {
+    let code = vec![];
+    let docs = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+    let manifest = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(
+        !report.is_conformant(),
+        "drift fixture #4: documented event missing from code must be detected"
+    );
+    assert_eq!(report.undocumented_in_code, vec!["Transfer".to_string()]);
+}
+
+/// **Drift fixture #5** — a topic mismatch between sources must be rejected.
+#[test]
+fn drift_fixture_topic_mismatch() {
+    let code = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+    let docs = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+    ];
+    let manifest = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "xfer".into(),
+        },
+    ];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(
+        !report.is_conformant(),
+        "drift fixture #5: topic mismatch must be detected"
+    );
+    assert_eq!(report.topic_mismatches, vec!["Transfer".to_string()]);
+}
+
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5 drift-detection fixtures (negative tests)
+// ---------------------------------------------------------------------------
+
+/// **Drift fixture #1** — an event struct present in code but absent from the
+/// manifest must be rejected.
+#[test]
+fn drift_fixture_code_event_missing_from_manifest() {
+    let code = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+        EventEntry {
+            name: "Mint".into(),
+            topic: "mint".into(),
+        },
+    ];
+    let docs = code.clone();
+    let manifest = vec![EventEntry {
+        name: "Transfer".into(),
+        topic: "transfer".into(),
+    }];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(!report.is_conformant(), "drift must be detected");
+    assert_eq!(report.missing_from_manifest, vec!["Mint".to_string()]);
+}
+
+/// **Drift fixture #2** — a manifest event with no corresponding code struct
+/// must be rejected.
+#[test]
+fn drift_fixture_manifest_event_missing_from_code() {
+    let code = vec![EventEntry {
+        name: "Transfer".into(),
+        topic: "transfer".into(),
+    }];
+    let docs = code.clone();
+    let manifest = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+        EventEntry {
+            name: "Burn".into(),
+            topic: "burn".into(),
+        },
+    ];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(!report.is_conformant(), "drift must be detected");
+    assert_eq!(report.missing_from_code, vec!["Burn".to_string()]);
+}
+
+/// **Drift fixture #3** — an event struct present in code but undocumented in
+/// `EVENTS.md` must be rejected.
+#[test]
+fn drift_fixture_code_event_missing_from_docs() {
+    let code = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+        EventEntry {
+            name: "Approve".into(),
+            topic: "approve".into(),
+        },
+    ];
+    let manifest = code.clone();
+    let docs = vec![EventEntry {
+        name: "Transfer".into(),
+        topic: "transfer".into(),
+    }];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(!report.is_conformant(), "drift must be detected");
+    assert_eq!(report.missing_from_docs, vec!["Approve".to_string()]);
+}
+
+/// **Drift fixture #4** — a documented event with no corresponding code struct
+/// must be rejected.
+#[test]
+fn drift_fixture_docs_event_missing_from_code() {
+    let code = vec![EventEntry {
+        name: "Transfer".into(),
+        topic: "transfer".into(),
+    }];
+    let manifest = code.clone();
+    let docs = vec![
+        EventEntry {
+            name: "Transfer".into(),
+            topic: "transfer".into(),
+        },
+        EventEntry {
+            name: "Pause".into(),
+            topic: "pause".into(),
+        },
+    ];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(!report.is_conformant(), "drift must be detected");
+    assert_eq!(report.undocumented_in_code, vec!["Pause".to_string()]);
+}
+
+/// **Drift fixture #5** — a topic that differs between sources must be
+/// rejected even when the event name matches everywhere.
+#[test]
+fn drift_fixture_topic_mismatch() {
+    let code = vec![EventEntry {
+        name: "Transfer".into(),
+        topic: "transfer".into(),
+    }];
+    let docs = vec![EventEntry {
+        name: "Transfer".into(),
+        topic: "transfer".into(),
+    }];
+    let manifest = vec![EventEntry {
+        name: "Transfer".into(),
+        topic: "xfer".into(),
+    }];
+
+    let report = check_conformance(&code, &docs, &manifest);
+    assert!(!report.is_conformant(), "drift must be detected");
+    assert_eq!(report.topic_mismatches, vec!["Transfer".to_string()]);
+}
+
 // Sanity: events module helpers exist and are used by the entry points above.
 // ---------------------------------------------------------------------------
 
@@ -265,4 +531,5 @@ fn events_module_exposes_expected_symbols() {
     let _ = events::EVENT_DISPUTE_RAISED;
     let _ = events::EVENT_DISPUTE_RESOLVED;
     let _ = &env;
+}
 }
