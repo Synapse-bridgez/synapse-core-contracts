@@ -34,7 +34,7 @@
 //! The tooling here is strictly read-only and informational: it never performs
 //! or automates an upgrade.
 
-use soroban_sdk::{contracttype, Env, String, Vec};
+use soroban_sdk::{contracttype, BytesN, Env, String, Vec};
 
 /// A single documented change introduced by a schema version.
 #[contracttype]
@@ -99,6 +99,61 @@ pub fn compare_schema_versions(
         }
     }
 
+/// Minimal capture of critical pre-upgrade state, taken immediately before
+/// `upgrade()` / `upgrade_and_migrate()` swap the WASM.
+///
+/// Consumed by `post_upgrade_self_check` (issues #26/#97) to verify the new
+/// WASM against the state it replaced, and by `rollback_upgrade` (issue #102)
+/// to reverse a bad upgrade. Kept deliberately small and cheap to construct
+/// since it is captured on every upgrade attempt, not just ones that end up
+/// needing rollback.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeSnapshot {
+    /// Hash of the WASM that was live immediately before the upgrade.
+    pub wasm_hash: BytesN<32>,
+    /// Schema version recorded before the upgrade.
+    pub schema_version: u32,
+    /// Ledger sequence at which the snapshot was captured.
+    pub captured_at_ledger: u32,
+}
+
+impl UpgradeSnapshot {
+    /// Capture the current pre-upgrade state into a snapshot.
+    ///
+    /// Reads the live WASM hash and schema version from storage and stamps
+    /// the current ledger sequence. Cheap: a constant number of reads.
+    pub fn capture(env: &Env) -> Self {
+        Self {
+            wasm_hash: StorageClient::get_wasm_hash(env),
+            schema_version: StorageClient::get_schema_version(env),
+            captured_at_ledger: env.ledger().sequence(),
+        }
+    }
+
+    /// Persist this snapshot to instance storage so it survives the WASM
+    /// swap it is meant to let the contract recover from.
+    pub fn store(&self, env: &Env) {
+        StorageClient::set_upgrade_snapshot(env, self);
+    }
+
+    /// Load the most recently captured snapshot, if any.
+    pub fn load(env: &Env) -> Option<Self> {
+        StorageClient::get_upgrade_snapshot(env)
+    }
+
+    /// Capture the current pre-upgrade state and persist it in one step.
+    /// Call this immediately before swapping the WASM.
+    pub fn capture_and_store(env: &Env) -> Self {
+        let snapshot = Self::capture(env);
+        snapshot.store(env);
+        snapshot
+    }
+}
+
+pub struct MigrationRegistry;
+
+impl MigrationRegistry {
     /// Read-only check that `migration_id` is a registered routine shipped in
     /// this WASM. Performs no storage writes and emits no events, so it is
     /// safe to call from dry-run surfaces such as
@@ -107,6 +162,22 @@ pub fn compare_schema_versions(
     /// Returns `Ok(())` when the id is known, otherwise
     /// [`ContractError::UnknownMigration`].
     pub fn is_registered(migration_id: u32) -> Result<(), ContractError> {
+        match migration_id {
+            MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
+            _ => Err(ContractError::UnknownMigration),
+        }
+    }
+
+    fn assert_within_bound(planned_touches: u32) -> Result<(), ContractError> {
+        if planned_touches > MAX_MIGRATION_STORAGE_TOUCHES {
+            return Err(ContractError::MigrationFailed);
+        }
+        Ok(())
+    }
+
+    /// Dispatch `migration_id` to its routine. Returns the number of storage
+    /// touches performed (for audit / events).
+    pub fn run(env: &Env, migration_id: u32) -> Result<u32, ContractError> {
         match migration_id {
             MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
             _ => Err(ContractError::UnknownMigration),

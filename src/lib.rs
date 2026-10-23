@@ -1,14 +1,22 @@
-#![no_std]
-
 //! Soroban smart contract crate.
 //!
 //! This crate exposes the contract entry points and supporting modules.
 //! The migration registry lives in [`migration`] and is invoked by the
 //! upgrade path before the WASM swap commits.
+//!
+//! Relay signer rotation with timelock lives in [`relay_signer`]:
+//! `propose_relay_signer`, `finalize_relay_signer` /
+//! `try_finalize_relay_signer`, and `cancel_relay_signer_change`, mirroring
+//! the propose/finalize/cancel shape used for admin transfer and upgrades.
+//! The immediate single-signer rotation path (`set_relay_signer`) is
+//! intentionally separate.
+
+#![no_std]
 
 mod admin;
 mod events;
 mod migration;
+mod relay_signer;
 mod storage;
 mod types;
 mod validation;
@@ -29,6 +37,12 @@ mod test_dispute_queue;
 mod test_events_conformance;
 #[cfg(test)]
 mod test_pause;
+#[cfg(test)]
+mod test_recovery;
+#[cfg(test)]
+mod test_rotation_chaos;
+#[cfg(test)]
+mod test_upgrade_safety;
 #[cfg(test)]
 mod test_wave2;
 #[cfg(test)]
@@ -472,6 +486,50 @@ impl SynapseCoreContract {
 
         Ok(())
     }
+
+    // ── Read-only queries ─────────────────────────────────────────────────────
+
+    /// Returns the treasury's current accrued-and-unwithdrawn balance.
+    ///
+    /// This is a passthrough read of the treasury balance stored by the
+    /// accrual flow; no business logic is applied here.
+    pub fn treasury_balance(env: Env) -> i128 {
+        storage::get_treasury_balance(&env)
+    }
+
+    /// Returns the treasury's current configuration.
+    ///
+    /// Exposes `base_fee_bps`, `treasury_epoch_cap`, and
+    /// `treasury_epoch_length` as stored by the configuration flow.
+    pub fn treasury_config(env: Env) -> TreasuryConfig {
+        storage::get_treasury_config(&env)
+    }
+
+    /// Returns the current in-flight two-party withdrawal proposal, if any.
+    ///
+    /// Returns `None` cleanly when there is no pending proposal rather than
+    /// erroring, so callers can poll this query safely.
+    pub fn pending_withdrawal(env: Env) -> Option<Withdrawal> {
+        storage::get_pending_withdrawal(&env)
+    }
+
+    /// Returns the dispute record for `tx_id`, if one exists.
+    ///
+    /// Unauthenticated read-only query. Returns `None` cleanly when `tx_id`
+    /// has never been disputed rather than erroring, so callers can poll this
+    /// query safely.
+    pub fn get_dispute(env: Env, tx_id: u64) -> Option<Dispute> {
+        storage::get_dispute(&env, tx_id)
+    }
+
+    /// Returns all currently-unresolved disputes.
+    ///
+    /// Unauthenticated read-only bulk query intended for reviewer/admin
+    /// dashboards polling for work. Disputes cleared by `resolve_dispute` are
+    /// excluded, so the result only ever contains unresolved disputes.
+    pub fn get_dispute_queue(env: Env) -> Vec<Dispute> {
+        storage::get_dispute_queue(&env)
+    }
 }
 
 // Re-export the admin error type for callers.
@@ -486,3 +544,14 @@ const _: () = assert!(
     crate::types::ContractError::__VARIANT_COUNT <= MAX_CONTRACT_ERROR_VARIANTS,
     "ContractError exceeds Soroban's 50-variant cap; see DECISIONS.md 'Error-code budget'"
 );
+
+mod admin;
+mod events;
+mod migration;
+mod relay_signer;
+mod storage;
+mod types;
+mod validation;
+
+#[cfg(test)]
+

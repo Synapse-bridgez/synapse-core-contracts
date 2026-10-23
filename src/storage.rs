@@ -1,273 +1,547 @@
-//! Storage helpers for the contract.
-//!
-//! Centralises the storage keys and accessors used across the contract so
-//! that the auth, upgrade, and migration flows all read/write the same
-//! locations. See `docs/adr/0004-timelocked-upgrade.md` for the timelocked
-//! upgrade state machine.
-//!
-//! This module also owns the pack/unpack conversion between the public
-//! [`Transaction`] type and the packed [`StoredTransaction`] form persisted to
-//! ledger storage, and centralises the storage keys and small read/write
-//! helpers used by the contract entry points.
-
-use crate::types::{CallbackType, StoredTransaction, Transaction, TransactionStatus};
-use soroban_sdk::{contracttype, Address, BytesN, Env};
-
-/// Bit offset of the `status` field within `StoredTransaction::packed`.
-const STATUS_SHIFT: u32 = 0;
-/// Bit mask for the `status` field (4 bits).
-const STATUS_MASK: u32 = 0xF;
-
-/// Bit offset of the `callback_type` field within `StoredTransaction::packed`.
-const CALLBACK_SHIFT: u32 = 4;
-/// Bit mask for the `callback_type` field (4 bits).
-const CALLBACK_MASK: u32 = 0xF;
-
-/// Bit offset of the `retry_count` field within `StoredTransaction::packed`.
-const RETRY_SHIFT: u32 = 8;
-/// Bit mask for the `retry_count` field (4 bits).
-///
-/// Sized generously (4 bits, max 15) relative to the original wave 9 design
-/// intent of a max-retry constant of 3, so a future increase does not require
-/// a breaking re-pack of the stored representation.
-const RETRY_MASK: u32 = 0xF;
-
-/// Storage keys used by the contract.
-///
-/// Kept as a single enum so that every entry point shares one namespaced key
-/// space and later issues can extend it without touching `lib.rs`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DataKey {
-    /// Contract administrator address.
-    Admin,
-    /// Pending admin transfer proposal (issue #5).
-    PendingAdmin,
-    /// Pending relay-signer rotation proposal (issue #87).
-    PendingRelaySigner,
-    /// Pending timelocked upgrade proposal (issue #312).
-    PendingUpgrade,
-    /// Ledger timestamp at which the pending upgrade becomes finalizable.
-    UpgradeReadyAt,
-    /// Current schema version of 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DataKey {
-    /// Contract administrator address.
-    Admin,
-    /// Pending admin transfer proposal (issue #5).
-    PendingAdmin,
-    /// Pending relay-signer rotation proposal (issue #87).
-    PendingRelaySigner,
-    /// Pending timelocked upgrade proposal (issue #312).
-    PendingUpgrade,
-    /// Ledger timestamp at which the pending upgrade becomes finalizable.
-    UpgradeReadyAt,
-    /// Current schema version of the stored contract state.
-    SchemaVersion,
-    /// Relay signer address authorised to submit relayed operations.
-    RelaySigner,
-    /// Whether the contract has been initialised.
-    Initialized,
-}
-
-/// A pending timelocked upgrade proposal.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingUpgrade {
-    /// The new WASM hash to install on finalize.
-    pub new_wasm_hash: BytesN<32>,
-    /// The schema version the new WASM is expected to produce.
-    pub expected_schema_version: u32,
-}
-
-/// Map a `u32` discriminant back to a [`TransactionStatus`].
-fn status_from_u32(value: u32) -> TransactionStatus {
-    match value {
-        1 => TransactionStatus::Completed,
-        2 => TransactionStatus::Failed,
-        3 => TransactionStatus::Retrying,
-        4 => TransactionStatus::Cancelled,
-        _ => TransactionStatus::Pending,
-    }
-}
-
-/// Map a `u32` discriminant back to a [`CallbackType`].
-fn callback_from_u32(value: u32) -> CallbackType {
-    match value {
-        1 => CallbackType::OnSuccess,
-        2 => CallbackType::OnFailure,
-        3 => CallbackType::OnComplete,
-        _ => CallbackType::None,
-    }
-}
-
-/// Pack a [`Transaction`] into its on-ledger [`StoredTransaction`] form.
-pub fn pack(tx: &Transaction) -> StoredTransaction {
-    let packed = ((tx.status as u32 & STATUS_MASK) << STATUS_SHIFT)
-        | ((tx.callback_type as u32 & CALLBACK_MASK) << CALLBACK_SHIFT)
-        | ((tx.retry_count & RETRY_MASK) << RETRY_SHIFT);
-
-    StoredTransaction {
-        tx_id: tx.tx_id.clone(),
-        packed,
-        amount: tx.amount,
-        stellar_account: tx.stellar_account.clone(),
-        asset_code: tx.asset_code.clone(),
-        asset_issuer: tx.asset_issuer.clone(),
-        tags: tx.tags.clone(),
-    }
-}
-
-/// Unpack a [`StoredTransaction`] back into the public [`Transaction`] form.
-pub fn unpack(stored: &StoredTransaction) -> Transaction {
-    let status = status_from_u32((stored.packed >> STATUS_SHIFT) & STATUS_MASK);
-    let callback_type = callback_from_u32((stored.packed >> CALLBACK_SHIFT) & CALLBACK_MASK);
-    let retry_count = (stored.packed >> RETRY_SHIFT) & RETRY_MASK;
-
-    Transaction {
-        tx_id: stored.tx_id.clone(),
-        status,
-        callback_type,
-        amount: stored.amount,
-        stellar_account: stored.stellar_account.clone(),
-        asset_code: stored.asset_code.clone(),
-        asset_issuer: stored.asset_issuer.clone(),
-        retry_count,
-        tags: stored.tags.clone(),
-    }
-}
-
-/// Returns the configured upgrade delay in seconds (issue #84/#105).
-pub fn upgrade_delay(env: &Env) -> u64 {
+/// Writes (or overwrites) a transaction record.
+pub fn set_transaction(env: &Env, tx: &Transaction) {
     env.storage()
-        .instance()
-        .get(&DataKey::UpgradeDelay)
-        .unwrap_or(0)
+        .persistent()
+        .get(&DataKey::Transaction(tx_id.clone()))
 }
 
-/// Stores a pending upgrade proposal and starts the timelock.
-///
-/// The proposal becomes finalizable once `upgrade_delay()` seconds have
-/// elapsed from the current ledger timestamp.
-pub fn set_pending_upgrade(env: &Env, proposal: &PendingUpgrade) {
-    let ready_at = env.ledger().timestamp().saturating_add(upgrade_delay(env));
-    env.storage()
-        .instance()
-        .set(&DataKey::PendingUpgrade, proposal);
-    env.storage()
-        .instance()
-        .set(&DataKey::UpgradeReadyAt, &ready_at);
-}
-
-/// Returns the pending upgrade proposal, if any.
-pub fn get_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
-    env.storage().instance().get(&DataKey::PendingUpgrade)
-}
-
-/// Returns the ledger timestamp at which the pending upgrade becomes
-/// finalizable, if a proposal is pending.
-pub fn get_upgrade_ready_at(env: &Env) -> Option<u64> {
-    env.storage().instance().get(&DataKey::UpgradeReadyAt)
-}
-
-/// Clears any pending upgrade proposal and its timelock.
-pub fn clear_pending_upgrade(env: &Env) {
-    env.storage().instance().remove(&DataKey::PendingUpgrade);
-    env.storage().instance().remove(&DataKey::UpgradeReadyAt);
-}
-
-/// Returns the current schema version of the stored contract state.
-pub fn get_schema_version(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&DataKey::SchemaVersion)
-        .unwrap_or(0)
-}
-
-/// Persists the schema version of the stored contract state.
-pub fn set_schema_version(env: &Env, version: u32) {
-    env.storage()
-        .instance()
-        .set(&DataKey::SchemaVersion, &version);
-}
-
-/// Returns whether the contract has been initialised.
+/// Writes (or overwrites) a transaction record.
 ///
 /// # Arguments
+/// * `env` - The contract environment.
+/// * `tx` - The transaction record to store.
+pub fn set_transaction(env: &Env, tx: &Transaction) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Transaction(tx.tx_id.clone()), tx);
+}
+
+/// Records the Stellar transaction hash on an existing `Transaction` record.
 ///
-/// * `env` - The Soroban environment.
+/// This is the audit hook used by `complete_transaction`: it persists the
+/// `stellar_tx_hash` so subsequent `get_transaction` calls return it, matching
+/// the assertions in `test_recovery.rs` and `test_rotation_chaos.rs`.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction identifier to update.
+/// * `stellar_tx_hash` - The Stellar ledger transaction hash to record.
+///
+/// # Panics
+/// Panics if no `Transaction` record exists for `tx_id`.
+pub fn set_stellar_tx_hash(env: &Env, tx_id: &BytesN<32>, stellar_tx_hash: &BytesN<32>) {
+    let mut tx = get_transaction(env, tx_id)
+        .unwrap_or_else(|| panic!("transaction not found"));
+    tx.stellar_tx_hash = Some(stellar_tx_hash.clone());
+    put_transaction(env, &tx);
+}
+
+/// Returns the currently accrued treasury fee total.
+///
+/// # Arguments
+/// * `env` - The contract environment.
 ///
 /// # Returns
-///
-/// `true` if the `Initialized` flag is set in instance storage.
-#[must_use]
-pub fn is_initialized(env: &Env) -> bool {
+/// The accumulated fee in stroops, or `0` if none has been accrued.
+pub fn get_treasury_accrued(env: &Env) -> i128 {
     env.storage()
-        .instance()
-        .get(&DataKey::Initialized)
+        .persistent()
+        .get(&DataKey::TreasuryAccrued)
+        .unwrap_or(0)
+}
+
+/// Persists the accrued treasury fee total.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `amount` - The new accumulated fee total in stroops.
+pub fn set_treasury_accrued(env: &Env, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::TreasuryAccrued, &amount);
+}
+
+/// Fee-accrual hook stub for issue #73.
+///
+/// Called by `complete_transaction` after the status transition succeeds. When
+/// issue #73 lands, this function will compute the fee owed for `tx_id` and add
+/// it to the treasury accumulator. For now it is a no-op placeholder so that
+/// issue #73 does not require re-opening the `complete_transaction` entry point.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `tx_id` - The transaction that just completed.
+pub fn accrue_completion_fee(_env: &Env, _tx_id: &BytesN<32>) {
+    // TODO(#73): compute fee for `tx_id` and add to `DataKey::TreasuryAccrued`.
+}
+
+/// Returns whether `addr` is an authorized relayer.
+///
+/// # Arguments
+/// * `env` - The contract environment.
+/// * `addr` - The address to check.
+pub fn is_relayer(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Relayer(addr.clone()))
         .unwrap_or(false)
 }
 
-/// Marks the contract as initialised in instance storage.
+/// Marks `addr` as an authorized relayer.
 ///
 /// # Arguments
-///
-/// * `env` - The Soroban environment.
-pub fn set_initialized(env: &Env) {
+/// * `env` - The contract environment.
+/// * `addr` - The address to authorize.
+pub fn set_relayer(env: &Env, addr: &Address) {
     env.storage()
-        .instance()
-        .set(&DataKey::Initialized, &true);
+        .persistent()
+        .set(&DataKey::Relayer(addr.clone()), &true);
 }
 
-/// Stores the contract administrator address in instance storage.
+/// Returns the configured admin address, if any.
 ///
 /// # Arguments
-///
-/// * `env` - The Soroban environment.
-/// * `admin` - The administrator address to persist.
-pub fn set_admin(env: &Env, admin: &Address) {
-    env.storage().instance().set(&DataKey::Admin, admin);
-}
-
-/// Returns the stored contract administrator address, if any.
-///
-/// # Arguments
-///
-/// * `env` - The Soroban environment.
-///
-/// # Returns
-///
-/// `Some(admin)` when the contract has been initialised, otherwise `None`.
-#[must_use]
+/// * `env` - The contract environment.
 pub fn get_admin(env: &Env) -> Option<Address> {
-    env.storage().instance().get(&DataKey::Admin)
+    env.storage().persistent().get(&DataKey::Admin)
 }
 
-/// Stores the relay signer address in instance storage.
+/// Persists the admin address.
 ///
 /// # Arguments
-///
-/// * `env` - The Soroban environment.
-/// * `relay_signer` - The relay signer address to persist.
-pub fn set_relay_signer(env: &Env, relay_signer: &Address) {
+/// * `env` - The contract environment.
+/// * `admin` - The address to set as admin.
+
+/// Returns `true` if a transaction with `tx_id` exists.
+pub fn has_transaction(env: &Env, tx_id: &Symbol) -> bool {
     env.storage()
-        .instance()
-        .set(&DataKey::RelaySigner, relay_signer);
+        .persistent()
+        .has(&DataKey::Transaction(tx_id.clone()))
 }
 
-/// Returns the stored relay signer address, if any.
+/// Shared transition helper (issue #57).
+///
+/// Validates that the transaction identified by `tx_id` exists and that its
+/// current status is one of `valid_sources`, then writes the new `target`
+/// status along with the `caller` and optional `reason`.
+///
+/// This is the single entry point used by every status transition so that
+/// terminal-state guards and persistence stay consistent across the contract.
+///
+/// # Errors
+/// Returns `Err(TransitionError::NotFound)` if the transaction does not exist,
+/// or `Err(TransitionError::InvalidSource)` if the current status is not in
+/// `valid_sources`.
+pub fn transition_status(
+    env: &Env,
+    tx_id: &Symbol,
+    valid_sources: &[TxStatus],
+    target: TxStatus,
+    caller: &Address,
+    reason: Option<String>,
+) -> Result<Transaction, TransitionError> {
+    let mut tx = get_transaction(env, tx_id).ok_or(TransitionError::NotFound)?;
+
+    if !valid_sources.contains(&tx.status) {
+        return Err(TransitionError::InvalidSource);
+    }
+
+    tx.status = target;
+    tx.caller = caller.clone();
+    tx.reason = reason;
+    set_transaction(env, &tx);
+
+    Ok(tx)
+}
+
+/// Error returned by [`transition_status`].
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransitionError {
+    NotFound,
+    InvalidSource,
+}
+
+/// Marks a transaction as `Failed`.
+///
+/// `Failed` is reachable from any non-terminal state (`Pending` or
+/// `Processing`) — unlike `Cancelled`, which is scoped to `Pending`/
+/// `Processing` only. This asymmetry is documented and deliberate:
+/// `fail_transaction` means "the anchor genuinely failed", while
+/// `cancel_transaction` means "someone decided to stop this".
+///
+/// `reason` must satisfy issue #47's string-length cap
+/// ([`MAX_REASON_LEN`]).
+pub fn fail_transaction(
+    env: &Env,
+    tx_id: &Symbol,
+    reason: String,
+    caller: &Address,
+) -> Result<Transaction, TransitionError> {
+    // Enforce issue #47's string-length cap on the failure reason.
+    if reason.len() > MAX_REASON_LEN {
+        return Err(TransitionError::InvalidSource);
+    }
+
+    transition_status(
+        env,
+        tx_id,
+        &[TxStatus::Pending, TxStatus::Processing],
+        TxStatus::Failed,
+        caller,
+        Some(reason),
+    )
+}
+
+/// Return the tags currently attached to a transaction.
+///
+/// Returns an empty vector when the transaction has no tags yet.
+pub fn get_transaction_tags(env: &Env, tx_id: u64) -> Vec<String> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TransactionTags(tx_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Append a tag to a transaction's tag list.
+///
+/// Callers are expected to have validated the tag and the tag-count bound
+/// before invoking this helper.
+pub fn add_transaction_tag(env: &Env, tx_id: u64, tag: &String) {
+    let mut tags = get_transaction_tags(env, tx_id);
+    tags.push_back(tag.clone());
+    env.storage()
+        .persistent()
+        .set(&DataKey::TransactionTags(tx_id), &tags);
+}
+
+/// Return the number of tags currently attached to a transaction.
+pub fn transaction_tag_count(env: &Env, tx_id: u64) -> u32 {
+    get_transaction_tags(env, tx_id).len()
+}
+
+/// Persist the status of a transaction.
+pub fn set_transaction_status(env: &Env, tx_id: u64, status: &TransactionStatus) {
+    if let Some(mut tx) = get_transaction(env, tx_id) {
+        tx.status = status.clone();
+        set_transaction(env, tx_id, &tx);
+    }
+}
+
+/// Persist an arbitrary address-keyed flag.
+pub fn set_flag(env: &Env, key: &DataKey, value: bool) {
+    env.storage().persistent().set(key, &value);
+}
+
+/// Read an arbitrary address-keyed flag, defaulting to `false`.
+pub fn get_flag(env: &Env, key: &DataKey) -> bool {
+    env.storage().persistent().get(key).unwrap_or(false)
+}
+
+/// Persist the admin address.
+pub fn set_admin(env: &Env, admin: &Address) {
+    env.storage().persistent().set(&DataKey::Admin, admin);
+}
+
+/// Emits a contract event with the given topics and data.
+///
+/// Thin wrapper kept here so storage/transition helpers can emit without
+/// importing the events module directly.
 ///
 /// # Arguments
-///
-/// * `env` - The Soroban environment.
-///
-/// # Returns
-///
-/// `Some(relay_signer)` when the contract has been initialised, otherwise `None`.
-#[must_use]
+/// * `env` - The contract environment.
+/// * `topics` - The event topics.
+/// * `data` - The event payload.
+pub fn emit(env: &Env, topics: &soroban_sdk::Vec<Symbol>, data: &soroban_sdk::Val) {
+    env.events().publish(topics.clone(), data.clone());
+}
+
+/// Load the admin address, if configured.
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::Admin)
+}
+
+/// Storage key for a signer's bond record.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub enum BondKey {
+    Bond(Address),
+    Unbond(Address),
+}
+
+/// Read the bond record for `signer`, returning a zero/default record when the
+/// signer has never bonded.
+pub fn get_bond_record(env: &Env, signer: &Address) -> BondRecord {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Bond(signer.clone()))
+        .unwrap_or(BondRecord {
+            signer: signer.clone(),
+            amount: 0,
+            bonded_at: 0,
+        })
+}
+
+/// Read the pending unbond request for `signer`, or `None` when no request is
+/// pending (including after a completed unbond has been claimed).
+pub fn get_unbond_request(env: &Env, signer: &Address) -> Option<UnbondRequest> {
+    env.storage()
+        .persistent()
+        .get(&BondKey::Unbond(signer.clone()))
+}
+
 pub fn get_relay_signer(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::RelaySigner)
+}
+
+/// Returns the effective relay signer set, applying the one-of-one fallback.
+///
+/// Decision (issue #304): a contract initialized before the N-of-M feature
+/// existed must be representable as a valid one-of-one signer set without a
+/// disruptive migration step. If the explicit N-of-M storage was never
+/// initialized, this derives the equivalent one-of-one view from the legacy
+/// single `relay_signer`.
+pub fn relay_signer_set(env: &Env) -> Vec<Address> {
+    if let Some(set) = get_relay_signer_set(env) {
+        return set;
+    }
+    let mut out = Vec::new(env);
+    if let Some(signer) = get_relay_signer(env) {
+        out.push_back(signer);
+    }
+    out
+}
+
+/// Returns the current relay-signer set.
+///
+/// When the contract is still in the single-relay-signer baseline state (issue
+/// #6) and no N-of-M set has been materialised yet, this returns a one-of-one
+/// set containing the baseline signer, per ADR 0004's migration semantics.
+pub fn get_relay_signers(env: &Env) -> Vec<Address> {
+    if let Some(signers) = env.storage().instance().get(&DataKey::RelaySigners) {
+        return signers;
+    }
+
+    // Baseline single-signer state: promote lazily into a one-of-one set.
+    let mut signers = Vec::new(env);
+    if let Some(signer) = env.storage().instance().get(&DataKey::RelaySigner) {
+        signers.push_back(signer);
+    }
+    signers
+}
+
+/// Appends `new_signer` to the N-of-M relay-signer set, admin-gated.
+///
+/// If the contract is still in the single-relay-signer baseline state, the
+/// first call transitions it into a one-of-one N-of-M set (containing the
+/// baseline signer) before appending `new_signer`, yielding a one-of-two set.
+///
+/// Adding a signer that is already present is rejected with
+/// [`Error::SignerAlreadyExists`] rather than silently no-op'ing, so callers
+/// cannot mistake a duplicate for a successful rotation.
+pub fn add_relay_signer(
+    env: &Env,
+    caller: &Address,
+    new_signer: &Address,
+) -> Result<(), Error> {
+    caller.require_auth();
+
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(Error::NotInitialized)?;
+    if caller != &admin {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut signers = get_relay_signers(env);
+
+    for existing in signers.iter() {
+        if &existing == new_signer {
+            return Err(Error::SignerAlreadyExists);
+        }
+    }
+
+    signers.push_back(new_signer.clone());
+    env.storage().instance().set(&DataKey::RelaySigners, &signers);
+
+    events::relay_signer_added(env, new_signer);
+
+    Ok(())
+}
+
+/// Returns the effective relay approval threshold, applying the one-of-one
+/// fallback.
+///
+/// Decision (issue #304): when the explicit N-of-M threshold was never
+/// initialized, a single-signer-only contract is treated as an implicit
+/// one-of-one set with threshold `1`. Once the explicit N-of-M storage is
+/// written, the stored threshold is authoritative.
+pub fn relay_threshold(env: &Env) -> u32 {
+    if let Some(threshold) = get_relay_threshold(env) {
+        return threshold;
+    }
+    if get_relay_signer(env).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Returns the quorum threshold for relay-call approvals.
+///
+/// Defaults to `1` when no threshold has been configured via
+/// `set_relay_threshold`, matching the single-relay-signer baseline where one
+/// approval is sufficient.
+pub fn get_relay_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RelayThreshold)
+        .unwrap_or(1)
+}
+
+/// Returns the set of signers that have approved `call_id` so far.
+///
+/// Approvals live in `temporary` storage per the README's storage-tier table
+/// ("Relay approvals"), so they are cheap to write and are consumed once the
+/// quorum threshold is met.
+pub fn get_relay_approvals(env: &Env, call_id: u64) -> Vec<Address> {
+    env.storage()
+        .temporary()
+        .get(&DataKey::RelayApprovals(call_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Records `caller`'s approval of `call_id` and reports whether quorum is met.
+///
+/// `caller` must be a member of the current relay-signer set; otherwise
+/// [`Error::Unauthorized`] is returned. A signer approving the same `call_id`
+/// twice does not double-count toward quorum: the duplicate is a no-op and the
+/// current approval count is re-evaluated against the threshold.
+///
+/// Returns `true` exactly when the number of distinct approvals reaches the
+/// threshold set via `set_relay_threshold` (exactly-at-threshold succeeds,
+/// threshold-minus-one does not). When quorum is met the approval set is
+/// consumed from `temporary` storage so the call cannot be replayed.
+pub fn approve_relay_call(
+    env: &Env,
+    call_id: u64,
+    caller: &Address,
+) -> Result<bool, Error> {
+    caller.require_auth();
+
+    let signers = get_relay_signers(env);
+    let mut is_signer = false;
+    for signer in signers.iter() {
+        if &signer == caller {
+            is_signer = true;
+            break;
+        }
+    }
+    if !is_signer {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut approvals = get_relay_approvals(env, call_id);
+
+    let mut already_approved = false;
+    for approved in approvals.iter() {
+        if &approved == caller {
+            already_approved = true;
+            break;
+        }
+    }
+    if !already_approved {
+        approvals.push_back(caller.clone());
+    }
+
+    let threshold = get_relay_threshold(env);
+    let quorum_met = approvals.len() >= threshold;
+
+    if quorum_met {
+        // Consume the approval set once quorum is reached.
+        env.storage()
+            .temporary()
+            .remove(&DataKey::RelayApprovals(call_id));
+    } else {
+        env.storage()
+            .temporary()
+            .set(&DataKey::RelayApprovals(call_id), &approvals);
+    }
+
+    Ok(quorum_met)
+}
+
+/// Returns the slot-based status index for `status` (issue #24).
+///
+/// The index is a `Vec<u64>` of transaction ids in insertion order, stored
+/// under [`DataKey::StatusIndex`]. Reading it is O(1) in the number of
+/// transactions; only the requested page is materialised.
+fn get_status_index(env: &Env, status: &TransactionStatus) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StatusIndex(status.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Returns a page of transactions currently in `status`, unauthenticated.
+///
+/// Reads directly from the slot-based status index (issue #24) so the cost is
+/// O(page-size) rather than O(total-transactions): only the `limit` ids in
+/// `[offset, offset + limit)` are resolved to full [`Transaction`] records.
+///
+/// # Pagination and consistency
+///
+/// The index is append-ordered and each call re-reads the current index, so
+/// the guaranteed consistency level is **eventually-consistent-per-ledger**:
+/// within a single ledger the page is a consistent snapshot, but a transaction
+/// that transitions out of `status` between two paginated calls may be absent
+/// from (or shifted within) a later page. Callers that need a stable snapshot
+/// across pages should pin to a ledger sequence and re-query on mismatch.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidLimit`] when `limit == 0` or
+/// `limit > MAX_STATUS_PAGE_LIMIT`, per
+/// `test_get_transactions_by_status_rejects_bad_limit`.
+pub fn get_transactions_by_status(
+    env: &Env,
+    status: &TransactionStatus,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<Transaction>, Error> {
+    if limit == 0 || limit > MAX_STATUS_PAGE_LIMIT {
+        return Err(Error::InvalidLimit);
+    }
+
+    let index = get_status_index(env, status);
+    let total = index.len();
+
+    let mut page = Vec::new(env);
+    if offset >= total {
+        return Ok(page);
+    }
+
+    let end = offset.saturating_add(limit).min(total);
+    let mut i = offset;
+    while i < end {
+        let tx_id = index.get_unchecked(i);
+        if let Some(tx) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Transaction>(&DataKey::Transaction(tx_id))
+        {
+            // Skip entries that have transitioned out of `status` since the
+            // index was last compacted; the index is eventually consistent.
+            if tx.status == *status {
+                page.push_back(tx);
+            }
+        }
+        i += 1;
+    }
+
+    Ok(page)
 }
 
 #[cfg(test)]
@@ -335,5 +609,4 @@ mod tests {
         assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0xF);
         assert_eq!(unpack(&stored).retry_count, 0xF);
     }
-}
 }
