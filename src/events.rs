@@ -70,7 +70,6 @@ pub const UPGRADE_TOPIC: Symbol = symbol_short!("upgrade");
 pub const GUARDIAN_REVOKE_TOPIC: Symbol = symbol_short!("guardian_revoke");
 
 /// Topic symbol used for
-
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol};
 
 /// Topic symbol for the contract-initialized event ("init" per README).
@@ -296,8 +295,7 @@ pub fn emit_unbond_claimed(env: &Env, signer: Address, amount: i128) {
 ///   responsible for validating `reason` against the string-length cap
 ///   (issue #47) before invoking this helper.
 pub fn emit_fail(env: &Env, tx_id: u64, reason: &String) {
-    env.events()
-        .publish((FAIL_TOPIC, tx_id), reason.clone());
+    env.events().publish((FAIL_TOPIC, tx_id), reason.clone());
 }
 
 /// Emit the `reg` event for a newly registered transaction.
@@ -403,4 +401,45 @@ pub fn emit_address(env: &Env, topic: &str, tx_id: u64, payload: &Address) {
     let topics = (Symbol::new(env, topic), tx_id);
     env.events().publish(topics, payload.clone());
 }
+
+// ─── Disputes (#166 / #34) ────────────────────────────────────────────────────
+
+/// Emitted when a dispute is raised against a transaction (issue #34 / #166).
+///
+/// Subscribers correlate this with the following [`EventDisputeResolved`] on
+/// the same `tx_id` to reconstruct the full dispute lifecycle.
+///
+/// Topics: `synapse` / `dispute` (matches EVENTS.md §dispute).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventDisputeRaised {
+    /// The transaction ID under dispute — shared with [`EventDisputeResolved`]
+    /// as the correlation key.
+    pub tx_id: String,
+    /// Short human-readable reason code supplied by the caller
+    /// (e.g. `"amount_mismatch"`, `"missing_settlement"`).
+    pub reason: String,
+    /// Address that raised the dispute (relay signer or admin).
+    pub caller: Address,
+    /// Ledger sequence at which the dispute was raised.
+    pub ledger: u32,
+}
+
+/// Emitted when a dispute is resolved (issue #166).
+///
+/// `upheld = true`  → dispute upheld, transaction outcome reversed.  
+/// `upheld = false` → dispute rejected, transaction outcome unchanged.
+///
+/// Topics: `synapse` / `dispute_resolved`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventDisputeResolved {
+    /// The transaction ID whose dispute was resolved.
+    pub tx_id: String,
+    /// Whether the dispute was upheld (`true`) or rejected (`false`).
+    pub upheld: bool,
+    /// Address that resolved the dispute (admin).
+    pub caller: Address,
+    /// Ledger sequence at which the resolution occurred.
+    pub ledger: u32,
 }
