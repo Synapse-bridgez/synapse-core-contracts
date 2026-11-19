@@ -212,6 +212,14 @@ pub enum StorageKey {
     /// Merged-into mapping: source tx_id → canonical tx_id.
     MergedInto(String),
 
+    // ── Upgrade history (#86 / issue #27 / issue #100) ───────────────────────
+    /// Singleton: bounded ring-buffer of [`UpgradeRecord`] entries.
+    /// Capped at [`MAX_UPGRADE_HISTORY`] entries; oldest evicted on overflow.
+    UpgradeHistory,
+    /// Singleton: WASM hash currently installed on this contract.
+    /// Written on every successful upgrade; read by `post_upgrade_self_check`.
+    CurrentWasmHash,
+
     // ── Wave 2: Param Registry (#146) ───────────────────────────────────────
     /// Per-parameter record keyed by param name string.
     ///
@@ -621,3 +629,79 @@ mod tests {
 /// Chosen per commit 47dac6a's "#146 — Param Registry" design note:
 /// "Max param name length: 32 bytes".
 pub const MAX_PARAM_NAME_LEN: u32 = 32;
+
+// ─── Upgrade history (#86 / issue #27 / issue #100) ───────────────────────────
+
+/// Maximum number of [`UpgradeRecord`] entries retained in the on-chain
+/// upgrade history.
+///
+/// When this cap is reached the oldest entry is evicted before the new one is
+/// appended (ring-buffer / FIFO semantics). The eviction logic itself lives in
+/// `storage::StorageClient::append_upgrade_record` (issue #27); this constant
+/// is defined here so both the storage layer and callers share a single source
+/// of truth.
+///
+/// ## Value rationale (COST_MODEL.md §10)
+///
+/// Per COST_MODEL.md §10, `append_upgrade_record` performs 1 read + 1 write
+/// of the history vector on every upgrade. At Protocol 22 rates a persistent
+/// vector entry costs approximately 1 stroop per byte per 100 000 ledgers in
+/// rent. Each [`UpgradeRecord`] is approximately 100 bytes (two 32-byte hashes
+/// + two u32 fields + one Address). At 32 entries that is ~3 200 bytes of
+/// persistent rent — a flat, bounded cost regardless of how many upgrades have
+/// been performed. Fewer entries would reduce audit trail usefulness; more
+/// would linearly inflate the persistent-storage rent for every upgrade
+/// forever. 32 entries provides ~years of audit history at any realistic
+/// upgrade cadence while keeping the FIFO eviction budget flat.
+pub const MAX_UPGRADE_HISTORY: u32 = 32;
+
+/// A single on-chain record of a contract upgrade.
+///
+/// Stored as an element of the persistent upgrade-history vector, keyed by
+/// [`StorageKey::UpgradeHistory`]. The vector is bounded at
+/// [`MAX_UPGRADE_HISTORY`] entries; oldest entries are evicted first when the
+/// cap is reached.
+///
+/// The ring-buffer append logic lives in
+/// `storage::StorageClient::append_upgrade_record` (issue #27).
+/// The `get_upgrade_history` query entry point is issue #27.
+/// The entry points that populate this record on a successful upgrade are
+/// issue #100.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpgradeRecord {
+    /// WASM hash that was live immediately **before** this upgrade.
+    pub previous_wasm_hash: soroban_sdk::BytesN<32>,
+    /// WASM hash installed by this upgrade.
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    /// On-chain schema version at the time of this upgrade (the value
+    /// recorded by `initialize` / the previous upgrade).
+    pub schema_version: u32,
+    /// Ledger sequence number at which the upgrade was executed.
+    pub ledger: u32,
+    /// Admin address that authorised this upgrade.
+    pub admin: Address,
+}
+
+/// Verdict returned by the `simulate_upgrade` dry-run entry point (issue #85).
+///
+/// Each variant maps to exactly one guard in the real `upgrade()` flow so
+/// callers can distinguish auth failures, schema mismatches, and clean
+/// compatibility without committing any state.
+///
+/// Out of scope for this issue — defined here because `test_pause.rs`
+/// references `crate::types::UpgradeCompatibility` in its quarantined
+/// simulate-upgrade tests, and the type must at least parse to avoid breaking
+/// the gated-test index in QUARANTINE.md.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpgradeCompatibility {
+    /// All guards pass; the upgrade may proceed.
+    Compatible,
+    /// The `expected_schema_version` argument did not match the on-chain value.
+    SchemaVersionMismatch,
+    /// The caller is not the current admin.
+    CallerNotAdmin,
+    /// The contract has not been initialised yet.
+    NotInitialised,
+}
