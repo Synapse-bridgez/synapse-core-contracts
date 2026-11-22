@@ -38,36 +38,36 @@ Top level:
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `schema_version` | number | Version of **this JSON format**. Incremented on any breaking change to the fields below. |
-| `contract_version` | string | Contract `version()` the vectors were written against. |
-| `description` | string | Free-text summary. |
+| `schema_version` | number | Version of **this JSON format**. Incremented on any breaking change to the fields below. Currently `1`. |
+| `contract_version` | string | Contract semver the vectors were written against (e.g. `"0.1.0"`). |
+| `description` | string | Free-text summary of the vector set. |
 | `reference_docs` | string[] | Repo-relative documents that define the expected behaviour. |
-| `vectors` | Vector[] | The scenarios. |
+| `vectors` | Vector[] | The scenarios, in declaration order. |
 
-Each vector:
+Each vector (`TestVector` in the exporter):
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `id` | string | Stable identifier (`<area>-NNN`). IDs are never reused. |
-| `description` | string | Intent of the scenario, in one line. |
-| `category` | string | `initialisation`, `validation`, `auth`, `idempotency`, `lifecycle`, `fee`, `treasury`, `pause`, `admin`, `upgrade`. |
-| `entry_point` | string | Contract function to invoke. |
-| `inputs` | object | Argument name → value, using the contract's argument names. |
-| `pre_state` | object | Conditions that must hold **before** the call (see below). |
-| `expected_result` | string | `"ok"`, `"err:<ContractError variant>"`, or `"err:auth_error"` (host-level auth failure, not a `ContractError`). |
-| `expected_events` | object[] | `{ "topics": ["synapse", "<name>"], "present": bool }`. `present: false` asserts the event is **not** emitted. |
-| `expected_state` | object | Conditions that must hold **after** the call. |
-| `notes` | string[] | Cross-references to THREAT_MODEL.md IDs (F-xx, R-xx, I-xx), issues, and error codes. |
+| `id` | string | Stable identifier of the form `<area>-NNN` (e.g. `"init-001"`). IDs are never reused. |
+| `description` | string | One-line human-readable intent of the scenario. |
+| `category` | string | Functional area: `"initialisation"`, `"lifecycle"`, `"validation"`, `"auth"`, `"idempotency"`, `"fee"`, `"treasury"`, `"pause"`, `"admin"`, or `"upgrade"`. |
+| `entry_point` | string | Contract function to invoke (e.g. `"register_callback"`). |
+| `inputs` | object | Argument name → value map, keyed by the contract's parameter names. Keys are sorted alphabetically in the output. |
+| `pre_state` | object | Conditions that must hold **before** the call (see below). Keys are sorted alphabetically. |
+| `expected_result` | string | `"ok"` for success; `"ok:\"<value>\""` when the entry point returns a value (e.g. `"ok:\"tx-uuid-001\""`); `"err:<ContractError variant>"` for a contract-level error; or `"err:auth_error"` for a host-level authorisation failure. |
+| `expected_events` | object[] | Each element is `{ "topics": ["synapse", "<name>"], "present": <bool> }`. `present: true` asserts the event is emitted; `present: false` asserts it is **not** emitted. |
+| `expected_state` | object | Conditions that must hold **after** the call. Empty object `{}` means no post-call state assertions. Keys are sorted alphabetically. |
+| `notes` | string[] | Cross-references to THREAT_MODEL.md finding IDs (F-xx, R-xx, I-xx), issue numbers, and numeric error codes. |
 
 ### Value encoding
 
-- **`i128` values are decimal strings** (for example `"1000000"`), because JSON
+- **`i128` values are decimal strings** (e.g. `"1000000"`), because JSON
   numbers cannot represent `i128` exactly. `u32` and `bool` values are native
-  JSON.
+  JSON numbers/booleans. `null` JSON values mean the field or entry is absent.
 - **`<placeholder>` strings** such as `<admin_address>`, `<relay_address>`, and
   `<destination_address>` stand for addresses you generate. The same
   placeholder within one vector means the same address.
-- **`caller_is_admin` / `caller_is_relay`** in `pre_state` say whose
+- **`caller_is_admin` / `caller_is_relay`** in `pre_state` indicate whose
   signature authorises the call.
 - **Dotted keys** (`transaction.status`, `pending_withdrawal.amount`) address
   a field of a stored struct, readable through the matching query
@@ -81,6 +81,60 @@ Error variants map to numeric codes in `src/types.rs` `ContractError`, and
 the relevant code is repeated in `notes` (for example
 `ContractError::WithdrawalProposalMismatch = 117`). Event payload fields are
 specified in [`EVENTS.md`](../EVENTS.md).
+
+---
+
+## Worked example
+
+The following is `init-001`, copied verbatim from the current
+[`test-vectors.json`](../test-vectors.json):
+
+```json
+{
+  "id": "init-001",
+  "description": "initialize() with valid admin and relay — succeeds and sets state",
+  "category": "initialisation",
+  "entry_point": "initialize",
+  "inputs": {
+    "admin": "<admin_address>",
+    "relay_signer": "<relay_address>"
+  },
+  "pre_state": {
+    "initialized": false
+  },
+  "expected_result": "ok",
+  "expected_events": [
+    {
+      "topics": [
+        "synapse",
+        "init"
+      ],
+      "present": true
+    }
+  ],
+  "expected_state": {
+    "admin": "<admin_address>",
+    "initialized": true,
+    "paused": false,
+    "relay_signer": "<relay_address>",
+    "schema_version": 1
+  },
+  "notes": [
+    "THREAT_MODEL §4.1: double-init guard enforced",
+    "I-08: contract must be initialised before state-mutating calls"
+  ]
+}
+```
+
+**Reading this vector:**
+
+1. `pre_state` requires the contract to not yet be initialised (`"initialized": false`).
+2. Call `initialize` with an `admin` address and a `relay_signer` address (both generated by you).
+3. The call must return `"ok"` (no return value).
+4. Exactly one event with topics `["synapse", "init"]` must be emitted.
+5. After the call, all five `expected_state` keys must match: `initialized` is now `true`,
+   `admin` and `relay_signer` hold the addresses you supplied, `paused` is `false`,
+   and `schema_version` is `1`.
 
 ---
 
