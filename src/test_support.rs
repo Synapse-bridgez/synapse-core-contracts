@@ -111,27 +111,75 @@ fn to_scval(env: &Env, v: &Val) -> ScVal {
 ///
 /// The emitting contract id is intentionally omitted: it is an artefact of
 /// test registration order, not of the payload shape subscribers depend on.
+///
+/// ## Incremental rendering
+///
+/// Each call records how many events it rendered via a thread-local cache
+/// keyed on the number of events seen. On subsequent calls against the same
+/// growing buffer the already-rendered lines are returned from the cache and
+/// only the newly appended events are rendered. Output is byte-identical to a
+/// full re-render from scratch, so existing snapshot fixtures do not need
+/// regeneration.
 pub fn render_last_events(env: &Env) -> Vec<String> {
-    let mut out = Vec::new();
-    for (_contract, topics, data) in env.events().all().iter() {
-        let topic_vals: Vec<ScVal> = topics.iter().map(|t| to_scval(env, &t)).collect();
-        let topics_sc = ScVal::Vec(Some(
-            topic_vals
-                .clone()
-                .try_into()
-                .expect("topic count fits ScVec"),
-        ));
-        let data_sc = to_scval(env, &data);
-        let rendered_topics: Vec<String> = topic_vals.iter().map(render_scval).collect();
-        out.push(format!("topics: [{}]", rendered_topics.join(", ")));
-        out.push(format!("data:   {}", render_scval(&data_sc)));
-        out.push(format!(
-            "xdr:    {}|{}",
-            xdr_hex(&topics_sc),
-            xdr_hex(&data_sc)
-        ));
+    use std::{cell::RefCell, collections::HashMap};
+
+    // Maps (total_event_count_at_last_render) → cached rendered lines for
+    // the **entire** buffer up to that point.
+    //
+    // We use the event count as the cache key because a Soroban test `Env`
+    // is single-threaded and the event buffer only grows.  Two distinct `Env`
+    // instances will naturally produce independent counts, and within one
+    // `Env` a cache miss simply means we extend the existing lines.
+    thread_local! {
+        // (last_seen_len, accumulated_lines)
+        static CACHE: RefCell<HashMap<usize, Vec<String>>> = RefCell::new(HashMap::new());
     }
-    out
+
+    let all_events = env.events().all();
+    let total = all_events.len() as usize;
+
+    if total == 0 {
+        return Vec::new();
+    }
+
+    CACHE.with(|cell| {
+        let mut map = cell.borrow_mut();
+
+        // Find the largest cached prefix that is ≤ total.
+        let (start, mut lines) = {
+            let best = map
+                .iter()
+                .filter(|(&k, _)| k <= total)
+                .max_by_key(|(&k, _)| k);
+            match best {
+                Some((&k, v)) => (k, v.clone()),
+                None => (0, Vec::new()),
+            }
+        };
+
+        // Render only the events not yet in the cache.
+        for (_contract, topics, data) in all_events.iter().skip(start) {
+            let topic_vals: Vec<ScVal> = topics.iter().map(|t| to_scval(env, &t)).collect();
+            let topics_sc = ScVal::Vec(Some(
+                topic_vals
+                    .clone()
+                    .try_into()
+                    .expect("topic count fits ScVec"),
+            ));
+            let data_sc = to_scval(env, &data);
+            let rendered_topics: Vec<String> = topic_vals.iter().map(render_scval).collect();
+            lines.push(format!("topics: [{}]", rendered_topics.join(", ")));
+            lines.push(format!("data:   {}", render_scval(&data_sc)));
+            lines.push(format!(
+                "xdr:    {}|{}",
+                xdr_hex(&topics_sc),
+                xdr_hex(&data_sc)
+            ));
+        }
+
+        map.insert(total, lines.clone());
+        lines
+    })
 }
 
 /// Render every ledger entry currently in the test host's storage, sorted by

@@ -230,3 +230,45 @@ fn test_upgrade_rollback_history_round_trip() {
     // Rollback guard path is clear; attempting the swap
 }
 
+// ─── #387 schema-diff cache ───────────────────────────────────────────────────
+
+#[test]
+fn cached_schema_diff_matches_fresh_computation() {
+    use crate::migration::{compare_schema_versions, compare_schema_versions_cached, SchemaChange};
+    use soroban_sdk::String;
+
+    let env = Env::default();
+
+    // Build a small manifest with two version entries.
+    let mut manifest = soroban_sdk::Vec::new(&env);
+    manifest.push_back(SchemaChange {
+        version: 2,
+        kind: String::from_str(&env, "storage_key"),
+        description: String::from_str(&env, "Added TreasuryBalance key"),
+    });
+    manifest.push_back(SchemaChange {
+        version: 3,
+        kind: String::from_str(&env, "encoding"),
+        description: String::from_str(&env, "Changed amount encoding to i128"),
+    });
+
+    // Fresh (uncached) computation for range 1→3.
+    let fresh = compare_schema_versions(&env, &manifest, 1, 3);
+
+    // Cached path: first call populates the cache; second reuses it.
+    let mut cache = None;
+    let first = compare_schema_versions_cached(&env, &manifest, 1, 3, &mut cache);
+    let second = compare_schema_versions_cached(&env, &manifest, 1, 3, &mut cache);
+
+    assert_eq!(fresh, first, "cached result must equal fresh computation");
+    assert_eq!(first, second, "repeated cached call must return the same result");
+
+    // A different range must not be served from the (1,3) cache entry.
+    let narrow = compare_schema_versions_cached(&env, &manifest, 2, 2, &mut cache);
+    assert!(narrow.empty, "range (2,2) has no changes strictly after 2 and ≤ 2");
+
+    // Reversed argument order must normalise to the same diff as forward order.
+    let reversed = compare_schema_versions(&env, &manifest, 3, 1);
+    assert_eq!(fresh, reversed, "argument order must not affect the result");
+}
+
