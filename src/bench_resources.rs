@@ -455,7 +455,14 @@ pub(crate) fn exceeds(base: u64, now: u64, threshold_pct: u64) -> bool {
     (now as u128) * 100 > (base as u128) * (100 + threshold_pct as u128)
 }
 
-/// Compare measurements against a baseline; empty result means the gate passes.
+/// Compare measurements against a **pre-parsed** baseline; empty result means
+/// the gate passes.
+///
+/// The caller is responsible for calling [`parse_baseline`] exactly once and
+/// reusing the resulting [`Baseline`] across all comparisons in a run.
+/// Parsing is not done here so that a run checking many findings (or running
+/// the full scenario list) does not re-read and re-parse the same TOML on
+/// every invocation.
 pub(crate) fn compare(
     baseline: &Baseline,
     measured: &BTreeMap<StdString, Cost>,
@@ -695,6 +702,33 @@ fn baseline_round_trips_through_render_and_parse() {
 fn baseline_parser_rejects_incomplete_entries() {
     assert!(parse_baseline("[x]\ncpu_insns = 1\n").is_err());
     assert!(parse_baseline("[x]\ncpu_insns = one\nmem_bytes = 1\n").is_err());
+}
+
+#[test]
+fn parse_once_reuse_baseline_for_multiple_compares() {
+    // Parse a single Baseline, then run compare twice against different
+    // measurement maps. The Baseline must not be consumed or re-parsed between
+    // calls — this is the core guarantee of the parse-once design.
+    let src = "threshold_pct = 10\n\n[alpha]\ncpu_insns = 1000\nmem_bytes = 500\n\
+               \n[beta]\ncpu_insns = 2000\nmem_bytes = 800\n";
+    let baseline = parse_baseline(src).expect("valid baseline");
+
+    // First compare: alpha is fine, beta is fine.
+    let m1 = BTreeMap::from([
+        ("alpha".to_owned(), cost(1050, 500)),
+        ("beta".to_owned(), cost(2000, 800)),
+    ]);
+    assert!(compare(&baseline, &m1, baseline.threshold_pct).is_empty());
+
+    // Second compare: alpha regresses — baseline must still be intact.
+    let m2 = BTreeMap::from([
+        ("alpha".to_owned(), cost(1200, 500)),
+        ("beta".to_owned(), cost(2000, 800)),
+    ]);
+    let f = compare(&baseline, &m2, baseline.threshold_pct);
+    assert_eq!(f.len(), 1);
+    assert!(matches!(&f[0], Finding::Regressed { scenario, metric, .. }
+        if scenario == "alpha" && *metric == "cpu_insns"));
 }
 
 #[test]
