@@ -330,3 +330,6 @@ wired.
 
 <!-- handsoff-issue-439 -->
 - #439: Tag limit should not be bypassed by duplicate tag entries
+
+<!-- handsoff-issue-440 -->
+- #440: Treasury balance read failure is swallowed during withdrawal
