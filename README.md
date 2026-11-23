@@ -324,3 +324,6 @@ wired.
 
 <!-- handsoff-issue-199 -->
 - #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
+
+<!-- handsoff-issue-414 -->
+- #414: Cache parsed baseline in bench_resources to avoid re-parsing per comparison

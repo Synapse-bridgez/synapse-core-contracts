@@ -96,8 +96,15 @@ pub fn compare_schema_versions(
             changes.push_back(change);
         }
     }
-        }
+
+    let empty = changes.is_empty();
+    SchemaDiff {
+        from_version: lo,
+        to_version: hi,
+        changes,
+        empty,
     }
+}
 
 /// Minimal capture of critical pre-upgrade state, taken immediately before
 /// `upgrade()` / `upgrade_and_migrate()` swap the WASM.
@@ -129,6 +136,17 @@ impl UpgradeSnapshot {
             schema_version: StorageClient::get_schema_version(env),
             captured_at_ledger: env.ledger().sequence(),
         }
+    }
+
+    /// Capture the current pre-upgrade state into the caller-provided
+    /// `out` snapshot, avoiding an owned clone of the full snapshot.
+    ///
+    /// Reads the live WASM hash and schema version from storage and stamps
+    /// the current ledger sequence. Cheap: a constant number of reads.
+    pub fn capture_into(env: &Env, out: &mut Self) {
+        out.wasm_hash = StorageClient::get_wasm_hash(env);
+        out.schema_version = StorageClient::get_schema_version(env);
+        out.captured_at_ledger = env.ledger().sequence();
     }
 
     /// Persist this snapshot to instance storage so it survives the WASM
@@ -182,20 +200,5 @@ impl MigrationRegistry {
             MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
             _ => Err(ContractError::UnknownMigration),
         }
-    }
-
-    fn assert_within_bound(planned_touches: u32) -> Result<(), ContractError> {
-        if planned_touches > MAX_MIGRATION_STORAGE_TOUCHES {
-            return Err(ContractError::MigrationFailed);
-        }
-        Ok(())
-    }
-
-    let empty = changes.is_empty();
-    SchemaDiff {
-        from_version: lo,
-        to_version: hi,
-        changes,
-        empty,
     }
 }

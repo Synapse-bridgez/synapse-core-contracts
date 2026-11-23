@@ -81,6 +81,10 @@ make check
 `make check` runs **fmt → clippy → test → wasm build** in order.  A green
 `make check` locally means the same commit will pass CI.
 
+Each stage prints a `==> stage: <name>` banner before it runs. If a stage
+fails, `make check` prints `!! stage failed: <name>` and exits non-zero, so
+the failing stage is named directly in the output.
+
 | Target       | What it runs                                                    |
 |--------------|-----------------------------------------------------------------|
 | `make fmt`   | `cargo fmt --all -- --check`                                    |
