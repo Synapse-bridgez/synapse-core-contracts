@@ -72,6 +72,16 @@ make setup
 This installs `.git-hooks/pre-commit`, which runs `cargo fmt --check` and
 `cargo clippy` before every commit — the same gates CI enforces.
 
+If you prefer to install the hook manually, run:
+
+```bash
+git config core.hooksPath .git-hooks
+```
+
+This is the same command `make setup` uses; the hook lives at
+`.git-hooks/pre-commit`. When a check fails, the hook prints the command that
+fixes it (`cargo fmt --all` for formatting, `cargo clippy --fix` for lints).
+
 ### Full check suite
 
 ```bash
