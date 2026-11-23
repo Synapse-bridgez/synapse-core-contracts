@@ -100,6 +100,34 @@ All other concepts map 1:1 to their own variant. The result is a single
 variant-count guard in `src/types.rs` so a future PR cannot silently regress
 past the cap.
 
+## Treasury withdrawal failure path
+
+The treasury withdrawal flow lives in `src/storage.rs` and involves
+`treasury_balance`, `set_treasury_balance`, and the `PendingWithdrawal` struct.
+Two failure modes are possible:
+
+1. **Insufficient balance** — when the withdrawal amount exceeds the current
+   treasury balance returned by `treasury_balance`, the entry point returns
+   `ContractError::InsufficientFunds` (code **5**, `Funds`, not retry-safe,
+   alert-worthy).
+2. **Missing or unconfigured treasury** — when `treasury_config` returns
+   `None` (the treasury has never been configured), the entry point returns
+   `ContractError::NotFound` (code **2**, `Lookup`, not retry-safe, not
+   alert-worthy).
+
+Neither failure has a dedicated treasury-specific variant today; both reuse the
+general `InsufficientFunds` and `NotFound` variants respectively. A stable,
+dedicated error code for each withdrawal failure mode is tracked in the open
+item for issue #284 (fee accrual and treasury withdrawal restoration). Until
+that work lands, callers must distinguish the two cases via the `category`
+field on `ErrorContext` (`Funds` vs `Lookup`) rather than by a treasury-specific
+code.
+
+| Failure | Returned variant | Code | Category | Retry-safe | Alert-worthy | Source (src/storage.rs) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Balance insufficient | `InsufficientFunds` | 5 | `Funds` | no | yes | `treasury_balance` / `set_treasury_balance` |
+| Treasury not configured | `NotFound` | 2 | `Lookup` | no | no | `treasury_config` → `None` |
+
 ## Coordination
 
 This document describes the contract-side structured-error surface only. The

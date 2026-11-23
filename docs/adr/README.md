@@ -12,16 +12,23 @@ to the old one; the old file is never modified or deleted.
 
 ## Index
 
-| # | Title | Status | Date |
-|---|-------|--------|------|
-| [0001](./0001-relay-signer-trust-model.md) | Relay-signer trust model | Accepted | 2025-Q1 |
-| [0002](./0002-two-step-admin-transfer.md) | Two-step admin transfer with self-nomination guard | Accepted | 2026-Q3 |
-| [0003](./0003-upgrade-schema-version-guard.md) | Upgrade schema-version guard | Accepted | 2026-Q3 |
-| [0004](./0004-timelocked-upgrade.md) | Timelocked upgrade propose / finalize / cancel | Accepted | 2026-Q3 |
-| [0005](./0005-upgrade-and-migrate.md) | Bounded upgrade_and_migrate + migration registry | Accepted | 2026-Q3 |
-| [0006](./0006-schema-compat-range.md) | Schema-version compatibility ranges (amends 0003) | Accepted | 2026-Q3 |
-| [0007](./0007-guardian-emergency-admin-revocation.md) | Guardian-quorum emergency admin revocation | Proposed | 2026-Q3 |
-| [0008](./0008-fee-accrual-and-treasury-withdrawal.md) | Fee accrual and two-party treasury withdrawal | Proposed | 2026-09-29 |
+| File | Title | Status | Date |
+|------|-------|--------|------|
+| [0001-relay-signer-trust-model.md](./0001-relay-signer-trust-model.md) | Relay-signer trust model | Accepted | 2025-Q1 |
+| [0002-two-step-admin-transfer.md](./0002-two-step-admin-transfer.md) | Two-step admin transfer with self-nomination guard | Accepted | 2026-Q3 |
+| [0003-upgrade-schema-version-guard.md](./0003-upgrade-schema-version-guard.md) | Upgrade schema-version guard | Accepted | 2026-Q3 |
+| [0004-timelocked-upgrade.md](./0004-timelocked-upgrade.md) ⚠️ | Timelocked upgrade propose / finalize / cancel | Accepted | 2026-Q3 |
+| [0004-relay-signer-set.md](./0004-relay-signer-set.md) ⚠️ | N-of-M relay signer set | Accepted | — |
+| [0004-guardian-emergency-admin-revocation.md](./0004-guardian-emergency-admin-revocation.md) ⚠️ | Guardian-quorum emergency admin revocation | Proposed | — |
+| [0005-upgrade-and-migrate.md](./0005-upgrade-and-migrate.md) | Bounded upgrade_and_migrate + migration registry | Accepted | 2026-Q3 |
+| [0006-schema-compat-range.md](./0006-schema-compat-range.md) | Schema-version compatibility ranges (amends 0003) | Accepted | 2026-Q3 |
+| [0008-fee-accrual-and-treasury-withdrawal.md](./0008-fee-accrual-and-treasury-withdrawal.md) | Fee accrual and two-party treasury withdrawal | Proposed | 2026-09-29 |
+
+> **⚠️ Duplicate-number collision:** Three files share the prefix `0004`.
+> This is a known inconsistency in the ADR log. Renumbering is deferred to a
+> separate PR; in the meantime all three files are listed above so the index
+> remains a complete map of every file on disk. See issue #459 for the
+> follow-up renumbering work.
 
 ---
 

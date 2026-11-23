@@ -261,9 +261,29 @@ PR review or release cadence.
 - **Subscriber-facing diffs:** [`CHANGELOG.md` → Event schema](./CHANGELOG.md#event-schema)
   only — separate from general code notes.
 
-Live emitters today: `init`, `reg`, `status`, `done`, `fail`, `propose`,
-`admin`, `relay`, `pause`, `upgrade` — the full catalogue in `EVENTS.md` is
-wired.
+The authoritative list of topics the contract can emit is the set of
+`pub const … Symbol` declarations in `src/events.rs`. Every topic named here
+exists as a constant there; do not subscribe to a topic that has no matching
+constant.
+
+| Constant (src/events.rs) | Topic string | Emitting entry-point(s) |
+|--------------------------|--------------|-------------------------|
+| `TOPIC_INIT` | `"init"` | `initialize` |
+| `UPGRADE_TOPIC` | `"upgrade"` | `upgrade` |
+| `GUARDIAN_REVOKE_TOPIC` | `"guardian_revoke"` | guardian revocation entry-point |
+| `RELAY_TOPIC` | `"relay"` | `set_relay_signer` |
+| `REG_TOPIC` | `"reg"` | `register_callback` |
+| `FAIL_TOPIC` | `"fail"` | `fail_transaction` |
+| `CANCEL_TOPIC` | `"cancel"` | `cancel_transaction` |
+| `FORWARDING_INTENT` | `"fwd_intent"` | `set_forwarding_route` |
+| `COLLATERAL_BONDED` | `"bonded"` | `bond_collateral` |
+| `COLLATERAL_UNBONDED` | `"unbonded"` | `unbond_collateral` |
+| `UNBOND_CLAIMED` | `"claimed"` | `claim_unbond` |
+| *(string literal)* | `"status"` | `start_processing`, `complete_transaction` |
+| *(string literal)* | `"done"` | `complete_transaction` |
+
+The full catalogue with payload shapes and ordering guarantees is in
+[`EVENTS.md`](./EVENTS.md).
 
 ## Handsoff notes
 
