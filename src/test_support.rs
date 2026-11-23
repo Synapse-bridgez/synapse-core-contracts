@@ -175,6 +175,22 @@ pub fn fnv1a64(data: &[u8]) -> u64 {
     h
 }
 
+/// Hash a single event's rendered lines once and return the digest for reuse.
+///
+/// The conformance harness compares many assertions against the same event;
+/// walking the buffer once here (instead of re-hashing per assertion) keeps the
+/// digest values identical to [`fnv1a64`] while avoiding repeated work.
+pub fn event_digest(lines: &[String]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for line in lines {
+        for &b in line.as_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
 /// Line-oriented diff between an expected and actual rendering, marking each
 /// differing line with `-` (expected) / `+` (actual). Returns `None` when the
 /// two are identical.

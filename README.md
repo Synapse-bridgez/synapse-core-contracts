@@ -324,3 +324,9 @@ wired.
 
 <!-- handsoff-issue-199 -->
 - #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
+
+<!-- handsoff-issue-389 -->
+- #389: Pause flag is not consulted by the batch entry point
+
+<!-- handsoff-issue-392 -->
+- #392: `probe` in the profile-diff fixture rebuilds the divergence set per call
