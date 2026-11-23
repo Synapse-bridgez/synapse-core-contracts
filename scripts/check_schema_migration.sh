@@ -1,69 +1,60 @@
 #!/usr/bin/env bash
-# Verify that schema_version() from the built release WASM has an exact
-# matching entry in migrations.toml (#88).
+# Verify that the release WASM's schema_version() has a matching entry in
+# migrations.toml. See migrations.toml for the contract.
 #
-# Usage:
-#   scripts/check_schema_migration.sh [--manifest PATH] [--wasm PATH] [--expect-fail]
+# Usage: scripts/check_schema_migration.sh [manifest-path]
+#   Defaults to migrations.toml at the repo root.
 #
-# Expects the release WASM to already exist (CI builds once, then reuses).
+# Exit codes:
+#   0  manifest exists and contains an entry for the reported schema_version
+#   1  manifest missing, unreadable, or missing the reported schema_version
+#   2  usage / environment error (missing tooling, build failure, ...)
+
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MANIFEST="${1:-${REPO_ROOT}/migrations.toml}"
 
-TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT}/target}"
-MANIFEST="${ROOT}/migrations.toml"
-WASM="${TARGET_DIR}/wasm32-unknown-unknown/release/synapse_core_contract.wasm"
-EXPECT_FAIL=0
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --manifest) MANIFEST="$2"; shift 2 ;;
-    --wasm) WASM="$2"; shift 2 ;;
-    --expect-fail) EXPECT_FAIL=1; shift ;;
-    *) echo "Unknown arg: $1" >&2; exit 2 ;;
-  esac
-done
-
-if [[ ! -f "$WASM" ]]; then
-  echo "ERROR: release WASM not found at:" >&2
-  echo "  $WASM" >&2
-  echo "Build it once with: cargo build --target wasm32-unknown-unknown --release" >&2
-  exit 1
+if [[ ! -f "${MANIFEST}" ]]; then
+    echo "error: schema migration manifest not found: ${MANIFEST}" >&2
+    echo "       expected a migrations.toml with [[migrations]] entries" >&2
+    exit 1
 fi
 
-if [[ ! -f "$MANIFEST" ]]; then
-  echo "ERROR: migrations manifest not found at: $MANIFEST" >&2
-  exit 1
+if [[ ! -r "${MANIFEST}" ]]; then
+    echo "error: schema migration manifest is not readable: ${MANIFEST}" >&2
+    exit 1
 fi
 
-export SYNAPSE_SCHEMA_CHECK_WASM="$WASM"
-export SYNAPSE_SCHEMA_CHECK_MANIFEST="$MANIFEST"
-
-set +e
-# Filter to the wasm-vs-manifest test; the constant↔manifest test always runs.
-cargo test --lib schema_version_from_release_wasm_matches_manifest -- --nocapture
-STATUS=$?
-set -e
-
-if [[ "$EXPECT_FAIL" -eq 1 ]]; then
-  if [[ "$STATUS" -ne 0 ]]; then
-    echo "OK: schema check failed as expected (mismatch fixture)."
-    exit 0
-  fi
-  echo "ERROR: expected schema check to fail against mismatched manifest, but it passed." >&2
-  exit 1
+# Build the release WASM and read the schema_version() it reports.
+WASM="${REPO_ROOT}/target/wasm32-unknown-unknown/release/treasury.wasm"
+if [[ ! -f "${WASM}" ]]; then
+    echo "error: release WASM not found at ${WASM}; run 'make build' first" >&2
+    exit 2
 fi
 
-if [[ "$STATUS" -ne 0 ]]; then
-  echo "" >&2
-  echo "ERROR: schema_version() from the release WASM has no exact matching" >&2
-  echo "entry in ${MANIFEST}." >&2
-  echo "" >&2
-  echo "Fix: add a [[migrations]] block with schema_version = <value> and a" >&2
-  echo "human-readable note describing the migration, then re-run this check." >&2
-  echo "See migrations.toml and DECISIONS.md / CHANGELOG.md." >&2
-  exit 1
+REPORTED_VERSION="$(scripts/read_schema_version.sh "${WASM}")"
+if [[ -z "${REPORTED_VERSION}" ]]; then
+    echo "error: could not read schema_version() from ${WASM}" >&2
+    exit 2
 fi
 
-echo "OK: schema_version() matches migrations.toml"
+# Extract every schema_version = N declared in the manifest.
+DECLARED_VERSIONS="$(grep -E '^[[:space:]]*schema_version[[:space:]]*=' "${MANIFEST}" \
+    | sed -E 's/^[[:space:]]*schema_version[[:space:]]*=[[:space:]]*//' \
+    | tr -d '"' \
+    | tr -d '[:space:]')"
+
+if [[ -z "${DECLARED_VERSIONS}" ]]; then
+    echo "error: no [[migrations]] schema_version entries found in ${MANIFEST}" >&2
+    exit 1
+fi
+
+if ! grep -qx "${REPORTED_VERSION}" <<<"${DECLARED_VERSIONS}"; then
+    echo "error: schema_version ${REPORTED_VERSION} reported by ${WASM}" >&2
+    echo "       has no matching [[migrations]] entry in ${MANIFEST}" >&2
+    echo "       declared versions: $(echo "${DECLARED_VERSIONS}" | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+echo "ok: schema_version ${REPORTED_VERSION} is documented in ${MANIFEST}"
