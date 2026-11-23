@@ -324,3 +324,6 @@ wired.
 
 <!-- handsoff-issue-199 -->
 - #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
+
+<!-- handsoff-issue-393 -->
+- #393: `parse_baseline` allocates a String per cost line
