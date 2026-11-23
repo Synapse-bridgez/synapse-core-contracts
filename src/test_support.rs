@@ -34,6 +34,11 @@ use soroban_sdk::{
 /// Struct payloads (`#[contracttype]` structs encode as `ScVal::Map` with
 /// symbol keys) render as `{field: value, …}` in wire order; unit enum
 /// variants (`ScVal::Vec([Symbol])`) render as `[Variant]`.
+///
+/// Variants this helper does not know about fall back to the XDR type's own
+/// `Debug` impl (prefixed with `scval:`) instead of panicking, so an unexpected
+/// payload still produces a readable snapshot diff rather than aborting the
+/// whole test binary.
 pub fn render_scval(v: &ScVal) -> String {
     match v {
         ScVal::Bool(b) => format!("{b}"),
@@ -67,7 +72,7 @@ pub fn render_scval(v: &ScVal) -> String {
         }
         // Anything the contract does not currently emit falls back to the
         // XDR type's own Debug impl — still deterministic, just less terse.
-        other => format!("{other:?}"),
+        other => format!("scval:{other:?}"),
     }
 }
 
@@ -199,4 +204,29 @@ pub fn line_diff(expected: &str, actual: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::xdr::ScError;
+
+    #[test]
+    fn render_scval_handles_known_variants() {
+        assert_eq!(render_scval(&ScVal::Void), "void");
+        assert_eq!(render_scval(&ScVal::Bool(true)), "true");
+        assert_eq!(render_scval(&ScVal::U32(7)), "u32:7");
+        assert_eq!(render_scval(&ScVal::I32(-7)), "i32:-7");
+    }
+
+    #[test]
+    fn render_scval_falls_back_instead_of_panicking() {
+        // `ScVal::Error` is not one of the variants the contract emits, so it
+        // exercises the fallback arm. It must render deterministically rather
+        // than panic.
+        let v = ScVal::Error(ScError::Value);
+        let rendered = render_scval(&v);
+        assert_eq!(rendered, format!("scval:{v:?}"));
+        assert!(rendered.starts_with("scval:"));
+    }
 }
