@@ -327,3 +327,6 @@ wired.
 
 <!-- handsoff-issue-438 -->
 - #438: Reject zero-amount treasury withdrawals before touching storage
+
+<!-- handsoff-issue-439 -->
+- #439: Tag limit should not be bypassed by duplicate tag entries
