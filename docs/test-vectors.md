@@ -26,6 +26,8 @@ cd tools/export-test-vectors
 cargo run -- --pretty > ../../test-vectors.json
 ```
 
+Vectors are serialised incrementally as they are produced, in a fixed
+registration order, so the output ordering is stable and diffs stay small.
 Output is deterministic because all maps are key-sorted. Commit the
 regenerated file together with any change to the tool, and review the diff
 the same way as code.
