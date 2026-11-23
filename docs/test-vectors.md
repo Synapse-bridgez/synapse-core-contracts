@@ -54,10 +54,80 @@ Each vector:
 | `entry_point` | string | Contract function to invoke. |
 | `inputs` | object | Argument name → value, using the contract's argument names. |
 | `pre_state` | object | Conditions that must hold **before** the call (see below). |
-| `expected_result` | string | `"ok"`, `"err:<ContractError variant>"`, or `"err:auth_error"` (host-level auth failure, not a `ContractError`). |
-| `expected_events` | object[] | `{ "topics": ["synapse", "<name>"], "present": bool }`. `present: false` asserts the event is **not** emitted. |
-| `expected_state` | object | Conditions that must hold **after** the call. |
+| `expected_result` | string | `"ok"` for a successful call with no return value; `"ok:<json_value>"` for a successful call that returns a value (the return value is JSON-encoded and appended after the colon, e.g. `"ok:\"tx-uuid-001\""`); `"err:<ContractError variant>"` for a contract-level error; or `"err:auth_error"` for a host-level auth failure (not a `ContractError`). |
+| `expected_events` | object[] | Each entry is `{ "topics": ["synapse", "<name>"], "present": bool }`. `present: false` asserts the event is **not** emitted. An empty array means no event assertions are made for this vector. |
+| `expected_state` | object | Conditions that must hold **after** the call. An empty object means no post-state assertions. |
 | `notes` | string[] | Cross-references to THREAT_MODEL.md IDs (F-xx, R-xx, I-xx), issues, and error codes. |
+
+### Example
+
+The following is an excerpt from `test-vectors.json` showing one lifecycle vector and one error vector:
+
+```json
+{
+  "schema_version": 1,
+  "contract_version": "0.1.0",
+  "description": "Language-agnostic test vectors for synapse-core-contract. ...",
+  "reference_docs": ["THREAT_MODEL.md", "EVENTS.md", "..."],
+  "vectors": [
+    {
+      "id": "reg-001",
+      "description": "register_callback() with valid payload — creates Pending transaction",
+      "category": "lifecycle",
+      "entry_point": "register_callback",
+      "inputs": {
+        "amount": "1000000",
+        "anchor_transaction_id": "anchor-001",
+        "asset_code": "USDC",
+        "asset_issuer": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+        "callback_status": "pending_external",
+        "callback_type": "Deposit",
+        "idempotency_key": "idem-001",
+        "stellar_account": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+        "transaction_id": "tx-uuid-001"
+      },
+      "pre_state": {
+        "idempotency_known": false,
+        "initialized": true,
+        "paused": false,
+        "transaction_exists": false
+      },
+      "expected_result": "ok:\"tx-uuid-001\"",
+      "expected_events": [
+        { "topics": ["synapse", "reg"], "present": true }
+      ],
+      "expected_state": {
+        "idempotency_key_recorded": true,
+        "transaction.failure_reason": "",
+        "transaction.status": "Pending",
+        "transaction.stellar_tx_hash": ""
+      },
+      "notes": [
+        "I-01: transaction created in Pending state",
+        "I-10: stellar_tx_hash empty until Completed",
+        "I-11: failure_reason empty until Failed"
+      ]
+    },
+    {
+      "id": "init-002",
+      "description": "initialize() called twice — returns AlreadyInitialised",
+      "category": "initialisation",
+      "entry_point": "initialize",
+      "inputs": {
+        "admin": "<admin_address>",
+        "relay_signer": "<relay_address>"
+      },
+      "pre_state": { "initialized": true },
+      "expected_result": "err:AlreadyInitialised",
+      "expected_events": [
+        { "topics": ["synapse", "init"], "present": false }
+      ],
+      "expected_state": {},
+      "notes": ["ContractError::AlreadyInitialised = 1"]
+    }
+  ]
+}
+```
 
 ### Value encoding
 
