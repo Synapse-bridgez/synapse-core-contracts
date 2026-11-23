@@ -10,10 +10,14 @@
 
 set -e
 
-echo "==> cargo fmt --check"
-cargo fmt --all -- --check
+if ! cargo fmt --all -- --check; then
+    echo "pre-commit: cargo fmt --check failed" >&2
+    echo "pre-commit: run 'cargo fmt' to fix formatting, then re-stage your changes." >&2
+    exit 1
+fi
 
-echo "==> cargo clippy"
-cargo clippy --all-targets -- -D warnings
-
-echo "Pre-commit checks passed."
+if ! cargo clippy --all-targets -- -D warnings; then
+    echo "pre-commit: cargo clippy failed" >&2
+    echo "pre-commit: fix the warnings above (run 'cargo clippy --all-targets -- -D warnings' to reproduce)." >&2
+    exit 1
+fi
