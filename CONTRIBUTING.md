@@ -70,7 +70,10 @@ make setup
 ```
 
 This installs `.git-hooks/pre-commit`, which runs `cargo fmt --check` and
-`cargo clippy` before every commit — the same gates CI enforces.
+`cargo clippy` before every commit — the same gates CI enforces. The hook
+stays silent on success; on failure it prints a `pre-commit:` line naming the
+stage that failed and the command to run to fix it (e.g.
+`pre-commit: cargo fmt --check failed — run `cargo fmt` to fix`).
 
 ### Full check suite
 
