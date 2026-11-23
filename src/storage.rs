@@ -38,6 +38,12 @@ pub struct PendingWithdrawal {
     pub destination: Address,
     /// The authorized party that proposed the withdrawal.
     pub proposer: Address,
+    /// The address that submitted the withdrawal request (issue #452).
+    ///
+    /// Recorded at proposal time so that an auditor can identify who
+    /// initiated the pending withdrawal from the stored record alone,
+    /// without cross-referencing off-chain event logs.
+    pub requester: Address,
 }
 
 /// Treasury configuration describing the authorized parties and epoch cap.
@@ -50,6 +56,47 @@ pub struct TreasuryConfig {
     pub party_b: Address,
     /// Maximum amount that may be withdrawn per epoch.
     pub epoch_cap: i128,
+}
+
+impl TreasuryConfig {
+    /// Constructs a validated [`TreasuryConfig`] (issue #451).
+    ///
+    /// Rejects configurations that the withdrawal path would later reject:
+    ///
+    /// * `epoch_cap` must be `> 0`. A zero or negative cap would prevent
+    ///   every withdrawal with `WithdrawalCapExceeded`, rendering the
+    ///   treasury permanently locked.
+    /// * `party_a` and `party_b` must be distinct addresses. A shared
+    ///   identity would collapse the two-party requirement into a single
+    ///   point of control, defeating the authorization model described in
+    ///   `docs/adr/0008-fee-accrual-and-treasury-withdrawal.md`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(InvalidTreasuryConfig)` for any rejected configuration.
+    pub fn new(
+        party_a: Address,
+        party_b: Address,
+        epoch_cap: i128,
+    ) -> Result<Self, InvalidTreasuryConfig> {
+        if epoch_cap <= 0 {
+            return Err(InvalidTreasuryConfig::EpochCapNotPositive);
+        }
+        if party_a == party_b {
+            return Err(InvalidTreasuryConfig::PartiesNotDistinct);
+        }
+        Ok(Self { party_a, party_b, epoch_cap })
+    }
+}
+
+/// Error returned when [`TreasuryConfig::new`] rejects an invalid configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidTreasuryConfig {
+    /// `epoch_cap` is zero or negative; every withdrawal would be rejected.
+    EpochCapNotPositive,
+    /// `party_a` and `party_b` are the same address; the two-party
+    /// requirement would be trivially bypassed.
+    PartiesNotDistinct,
 }
 
 /// Returns the current treasury balance.
@@ -864,6 +911,74 @@ mod tests {
         let stored = pack(&tx);
         assert_eq!((stored.packed >> RETRY_SHIFT) & RETRY_MASK, 0xF);
         assert_eq!(unpack(&stored).retry_count, 0xF);
+    }
+
+    // ── TreasuryConfig::new validation (issue #451) ──────────────────────
+
+    #[test]
+    fn treasury_config_new_accepts_valid_config() {
+        let env = Env::default();
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let cfg = TreasuryConfig::new(a.clone(), b.clone(), 1_000)
+            .expect("valid config should succeed");
+        assert_eq!(cfg.party_a, a);
+        assert_eq!(cfg.party_b, b);
+        assert_eq!(cfg.epoch_cap, 1_000);
+    }
+
+    #[test]
+    fn treasury_config_new_rejects_zero_epoch_cap() {
+        let env = Env::default();
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        assert_eq!(
+            TreasuryConfig::new(a, b, 0),
+            Err(InvalidTreasuryConfig::EpochCapNotPositive),
+        );
+    }
+
+    #[test]
+    fn treasury_config_new_rejects_negative_epoch_cap() {
+        let env = Env::default();
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        assert_eq!(
+            TreasuryConfig::new(a, b, -1),
+            Err(InvalidTreasuryConfig::EpochCapNotPositive),
+        );
+    }
+
+    #[test]
+    fn treasury_config_new_rejects_identical_parties() {
+        let env = Env::default();
+        let a = Address::generate(&env);
+        assert_eq!(
+            TreasuryConfig::new(a.clone(), a, 1_000),
+            Err(InvalidTreasuryConfig::PartiesNotDistinct),
+        );
+    }
+
+    // ── PendingWithdrawal requester field (issue #452) ───────────────────
+
+    #[test]
+    fn pending_withdrawal_round_trips_requester_field() {
+        let env = Env::default();
+        let requester = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        let destination = Address::generate(&env);
+        let withdrawal = PendingWithdrawal {
+            amount: 42_000,
+            destination: destination.clone(),
+            proposer: proposer.clone(),
+            requester: requester.clone(),
+        };
+        set_pending_withdrawal(&env, 0, &withdrawal);
+        let loaded = pending_withdrawal(&env, 0).expect("should be stored");
+        assert_eq!(loaded.amount, 42_000);
+        assert_eq!(loaded.destination, destination);
+        assert_eq!(loaded.proposer, proposer);
+        assert_eq!(loaded.requester, requester);
     }
 }
 
