@@ -10,6 +10,10 @@ key needs a break-glass path. Guardians (see `guardian_pause`) already exist.
 - `set_guardians` / `set_guardian_threshold` (admin) configure guardians and M.
 - `revoke_admin_emergency(approvers)` requires M distinct guardians' auth.
   One short of M is rejected with `QuorumNotMet`.
+- Precondition: a guardian must be configured. When the guardian slot is empty
+  (no guardians set), `require_guardian` returns the existing not-set error and
+  the revoke entry point short-circuits before emitting any event or writing
+  storage, so a revocation never reports success without changing state.
 - On success: admin and pending admin are removed, the contract is paused, an
   `EventAdminRevokedEmergency` event is emitted.
 - "Admin vacant" state: all admin-gated entry points fail with `AdminVacant`.
