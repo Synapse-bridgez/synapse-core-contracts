@@ -34,46 +34,55 @@ use soroban_sdk::{
 /// Struct payloads (`#[contracttype]` structs encode as `ScVal::Map` with
 /// symbol keys) render as `{field: value, …}` in wire order; unit enum
 /// variants (`ScVal::Vec([Symbol])`) render as `[Variant]`.
-pub fn render_scval(v: &ScVal) -> String {
+///
+/// Returns an error naming the variant when an `ScVal` variant is not handled,
+/// rather than panicking, so a snapshot mismatch surfaces as a clear failure.
+pub fn render_scval(v: &ScVal) -> Result<String, String> {
     match v {
-        ScVal::Bool(b) => format!("{b}"),
-        ScVal::Void => "void".into(),
-        ScVal::U32(n) => format!("u32:{n}"),
-        ScVal::I32(n) => format!("i32:{n}"),
-        ScVal::U64(n) => format!("u64:{n}"),
-        ScVal::I64(n) => format!("i64:{n}"),
+        ScVal::Bool(b) => Ok(format!("{b}")),
+        ScVal::Void => Ok("void".into()),
+        ScVal::U32(n) => Ok(format!("u32:{n}")),
+        ScVal::I32(n) => Ok(format!("i32:{n}")),
+        ScVal::U64(n) => Ok(format!("u64:{n}")),
+        ScVal::I64(n) => Ok(format!("i64:{n}")),
         ScVal::I128(parts) => {
             let n = ((parts.hi as i128) << 64) | parts.lo as i128;
-            format!("i128:{n}")
+            Ok(format!("i128:{n}"))
         }
         ScVal::U128(parts) => {
             let n = ((parts.hi as u128) << 64) | parts.lo as u128;
-            format!("u128:{n}")
+            Ok(format!("u128:{n}"))
         }
-        ScVal::Symbol(s) => format!("sym:{}", s.0),
-        ScVal::String(s) => format!("str:{:?}", std::string::String::from_utf8_lossy(&s.0)),
-        ScVal::Bytes(b) => format!("bytes:{}", hex(b.as_slice())),
-        ScVal::Address(a) => format!("addr:{a}"),
+        ScVal::Symbol(s) => Ok(format!("sym:{}", s.0)),
+        ScVal::String(s) => Ok(format!("str:{:?}", std::string::String::from_utf8_lossy(&s.0))),
+        ScVal::Bytes(b) => Ok(format!("bytes:{}", hex(b.as_slice()))),
+        ScVal::Address(a) => Ok(format!("addr:{a}")),
         ScVal::Vec(Some(items)) => {
-            let inner: Vec<String> = items.iter().map(render_scval).collect();
-            format!("[{}]", inner.join(", "))
+            let inner: Result<Vec<String>, String> = items.iter().map(render_scval).collect();
+            Ok(format!("[{}]", inner?.join(", ")))
         }
         ScVal::Map(Some(entries)) => {
-            let inner: Vec<String> = entries
+            let inner: Result<Vec<String>, String> = entries
                 .iter()
-                .map(|e| format!("{}: {}", render_map_key(&e.key), render_scval(&e.val)))
+                .map(|e| {
+                    Ok(format!(
+                        "{}: {}",
+                        render_map_key(&e.key)?,
+                        render_scval(&e.val)?
+                    ))
+                })
                 .collect();
-            format!("{{{}}}", inner.join(", "))
+            Ok(format!("{{{}}}", inner?.join(", ")))
         }
-        // Anything the contract does not currently emit falls back to the
-        // XDR type's own Debug impl — still deterministic, just less terse.
-        other => format!("{other:?}"),
+        other => Err(format!(
+            "render_scval: unhandled ScVal variant: {other:?}"
+        )),
     }
 }
 
-fn render_map_key(k: &ScVal) -> String {
+fn render_map_key(k: &ScVal) -> Result<String, String> {
     match k {
-        ScVal::Symbol(s) => format!("{}", s.0),
+        ScVal::Symbol(s) => Ok(format!("{}", s.0)),
         other => render_scval(other),
     }
 }
@@ -111,7 +120,7 @@ fn to_scval(env: &Env, v: &Val) -> ScVal {
 ///
 /// The emitting contract id is intentionally omitted: it is an artefact of
 /// test registration order, not of the payload shape subscribers depend on.
-pub fn render_last_events(env: &Env) -> Vec<String> {
+pub fn render_last_events(env: &Env) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for (_contract, topics, data) in env.events().all().iter() {
         let topic_vals: Vec<ScVal> = topics.iter().map(|t| to_scval(env, &t)).collect();
@@ -122,16 +131,17 @@ pub fn render_last_events(env: &Env) -> Vec<String> {
                 .expect("topic count fits ScVec"),
         ));
         let data_sc = to_scval(env, &data);
-        let rendered_topics: Vec<String> = topic_vals.iter().map(render_scval).collect();
-        out.push(format!("topics: [{}]", rendered_topics.join(", ")));
-        out.push(format!("data:   {}", render_scval(&data_sc)));
+        let rendered_topics: Result<Vec<String>, String> =
+            topic_vals.iter().map(render_scval).collect();
+        out.push(format!("topics: [{}]", rendered_topics?.join(", ")));
+        out.push(format!("data:   {}", render_scval(&data_sc)?));
         out.push(format!(
             "xdr:    {}|{}",
             xdr_hex(&topics_sc),
             xdr_hex(&data_sc)
         ));
     }
-    out
+    Ok(out)
 }
 
 /// Render every ledger entry currently in the test host's storage, sorted by
@@ -199,4 +209,18 @@ pub fn line_diff(expected: &str, actual: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_scval_errors_on_unhandled_variant() {
+        let err = render_scval(&ScVal::Timepoint(0)).unwrap_err();
+        assert!(
+            err.contains("unhandled ScVal variant") && err.contains("Timepoint"),
+            "unexpected error message: {err}"
+        );
+    }
 }
