@@ -11,9 +11,20 @@
 set -e
 
 echo "==> cargo fmt --check"
-cargo fmt --all -- --check
+if ! cargo fmt --all -- --check; then
+    echo "" >&2
+    echo "ERROR: formatting check failed." >&2
+    echo "Fix it by running: cargo fmt" >&2
+    exit 1
+fi
 
 echo "==> cargo clippy"
-cargo clippy --all-targets -- -D warnings
+if ! cargo clippy --all-targets -- -D warnings; then
+    echo "" >&2
+    echo "ERROR: clippy check failed." >&2
+    echo "Try auto-fixing with: cargo clippy --fix --all-targets --allow-dirty --allow-staged" >&2
+    echo "Then re-run: cargo clippy --all-targets -- -D warnings" >&2
+    exit 1
+fi
 
 echo "Pre-commit checks passed."

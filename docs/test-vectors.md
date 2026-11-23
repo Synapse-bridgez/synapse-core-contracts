@@ -30,6 +30,11 @@ Output is deterministic because all maps are key-sorted. Commit the
 regenerated file together with any change to the tool, and review the diff
 the same way as code.
 
+The tool serialises every vector into memory before writing the output file.
+If any vector fails to serialise, the run aborts with a non-zero exit status,
+the error names the failing vector, and the previous `test-vectors.json` is
+left untouched — a truncated export is never reported as a success.
+
 ---
 
 ## File format (`schema_version: 1`)
@@ -90,8 +95,8 @@ specified in [`EVENTS.md`](../EVENTS.md).
    against the one listed in THREAT_MODEL.md §10.5.
 2. Establish `pre_state` using only public entry points: `initialize`,
    `register_callback`, `start_processing`, `complete_transaction` (to seed the
-   treasury), `propose_withdrawal`, and `set_param` (for `param.*` keys). Advance the ledger
-   where the vector asks for it.
+   treasury), `propose_withdrawal`, and `set_param` (for `param.*` keys). Advance
+   the ledger where the vector asks for it.
 3. Invoke `entry_point` with `inputs`, signed by the party that `pre_state`
    names.
 4. Check that the result matches `expected_result`, that each

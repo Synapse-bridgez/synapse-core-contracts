@@ -33,7 +33,10 @@ if [[ ! -f "$WASM" ]]; then
 fi
 
 if [[ ! -f "$MANIFEST" ]]; then
-  echo "ERROR: migrations manifest not found at: $MANIFEST" >&2
+  RESOLVED_MANIFEST="$(cd "$(dirname "$MANIFEST")" 2>/dev/null && pwd)/$(basename "$MANIFEST")" || RESOLVED_MANIFEST="$MANIFEST"
+  echo "ERROR: migrations manifest not found at:" >&2
+  echo "  $RESOLVED_MANIFEST" >&2
+  echo "Pass an existing manifest with --manifest PATH (see migrations.toml)." >&2
   exit 1
 fi
 
