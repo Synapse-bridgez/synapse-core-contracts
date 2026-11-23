@@ -85,16 +85,25 @@ pub fn require_pending_admin(
 /// admin in an emergency, never grant itself unrelated admin powers. This
 /// helper only proves the caller is the guardian; the entry point that uses it
 /// is responsible for restricting the action to revocation.
+///
+/// When no guardian has been configured the slot is empty, so there is nothing
+/// to authenticate against. In that case the helper returns
+/// [`ContractError::GuardianNotSet`] before authenticating the caller, so the
+/// revoke entry point short-circuits without emitting events or writing
+/// storage.
 pub fn require_guardian(
     env: &Env,
     caller: &Address,
-    guardian: &Address,
+    guardian: &Option<Address>,
 ) -> Result<(), ContractError> {
+    let guardian = match guardian {
+        Some(guardian) => guardian,
+        None => return Err(ContractError::GuardianNotSet),
+    };
     caller.require_auth();
     if caller != guardian {
         return Err(ContractError::NotAuthorized);
     }
     let _ = env;
     Ok(())
-}
 }
