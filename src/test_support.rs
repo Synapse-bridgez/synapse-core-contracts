@@ -34,6 +34,11 @@ use soroban_sdk::{
 /// Struct payloads (`#[contracttype]` structs encode as `ScVal::Map` with
 /// symbol keys) render as `{field: value, …}` in wire order; unit enum
 /// variants (`ScVal::Vec([Symbol])`) render as `[Variant]`.
+///
+/// Variants the contract does not currently emit fall back to the XDR type's
+/// own `Debug` impl — still deterministic, just less terse — so an unexpected
+/// variant fails the one assertion that compares the rendering instead of
+/// aborting the whole test run.
 pub fn render_scval(v: &ScVal) -> String {
     match v {
         ScVal::Bool(b) => format!("{b}"),
@@ -199,4 +204,23 @@ pub fn line_diff(expected: &str, actual: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::xdr::{ScError, ScErrorCode, ScVal, U32};
+
+    /// An unrecognised variant must render to a descriptive fallback string
+    /// rather than panicking and aborting the whole test run.
+    #[test]
+    fn render_scval_unknown_variant_does_not_panic() {
+        let unknown = ScVal::Error(ScError::Contract(7));
+        let rendered = render_scval(&unknown);
+        assert!(!rendered.is_empty());
+        assert!(rendered.contains("Error"));
+
+        let _ = ScErrorCode::InvalidInput;
+        let _ = U32(0);
+    }
 }

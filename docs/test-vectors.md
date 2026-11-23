@@ -30,6 +30,11 @@ Output is deterministic because all maps are key-sorted. Commit the
 regenerated file together with any change to the tool, and review the diff
 the same way as code.
 
+The tool writes to a temporary file and renames it into place on success, so
+a failed write exits non-zero and never leaves a truncated `test-vectors.json`
+behind. If the export fails, the error message names the path that could not
+be written.
+
 ---
 
 ## File format (`schema_version: 1`)

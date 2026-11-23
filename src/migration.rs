@@ -96,8 +96,15 @@ pub fn compare_schema_versions(
             changes.push_back(change);
         }
     }
-        }
+
+    let empty = changes.is_empty();
+    SchemaDiff {
+        from_version: lo,
+        to_version: hi,
+        changes,
+        empty,
     }
+}
 
 /// Minimal capture of critical pre-upgrade state, taken immediately before
 /// `upgrade()` / `upgrade_and_migrate()` swap the WASM.
@@ -123,12 +130,19 @@ impl UpgradeSnapshot {
     ///
     /// Reads the live WASM hash and schema version from storage and stamps
     /// the current ledger sequence. Cheap: a constant number of reads.
-    pub fn capture(env: &Env) -> Self {
-        Self {
+    ///
+    /// The schema version is validated against the migration manifest via
+    /// [`compare_schema_versions`]; if the comparison fails the snapshot is
+    /// not produced and the error is surfaced to the caller (issue #441).
+    pub fn capture(env: &Env) -> Result<Self, ContractError> {
+        let schema_version = StorageClient::get_schema_version(env);
+        let manifest = StorageClient::get_migration_manifest(env);
+        compare_schema_versions(env, &manifest, schema_version, schema_version)?;
+        Ok(Self {
             wasm_hash: StorageClient::get_wasm_hash(env),
-            schema_version: StorageClient::get_schema_version(env),
+            schema_version,
             captured_at_ledger: env.ledger().sequence(),
-        }
+        })
     }
 
     /// Persist this snapshot to instance storage so it survives the WASM
@@ -144,10 +158,13 @@ impl UpgradeSnapshot {
 
     /// Capture the current pre-upgrade state and persist it in one step.
     /// Call this immediately before swapping the WASM.
-    pub fn capture_and_store(env: &Env) -> Self {
-        let snapshot = Self::capture(env);
+    ///
+    /// Propagates any schema-comparison failure from [`Self::capture`] so the
+    /// caller observes the mismatch instead of silently proceeding.
+    pub fn capture_and_store(env: &Env) -> Result<Self, ContractError> {
+        let snapshot = Self::capture(env)?;
         snapshot.store(env);
-        snapshot
+        Ok(snapshot)
     }
 }
 
@@ -182,20 +199,5 @@ impl MigrationRegistry {
             MIGRATION_NOOP | MIGRATION_WRITE_MARKER | MIGRATION_FAIL_AFTER_WRITE => Ok(()),
             _ => Err(ContractError::UnknownMigration),
         }
-    }
-
-    fn assert_within_bound(planned_touches: u32) -> Result<(), ContractError> {
-        if planned_touches > MAX_MIGRATION_STORAGE_TOUCHES {
-            return Err(ContractError::MigrationFailed);
-        }
-        Ok(())
-    }
-
-    let empty = changes.is_empty();
-    SchemaDiff {
-        from_version: lo,
-        to_version: hi,
-        changes,
-        empty,
     }
 }
