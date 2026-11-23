@@ -39,8 +39,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# A missing artifact must fail the gate: a build that silently produced nothing
+# must not clear the size stage. Name the expected path so the failure is
+# attributable to the size check rather than the build.
 if [[ ! -f "$WASM" ]]; then
-  echo "ERROR: release WASM not found at:" >&2
+  echo "ERROR: size gate: release WASM not found at:" >&2
   echo "  $WASM" >&2
   echo "Build it once with: make wasm" >&2
   exit 1
