@@ -69,8 +69,24 @@ Keep the subject line under **72 characters** and in the imperative mood
 make setup
 ```
 
-This installs `.git-hooks/pre-commit`, which runs `cargo fmt --check` and
-`cargo clippy` before every commit — the same gates CI enforces.
+This installs the project's git hooks. The hook lives at
+`.git-hooks/pre-commit` and runs `cargo fmt --check` and `cargo clippy`
+before every commit — the same gates CI enforces.
+
+To point git at the hook, run:
+
+```bash
+make hooks
+```
+
+which is a shortcut for:
+
+```bash
+git config core.hooksPath .git-hooks
+```
+
+Run it once per clone. You can confirm it took effect with
+`git config core.hooksPath`, which should print `.git-hooks`.
 
 ### Full check suite
 

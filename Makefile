@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build bench setup mutants profile-diff
+.PHONY: check fmt clippy test wasm build bench setup hooks mutants profile-diff
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
@@ -53,6 +53,12 @@ setup:
 	git config core.hooksPath .git-hooks
 	@echo "Pre-commit hook installed. Run 'make check' to verify your environment."
 
+## Install the pre-commit hook (runs cargo fmt --check and cargo clippy).
+## Equivalent to: git config core.hooksPath .git-hooks
+hooks:
+	git config core.hooksPath .git-hooks
+	@echo "Pre-commit hook installed (core.hooksPath = .git-hooks)."
+
 ## Run cargo-mutants against core contract logic (issue #128).
 ##
 ## Requires cargo-mutants to be installed:
@@ -65,4 +71,3 @@ setup:
 ## CI uses a minimum-kill-rate budget (see .github/workflows/rust.yml).
 mutants:
 	cargo mutants --in-place
-
