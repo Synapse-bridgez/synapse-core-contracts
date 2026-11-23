@@ -34,6 +34,10 @@ use soroban_sdk::{
 /// Struct payloads (`#[contracttype]` structs encode as `ScVal::Map` with
 /// symbol keys) render as `{field: value, …}` in wire order; unit enum
 /// variants (`ScVal::Vec([Symbol])`) render as `[Variant]`.
+///
+/// Variants this helper does not recognise render as a deterministic
+/// `<unknown:VariantName>` placeholder rather than panicking, so a snapshot
+/// mismatch still produces a readable diff instead of aborting the harness.
 pub fn render_scval(v: &ScVal) -> String {
     match v {
         ScVal::Bool(b) => format!("{b}"),
@@ -65,9 +69,39 @@ pub fn render_scval(v: &ScVal) -> String {
                 .collect();
             format!("{{{}}}", inner.join(", "))
         }
-        // Anything the contract does not currently emit falls back to the
-        // XDR type's own Debug impl — still deterministic, just less terse.
-        other => format!("{other:?}"),
+        // Anything the contract does not currently emit falls back to a
+        // deterministic placeholder naming the variant — never a panic, so
+        // snapshot assertions still surface a diff.
+        other => format!("<unknown:{}>", scval_variant_name(other)),
+    }
+}
+
+/// Stable, human-readable name for an [`ScVal`] variant, used to build the
+/// placeholder for variants [`render_scval`] does not handle explicitly.
+fn scval_variant_name(v: &ScVal) -> &'static str {
+    match v {
+        ScVal::Bool(_) => "Bool",
+        ScVal::Void => "Void",
+        ScVal::Error(_) => "Error",
+        ScVal::U32(_) => "U32",
+        ScVal::I32(_) => "I32",
+        ScVal::U64(_) => "U64",
+        ScVal::I64(_) => "I64",
+        ScVal::Timepoint(_) => "Timepoint",
+        ScVal::Duration(_) => "Duration",
+        ScVal::U128(_) => "U128",
+        ScVal::I128(_) => "I128",
+        ScVal::U256(_) => "U256",
+        ScVal::I256(_) => "I256",
+        ScVal::Bytes(_) => "Bytes",
+        ScVal::String(_) => "String",
+        ScVal::Symbol(_) => "Symbol",
+        ScVal::Vec(_) => "Vec",
+        ScVal::Map(_) => "Map",
+        ScVal::Address(_) => "Address",
+        ScVal::LedgerKeyContractInstance => "LedgerKeyContractInstance",
+        ScVal::LedgerKeyNonce(_) => "LedgerKeyNonce",
+        ScVal::ContractInstance(_) => "ContractInstance",
     }
 }
 
@@ -199,4 +233,28 @@ pub fn line_diff(expected: &str, actual: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::xdr::{ScError, ScErrorCode, ScErrorType};
+
+    #[test]
+    fn render_scval_unknown_variant_is_deterministic_placeholder() {
+        // `ScVal::Error` is not handled explicitly by `render_scval`; it must
+        // render as a stable placeholder instead of panicking.
+        let v = ScVal::Error(ScError::Contract(1));
+        let first = render_scval(&v);
+        let second = render_scval(&v);
+        assert_eq!(first, second, "placeholder must be deterministic");
+        assert_eq!(first, "<unknown:Error>");
+    }
+
+    #[test]
+    fn render_scval_unknown_variant_names_are_stable() {
+        let v = ScVal::Error(ScError::WasmVm(ScErrorCode::InvalidAction));
+        assert_eq!(render_scval(&v), "<unknown:Error>");
+        let _ = ScErrorType::Contract;
+    }
 }
