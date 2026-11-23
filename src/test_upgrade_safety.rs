@@ -228,5 +228,3 @@ fn test_upgrade_rollback_history_round_trip() {
     assert!(!client.last_upgrade_migrated());
 
     // Rollback guard path is clear; attempting the swap
-}
-
