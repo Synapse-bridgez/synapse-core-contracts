@@ -2,7 +2,18 @@
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
-check: fmt clippy test wasm
+# Each stage prints a numbered banner; on failure the last line names the
+# stage that failed (e.g. `check failed: fmt`).
+check:
+	@echo "[1/4] cargo fmt --check"
+	@cargo fmt --all -- --check || { echo "check failed: fmt"; exit 1; }
+	@echo "[2/4] cargo clippy"
+	@cargo clippy --all-targets -- -D warnings || { echo "check failed: clippy"; exit 1; }
+	@echo "[3/4] cargo test"
+	@cargo test --verbose || { echo "check failed: test"; exit 1; }
+	@echo "[4/4] cargo build (wasm)"
+	@GIT_COMMIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo unknown) \
+		cargo build --target wasm32-unknown-unknown --release || { echo "check failed: wasm"; exit 1; }
 
 # ── Individual targets ────────────────────────────────────────────────────────
 
@@ -65,4 +76,3 @@ setup:
 ## CI uses a minimum-kill-rate budget (see .github/workflows/rust.yml).
 mutants:
 	cargo mutants --in-place
-

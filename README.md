@@ -324,3 +324,12 @@ wired.
 
 <!-- handsoff-issue-199 -->
 - #199: Restore entry points lost in the #176–#197 squash merges (un-quarantine 21 tests)
+
+<!-- handsoff-issue-438 -->
+- #438: Reject zero-amount treasury withdrawals before touching storage
+
+<!-- handsoff-issue-439 -->
+- #439: Tag limit should not be bypassed by duplicate tag entries
+
+<!-- handsoff-issue-440 -->
+- #440: Treasury balance read failure is swallowed during withdrawal
