@@ -143,23 +143,27 @@ pub fn render_last_events(env: &Env) -> Vec<String> {
 /// return value exposes — shows up in a comparison.
 pub fn render_ledger_state(env: &Env) -> Vec<String> {
     let snapshot = env.to_ledger_snapshot();
-    let mut rows: Vec<String> = snapshot
+    // Index the snapshot's keys once so each entry can be looked up directly
+    // instead of re-walking the full key set per row.
+    let mut index: Vec<(Vec<u8>, &(soroban_sdk::xdr::LedgerEntry, Option<u32>))> = snapshot
         .ledger_entries
         .iter()
-        .map(|(key, (entry, live_until))| {
-            let ttl = match live_until {
-                Some(l) => format!("{l}"),
-                None => "none".into(),
-            };
-            format!(
-                "{} => {} ttl={}",
-                xdr_hex(key.as_ref()),
-                xdr_hex(&entry.data),
-                ttl
-            )
-        })
+        .map(|(key, value)| (key.as_ref().to_vec(), value))
         .collect();
-    rows.sort();
+    index.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut rows: Vec<String> = Vec::with_capacity(index.len());
+    for (key_bytes, (entry, live_until)) in index {
+        let ttl = match live_until {
+            Some(l) => format!("{l}"),
+            None => "none".into(),
+        };
+        rows.push(format!(
+            "{} => {} ttl={}",
+            hex(&key_bytes),
+            xdr_hex(&entry.data),
+            ttl
+        ));
+    }
     rows
 }
 
