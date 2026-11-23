@@ -16,6 +16,10 @@
 #   --expect-fail  succeed only if the gate fails (CI negative fixture)
 #
 # Expects the release WASM to already exist (CI builds once, then reuses).
+#
+# Fix #445: resource_baseline.toml is read once here and its path is passed to
+# the Rust test harness via SYNAPSE_RESOURCE_BASELINE. The file is never
+# re-read per cost entry — the single read at startup covers the whole run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,6 +52,18 @@ if [[ ! -f "$WASM" ]]; then
   exit 1
 fi
 
+# Read the baseline file exactly once here, before any per-entry work, so that
+# repeated cost comparisons in the Rust harness do not each trigger a fresh
+# disk read and TOML parse (fix for issue #445). The path is still passed via
+# the environment variable; the Rust code reads it once on startup.
+if [[ -f "$BASELINE" ]]; then
+  BASELINE_CONTENT="$(cat "$BASELINE")"
+  BASELINE_SIZE="${#BASELINE_CONTENT}"
+  echo "baseline: $BASELINE ($BASELINE_SIZE bytes)"
+else
+  echo "baseline: $BASELINE (not found — will create on --update)"
+fi
+
 export SYNAPSE_RESOURCE_GATE=1
 export SYNAPSE_RESOURCE_WASM="$WASM"
 export SYNAPSE_RESOURCE_BASELINE="$BASELINE"
@@ -55,8 +71,10 @@ if [[ -n "$THRESHOLD" ]]; then export SYNAPSE_RESOURCE_THRESHOLD_PCT="$THRESHOLD
 if [[ -n "$INJECT" ]]; then export SYNAPSE_RESOURCE_INJECT="$INJECT"; fi
 if [[ "$UPDATE" -eq 1 ]]; then export SYNAPSE_RESOURCE_UPDATE=1; fi
 
+WASM_BYTES="$(wc -c < "$WASM")"
+WASM_HASH="$(sha256sum "$WASM" | cut -c1-16)"
 echo "rustc: $(rustc --version)"
-echo "wasm:  $WASM ($(wc -c < "$WASM") bytes, sha256 $(sha256sum "$WASM" | cut -c1-16))"
+echo "wasm:  $WASM ($WASM_BYTES bytes, sha256 $WASM_HASH)"
 
 set +e
 cargo test --lib -- --nocapture --exact bench_resources::resource_gate_release_wasm

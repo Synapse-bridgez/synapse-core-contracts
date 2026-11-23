@@ -18,17 +18,17 @@
 
 use soroban_sdk::{Address, Env};
 
-use crate::errors::ContractError;
+use crate::types::ContractError;
 
 /// Requires that `caller` is the stored `admin`.
 ///
 /// Authenticates `caller` via `require_auth()` and then compares it against
-/// `admin`. Returns [`ContractError::NotAuthorized`] when the caller is
+/// `admin`. Returns [`ContractError::Unauthorised`] when the caller is
 /// authenticated but is not the admin.
 pub fn require_admin(env: &Env, caller: &Address, admin: &Address) -> Result<(), ContractError> {
     caller.require_auth();
     if caller != admin {
-        return Err(ContractError::NotAuthorized);
+        return Err(ContractError::Unauthorised);
     }
     let _ = env;
     Ok(())
@@ -38,7 +38,7 @@ pub fn require_admin(env: &Env, caller: &Address, admin: &Address) -> Result<(),
 ///
 /// Authenticates `caller` exactly once via `require_auth()`, then accepts the
 /// call if the caller matches either identity. A caller that is both admin and
-/// relay signer passes exactly once. Returns [`ContractError::NotAuthorized`]
+/// relay signer passes exactly once. Returns [`ContractError::Unauthorised`]
 /// when the caller is authenticated but matches neither identity.
 pub fn require_relay_or_admin(
     env: &Env,
@@ -48,26 +48,35 @@ pub fn require_relay_or_admin(
 ) -> Result<(), ContractError> {
     caller.require_auth();
     if caller != admin && caller != relay_signer {
-        return Err(ContractError::NotAuthorized);
+        return Err(ContractError::Unauthorised);
     }
     let _ = env;
     Ok(())
 }
 
-/// Requires that `caller` is the stored `pending_admin`.
+/// Requires that `caller` is the stored `pending_admin` and is not the current
+/// `admin`.
 ///
 /// Used by the two-step admin transfer's accept step. Authenticates `caller`
-/// via `require_auth()` and then compares it against `pending_admin`. Returns
-/// [`ContractError::NotAuthorized`] when the caller is authenticated but is not
-/// the pending admin.
+/// via `require_auth()`, rejects when the caller equals the current `admin`
+/// (which would let the initiating address complete the transfer unilaterally,
+/// defeating the two-step intent), and then compares against `pending_admin`.
+/// Returns [`ContractError::Unauthorised`] in either rejection case.
+///
+/// Fix for issue #448: without the `caller == admin` guard a two-step transfer
+/// could be completed by the same address that proposed it.
 pub fn require_pending_admin(
     env: &Env,
     caller: &Address,
     pending_admin: &Address,
+    admin: &Address,
 ) -> Result<(), ContractError> {
     caller.require_auth();
+    if caller == admin {
+        return Err(ContractError::Unauthorised);
+    }
     if caller != pending_admin {
-        return Err(ContractError::NotAuthorized);
+        return Err(ContractError::Unauthorised);
     }
     let _ = env;
     Ok(())
@@ -78,7 +87,7 @@ pub fn require_pending_admin(
 /// Used by the guardian emergency admin revocation entry point described in
 /// `docs/adr/0004-guardian-emergency-admin-revocation.md`. Authenticates
 /// `caller` via `require_auth()` and then compares it against `guardian`.
-/// Returns [`ContractError::NotAuthorized`] when the caller is authenticated
+/// Returns [`ContractError::Unauthorised`] when the caller is authenticated
 /// but is not the guardian.
 ///
 /// The guardian role is deliberately narrow: it can only *revoke/replace* the
@@ -92,9 +101,8 @@ pub fn require_guardian(
 ) -> Result<(), ContractError> {
     caller.require_auth();
     if caller != guardian {
-        return Err(ContractError::NotAuthorized);
+        return Err(ContractError::Unauthorised);
     }
     let _ = env;
     Ok(())
-}
 }
