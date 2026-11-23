@@ -16,6 +16,7 @@
 #   --expect-fail  succeed only if the gate fails (CI negative fixture)
 #
 # Expects the release WASM to already exist (CI builds once, then reuses).
+# A missing artifact is a hard failure: the gate never passes on an absent build.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,7 +43,9 @@ done
 if [[ ! -f "$WASM" ]]; then
   echo "ERROR: release WASM not found at:" >&2
   echo "  $WASM" >&2
-  echo "Build it once with: make wasm" >&2
+  echo "The size gate cannot pass without a built artifact." >&2
+  echo "Build it first by running the wasm build stage of 'make check'" >&2
+  echo "(or 'make wasm'), then re-run this script." >&2
   exit 1
 fi
 
