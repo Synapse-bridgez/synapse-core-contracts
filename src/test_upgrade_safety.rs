@@ -228,5 +228,6 @@ fn test_upgrade_rollback_history_round_trip() {
     assert!(!client.last_upgrade_migrated());
 
     // Rollback guard path is clear; attempting the swap
-}
 
+
+/* … truncated 3 chars — edit only what you need near the top … */
