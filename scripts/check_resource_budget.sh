@@ -48,6 +48,12 @@ if [[ ! -f "$WASM" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$BASELINE" ]]; then
+  echo "ERROR: resource baseline not found at:" >&2
+  echo "  $BASELINE" >&2
+  exit 1
+fi
+
 export SYNAPSE_RESOURCE_GATE=1
 export SYNAPSE_RESOURCE_WASM="$WASM"
 export SYNAPSE_RESOURCE_BASELINE="$BASELINE"
@@ -59,9 +65,20 @@ echo "rustc: $(rustc --version)"
 echo "wasm:  $WASM ($(wc -c < "$WASM") bytes, sha256 $(sha256sum "$WASM" | cut -c1-16))"
 
 set +e
-cargo test --lib -- --nocapture --exact bench_resources::resource_gate_release_wasm
+OUTPUT="$(cargo test --lib -- --nocapture --exact bench_resources::resource_gate_release_wasm 2>&1)"
 STATUS=$?
 set -e
+printf '%s\n' "$OUTPUT"
+
+# Surface malformed baseline lines reported by parse_baseline (#418). The
+# parser emits `PARSE ERROR` findings for lines it cannot interpret; a baseline
+# that was never fully parsed must never let the gate pass silently.
+if printf '%s\n' "$OUTPUT" | grep -q 'PARSE ERROR'; then
+  echo "" >&2
+  echo "ERROR: resource baseline $BASELINE contains malformed lines:" >&2
+  printf '%s\n' "$OUTPUT" | grep 'PARSE ERROR' >&2
+  exit 1
+fi
 
 if [[ "$EXPECT_FAIL" -eq 1 ]]; then
   if [[ "$STATUS" -ne 0 ]]; then
