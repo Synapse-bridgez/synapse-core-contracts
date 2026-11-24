@@ -46,6 +46,17 @@ Pending ──► Processing ──► Completed
 
 ---
 
+## Read-only queries
+
+These entry points do not mutate state and do not require admin auth, so a
+client can call them to discover contract state before submitting a write:
+
+- `get_pause_state() -> PauseState` — returns the current pause flag and, if
+  available, the reason recorded when the pause was engaged (issue #470). This
+  lets callers — including those relying on assistive tech to read the result —
+  learn the pause state up front, rather than discovering it only via a
+  rejected `register_callback` / `withdraw_treasury` call (`ContractPaused`).
+
 ## Module layout
 
 ```

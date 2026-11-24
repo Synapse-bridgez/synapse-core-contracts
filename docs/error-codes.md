@@ -1,109 +1,51 @@
 # Contract Error Codes
 
-This document is the companion reference for the structured, machine-parseable
-diagnostic surface exposed by `ContractError` in `src/types.rs`. It enumerates
-every error code together with the intended off-chain handling guidance so that
-the relay service in `synapse-core` can triage failed calls without
-pattern-matching on human-readable strings.
+This document is the companion reference for the structured error surface
+exposed by `ContractError` in `src/types.rs`. It enumerates every error code
+together with its intended off-chain handling guidance so a relay service can
+triage failed calls without pattern-matching on human-readable strings.
 
-## Structured diagnostic shape
+## Soroban error shape
 
-Every `ContractError` variant carries a stable numeric code and a small set of
-well-typed context fields (never free-text). The code is exposed via
-`ContractError::code()` and the context via `ContractError::context()`, both of
-which return values that are safe to serialize and parse off-chain.
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `code` | `u32` | Stable numeric identifier for the variant. Never reused or renumbered. |
-| `context` | `ErrorContext` | Small, non-sensitive, well-typed detail describing the failure. |
-
-`ErrorContext` is a fixed-shape struct so that consumers can decode it without
-variant-specific branching:
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `category` | `ErrorCategory` | Coarse classification used for routing. |
-| `retry_safe` | `bool` | Whether the same call may be retried unchanged. |
-| `alert_worthy` | `bool` | Whether the failure should page an operator. |
-| `subject` | `u32` | Identifier of the affected entity (e.g. dispute id, proposal id); `0` when not applicable. |
-
-## Handling guidance
-
-`retry_safe` and `alert_worthy` are the two flags the relay service should key
-its triage on:
-
-- **retry-safe** — the call may be re-submitted unchanged (transient or
-  ordering-related failure).
-- **alert-worthy** — the failure indicates a condition an operator must
-  investigate (invariant violation, authorization failure, or corruption).
-
-Routine, non-retry-safe, non-alert-worthy failures should be dropped.
+`ContractError` is a `#[contracterror]` enum: every variant is a stable numeric
+code (its `#[repr(u32)]` discriminant) exposed to callers as a Soroban
+contract error. Callers dispatch on the code; human-readable detail that does
+not fit in a code (e.g. a supplied count) is emitted in an event, not encoded
+in the error.
 
 ## Error code reference
 
 | Code | Variant | Category | Retry-safe | Alert-worthy | Notes |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `Unauthorized` | `Auth` | no | yes | Caller failed an authorization check. |
-| 2 | `NotFound` | `Lookup` | no | no | Referenced entity does not exist. |
-| 3 | `InvalidInput` | `Validation` | no | no | Arguments failed validation. |
-| 4 | `AlreadyExists` | `Validation` | no | no | Entity already present; drop the call. |
-| 5 | `InsufficientFunds` | `Funds` | no | yes | Balance too low to satisfy the operation. |
-| 6 | `DisputeClosed` | `State` | no | no | Operation attempted against a closed dispute. |
-| 7 | `StateConflict` | `State` | yes | no | Transient state mismatch; safe to retry. |
-| 8 | `Internal` | `Internal` | no | yes | Invariant violation; requires investigation. |
+| 1 | `ZeroAmount` | Validation | no | no | A supplied amount was zero or non-positive. Covers the transfer (`register_callback`) and treasury-withdrawal paths so a client can explain why a transfer failed (issue #472). |
+| 2 | `AmountExceedsCeiling` | Validation | no | no | The amount exceeded the resolved ceiling. |
+| 3 | `TagLimitExceeded` | Validation | no | no | More than `MAX_TAGS_PER_TRANSACTION` tags were supplied. The supplied count and the limit are emitted in a `taglimit` event so a client can render "you sent N, limit is M" (issue #471). |
+| 10 | `NotAdmin` | Auth | no | yes | `require_admin` failed: caller is authenticated but is not the admin (issue #469). |
+| 11 | `NotRelayOrAdmin` | Auth | no | yes | `require_relay_or_admin` failed: caller matches neither the relay signer nor the admin (issue #469). |
+| 12 | `NotPendingAdmin` | Auth | no | yes | `require_pending_admin` failed: caller is not the pending admin (issue #469). |
+| 13 | `NotGuardian` | Auth | no | yes | `require_guardian` failed: caller is not the emergency guardian (issue #469). |
+| 20 | `ContractPaused` | State | no | no | The contract is paused; the call was rejected. Use `get_pause_state` (issue #470) to discover this before submitting. |
+| 21 | `AlreadyExists` | State | no | no | A referenced entity already exists (e.g. duplicate transaction id). |
+| 22 | `NotFound` | Lookup | no | no | A referenced entity was not found. |
+| 23 | `NotInitialised` | State | no | no | The contract has not been initialised. |
+| 24 | `InsufficientTreasuryBalance` | Funds | no | yes | The treasury balance is too low for the withdrawal. |
 
-> The table above is kept in lockstep with the `ContractError` enum by the
-> completeness test in `src/lib.rs`, which enumerates every variant and asserts
-> that each exposes a code, a category, and the two triage flags. Any new
-> variant added to the enum must be reflected here and in that test.
+## Issue coverage
 
-## Error-code budget (Soroban's 50-variant cap)
+The four issues this contract implements map onto the codes above:
 
-Soroban caps a `#[contracterror]` enum at **50 cases**. The pre-squash feature
-set needed **61** conceptually distinct errors, so `ContractError` is a
-*consolidation* of those 61 into ≤50 actual variants. This section is the
-canonical mapping from "conceptually distinct error" to "actual variant" and
-explains every merge decision. The authoritative decision record lives in
-`DECISIONS.md` under the existing "Error-code budget" header; this table is the
-operational companion.
+- **#469** — distinct, documented admin-guard codes: `NotAdmin`, `NotRelayOrAdmin`,
+  `NotPendingAdmin`, `NotGuardian` (replacing a single generic auth error).
+- **#470** — read-only `get_pause_state` query so callers can read the pause
+  flag and reason before submitting; `ContractPaused` is the rejection code.
+- **#471** — `TagLimitExceeded` carries no count itself (Soroban errors are
+  codes, not data); the supplied count and the limit travel in the `taglimit`
+  event emitted alongside the error.
+- **#472** — `ZeroAmount` is the dedicated, documented code for zero-amount
+  rejections on both the transfer and treasury-withdrawal paths.
 
-### Merge rules
+## Error-code budget
 
-1. **Category is preserved.** Every merge keeps the operationally meaningful
-distinction between *invalid input* (`Validation`), *not authorized* (`Auth`),
-and *state machine forbids this* (`State`). Off-chain callers can always route
-on `ErrorCategory`.
-2. **Detail moves to events.** Where two conceptually-different errors share a
-variant, the disambiguating detail (which entry point, which transition) is
-emitted in the corresponding event, not encoded as a separate variant.
-3. **Codes are stable.** A merged variant keeps the code of its primary
-concept; the folded concepts are documented below and never renumbered.
-
-### Consolidation map (61 concepts → ≤50 variants)
-
-| Concept(s) folded | Actual variant | Category | Rationale |
-| --- | --- | --- | --- |
-| `AlreadyInitialized` | `AlreadyExists` | `Validation` | Same "entity already present" category; init is just another entity. |
-| `SchemaVersionMismatch`, `InvalidSchemaCompatRange` | `InvalidInput` | `Validation` | Both are caller-supplied schema arguments that failed validation. |
-| `CannotCancel`, `AlreadyCancelled` | `StateConflict` | `State` | Both are "the state machine forbids this cancel"; retry-safe. |
-| `RetryLimitExceeded` | `StateConflict` | `State` | Ordering/transient condition; retry-safe, same category. |
-| `SelfCheckFailed` | `Internal` | `Internal` | Invariant violation; alert-worthy. |
-| `TimelockNotElapsed` | `StateConflict` | `State` | Ordering condition; retry-safe once the timelock passes. |
-| `NoPendingChange`, `NothingToRollback` | `NotFound` | `Lookup` | Nothing to act on; drop the call. |
-| `UnknownMigration` | `NotFound` | `Lookup` | Referenced migration does not exist. |
-| `MigrationFailed` | `Internal` | `Internal` | Invariant violation during migration; alert-worthy. |
-| `UpgradeNotReversible` | `StateConflict` | `State` | State machine forbids the upgrade; not retry-safe. |
-
-All other concepts map 1:1 to their own variant. The result is a single
-`ContractError` enum with **≤50 variants**, asserted at compile time by the
-variant-count guard in `src/types.rs` so a future PR cannot silently regress
-past the cap.
-
-## Coordination
-
-This document describes the contract-side structured-error surface only. The
-actual off-chain error-handling and alerting logic that consumes it lives in
-`synapse-core` and is owned by the relay service team; wiring the relay's
-triage logic to `code()` / `context()` is a direct coordination item for that
-team.
+Soroban caps a `#[contracterror]` enum at 50 variants. This contract stays well
+within that budget (12 variants); new variants must continue to fit and must be
+added to this table in the same change.
