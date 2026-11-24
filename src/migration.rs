@@ -36,12 +36,28 @@
 
 use soroban_sdk::{contracttype, BytesN, Env, String, Vec};
 
+/// Whether a schema change added or removed a field (or storage key).
+///
+/// Per ADR-0006, added fields are backward-compatible within a declared
+/// compatibility window; removed fields are always breaking and prevent
+/// rollback via [`crate::migration::UpgradeSnapshot`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SchemaChangeDirection {
+    /// A new field or storage key was introduced by this version.
+    Added,
+    /// An existing field or storage key was removed by this version.
+    Removed,
+}
+
 /// A single documented change introduced by a schema version.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaChange {
     /// The schema version that introduced this change.
     pub version: u32,
+    /// Whether this change added or removed a field / storage key.
+    pub direction: SchemaChangeDirection,
     /// Short machine-readable kind, e.g. `"storage_key"`, `"encoding"`.
     pub kind: String,
     /// Human-readable description of the change.

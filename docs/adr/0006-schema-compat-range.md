@@ -52,4 +52,19 @@ default-safe fallback.
 ## References
 
 - `src/lib.rs` — `set_schema_compatibility_range`, `schema_compatibility_range`
+- `src/migration.rs` — `SchemaChange`, `SchemaChangeDirection`, `SchemaDiff`
 - ADR-0003
+
+## Schema change direction
+
+Each `SchemaChange` entry in the migration manifest carries a
+`SchemaChangeDirection` field that records whether the change **added** or
+**removed** a field or storage key:
+
+- `Added` — the new version introduced a new field or key. Within a declared
+  compatibility window this is backward-compatible; existing readers silently
+  ignore unknown fields.
+- `Removed` — the new version dropped an existing field or key. This is always
+  a breaking change: a rolled-back WASM that still expects the old field will
+  misbehave. `rollback_upgrade` refuses migrations that contain any `Removed`
+  entries (`UpgradeNotReversible`).
