@@ -119,6 +119,15 @@ pub struct UpgradeSnapshot {
 }
 
 impl UpgradeSnapshot {
+    /// Return the schema version that was in effect when this snapshot was
+    /// captured.
+    ///
+    /// Callers can compare this against the expected version to verify that
+    /// the snapshot corresponds to the right schema before acting on it.
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     /// Capture the current pre-upgrade state into a snapshot.
     ///
     /// Reads the live WASM hash and schema version from storage and stamps
