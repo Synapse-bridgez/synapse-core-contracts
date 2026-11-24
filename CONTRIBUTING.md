@@ -111,6 +111,13 @@ Run this before committing if `make fmt` fails.
   concern). One test per entry-point as a minimum; edge cases go in the same
   module.
 
+### Changing an event
+
+When adding or changing an event in `src/events.rs`, you must also update
+`event_conformance_manifest.toml`. The conformance test in
+`src/test_events_conformance.rs` validates every event definition against
+that manifest and will fail CI if the manifest is not kept in sync.
+
 ### Lints
 
 `Cargo.toml`'s `[lints.clippy]` table enables `clippy::pedantic`,

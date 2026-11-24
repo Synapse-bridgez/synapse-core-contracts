@@ -64,7 +64,7 @@ use soroban_sdk::{
 };
 
 use crate::events::EventEmitter;
-use crate::test_support::{line_diff, render_last_events};
+use crate::test_support::{line_diff, render_last_events, render_last_events_readable};
 use crate::types::{CallbackPayload, CallbackType, SlashEvidence};
 use crate::{SynapseCoreContract, SynapseCoreContractClient};
 
@@ -136,7 +136,8 @@ fn check_snapshot(name: &str, actual: &str, allow_update: bool) -> Result<(), St
 fn assert_snapshot(name: &str, entry_point: &str, env: &Env) {
     let actual = render_snapshot(name, entry_point, &render_last_events(env));
     if let Err(msg) = check_snapshot(name, &actual, true) {
-        panic!("{msg}");
+        let readable = render_last_events_readable(env);
+        panic!("{msg}\n--- readable events ---\n{readable}");
     }
 }
 
