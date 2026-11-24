@@ -443,6 +443,62 @@ fn drift_fixture_topic_mismatch() {
 }
 
 // ---------------------------------------------------------------------------
+// Manifest schema version: the conformance test must reject an unknown version.
+// ---------------------------------------------------------------------------
+
+/// The only manifest format version this test suite understands.
+const KNOWN_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// Parse `schema_version = <N>` from the first non-comment, non-blank line of
+/// the manifest that starts with `schema_version`.
+///
+/// Returns `None` when no such line is present (missing declaration).
+fn parse_manifest_schema_version(manifest: &str) -> Option<u32> {
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("schema_version") {
+            let rest = rest.trim_start();
+            if let Some(value) = rest.strip_prefix('=') {
+                return value.trim().parse::<u32>().ok();
+            }
+        }
+    }
+    None
+}
+
+/// The manifest must declare a `schema_version` field.
+#[test]
+fn manifest_declares_schema_version() {
+    let version = parse_manifest_schema_version(EVENT_CONFORMANCE_MANIFEST);
+    assert!(
+        version.is_some(),
+        "event_conformance_manifest.toml must declare a top-level `schema_version` field"
+    );
+}
+
+/// The declared version must be one the test suite knows how to interpret.
+/// Any version other than [`KNOWN_MANIFEST_SCHEMA_VERSION`] indicates the
+/// manifest format has changed and the test suite must be updated before it
+/// can safely validate the manifest.
+#[test]
+fn manifest_schema_version_is_known() {
+    let version = parse_manifest_schema_version(EVENT_CONFORMANCE_MANIFEST)
+        .expect("event_conformance_manifest.toml must declare a schema_version");
+    assert_eq!(
+        version,
+        KNOWN_MANIFEST_SCHEMA_VERSION,
+        "event_conformance_manifest.toml declares schema_version={} but this \
+         test suite only understands version {}; update the test suite to \
+         handle the new manifest format before re-enabling",
+        version,
+        KNOWN_MANIFEST_SCHEMA_VERSION,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Sanity: events module helpers exist and are used by the entry points above.
 // ---------------------------------------------------------------------------
 
