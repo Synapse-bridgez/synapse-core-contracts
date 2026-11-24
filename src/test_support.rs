@@ -163,6 +163,58 @@ pub fn render_ledger_state(env: &Env) -> Vec<String> {
     rows
 }
 
+/// Render every contract event from the most recent invocation in a
+/// human-readable, one-field-per-line format.
+///
+/// Each event is prefixed with a numbered heading and each field is indented:
+///
+/// ```text
+/// --- event 1 ---
+///   topics: [sym:synapse, sym:reg]
+///   data:   {tx_id: str:"tx-1", …}
+///   xdr:    <hex>|<hex>
+/// --- event 2 ---
+///   ...
+/// ```
+///
+/// Built from [`render_last_events`], which returns groups of 3 lines per
+/// event. Use this in assertion messages so screen readers see one field per
+/// line instead of a dense single-line blob.
+pub fn render_last_events_readable(env: &Env) -> String {
+    let lines = render_last_events(env);
+    let mut out = String::new();
+    for (i, chunk) in lines.chunks(3).enumerate() {
+        out.push_str(&format!("--- event {} ---\n", i + 1));
+        for line in chunk {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    out
+}
+
+/// Render every ledger entry in a human-readable, one-entry-per-line format.
+///
+/// Each entry is prefixed with a numbered heading and indented:
+///
+/// ```text
+/// --- ledger entry 1 ---
+///   key-xdr => entry-xdr ttl=<live_until>
+/// --- ledger entry 2 ---
+///   ...
+/// ```
+///
+/// Built from [`render_ledger_state`]. Use this in assertion messages so
+/// screen readers see one entry per line.
+pub fn render_ledger_state_readable(env: &Env) -> String {
+    let rows = render_ledger_state(env);
+    let mut out = String::new();
+    for (i, row) in rows.iter().enumerate() {
+        out.push_str(&format!("--- ledger entry {} ---\n", i + 1));
+        out.push_str(&format!("  {row}\n"));
+    }
+    out
+}
+
 /// 64-bit FNV-1a. Used for compact per-step state digests; hand-rolled so the
 /// output is stable across toolchains and build profiles (unlike
 /// `std::hash::DefaultHasher`, whose algorithm is unspecified).

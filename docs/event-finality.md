@@ -82,10 +82,9 @@ closed ledger as **final at the moment it is returned**. Do not delay action
 by waiting for additional ledgers.
 
 The `ledger` field present in every Synapse Core event payload (e.g.,
-`EventTransactionCompleted.ledger`, `EventStatusChanged.ledger`) is the ledger
-sequence number at which the event was emitted. It is informational and useful
-for ordering and audit purposes. It does not represent a "pending" state that
-needs further confirmation.
+`EventStatusChanged.ledger`) is the ledger sequence number at which the event
+was emitted. It is informational and useful for ordering and audit purposes.
+It does not represent a "pending" state that needs further confirmation.
 
 ---
 
@@ -272,11 +271,16 @@ event twice (e.g., because of a cursor boundary overlap during reconnect) must
 not initiate a second Phase 2 swap. The subscriber's own deduplication — not
 the contract's idempotency — is the relevant guard at that point.
 
-The contract's `EventTransactionCompleted` is emitted **at most once per
-`tx_id`** by construction (the state machine only allows `Processing →
-Completed` once, and it is a terminal state). However, the subscriber may
-receive the same event more than once from RPC due to overlapping query ranges
-during reconnects. Both sides of the guarantee must hold.
+**Note (not yet implemented):** A named `EventTransactionCompleted` struct is
+not present in the current contract code. The equivalent guarantee currently
+applies to the `done` event emitted by `emit_status_then_done` in
+`src/events.rs`: it is emitted at most once per `tx_id` by construction (the
+state machine only allows `Processing → Completed` once). A typed
+`EventTransactionCompleted` wrapper is tracked as a future improvement.
+
+However, the subscriber may receive the same event more than once from RPC due
+to overlapping query ranges during reconnects. Both sides of the guarantee must
+hold.
 
 ---
 

@@ -42,16 +42,16 @@ Routine, non-retry-safe, non-alert-worthy failures should be dropped.
 
 ## Error code reference
 
-| Code | Variant | Category | Retry-safe | Alert-worthy | Notes |
-| --- | --- | --- | --- | --- | --- |
-| 1 | `Unauthorized` | `Auth` | no | yes | Caller failed an authorization check. |
-| 2 | `NotFound` | `Lookup` | no | no | Referenced entity does not exist. |
-| 3 | `InvalidInput` | `Validation` | no | no | Arguments failed validation. |
-| 4 | `AlreadyExists` | `Validation` | no | no | Entity already present; drop the call. |
-| 5 | `InsufficientFunds` | `Funds` | no | yes | Balance too low to satisfy the operation. |
-| 6 | `DisputeClosed` | `State` | no | no | Operation attempted against a closed dispute. |
-| 7 | `StateConflict` | `State` | yes | no | Transient state mismatch; safe to retry. |
-| 8 | `Internal` | `Internal` | no | yes | Invariant violation; requires investigation. |
+| Code | Variant | Category | Retry-safe | Alert-worthy | Notes | What happened | What to do |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `Unauthorized` | `Auth` | no | yes | Caller failed an authorization check. | The caller's signature or identity did not match the required admin or relay signer. | Verify the signing key being used matches the account that holds the required role. |
+| 2 | `NotFound` | `Lookup` | no | no | Referenced entity does not exist. | The referenced entity (transaction, proposal, etc.) does not exist in contract storage. | Check that the identifier was obtained from a successful prior call; do not retry with the same id. |
+| 3 | `InvalidInput` | `Validation` | no | no | Arguments failed validation. | One or more arguments failed the contract's validation rules (e.g. empty string, out-of-range amount). | Inspect the argument values, correct the offending field, and resubmit. |
+| 4 | `AlreadyExists` | `Validation` | no | no | Entity already present; drop the call. | An entity with the given identifier is already present in storage. | Drop the call; the desired end-state already exists. |
+| 5 | `InsufficientFunds` | `Funds` | no | yes | Balance too low to satisfy the operation. | The operation requires more balance than is currently available. | Top up the relevant balance before retrying. |
+| 6 | `DisputeClosed` | `State` | no | no | Operation attempted against a closed dispute. | The targeted dispute has already been resolved and cannot be acted on. | No further action needed; the dispute is already closed. |
+| 7 | `StateConflict` | `State` | yes | no | Transient state mismatch; safe to retry. | The state machine does not allow this transition right now (e.g. a lock is held or a timelock has not elapsed). | Wait for the conflicting condition to resolve, then retry. |
+| 8 | `Internal` | `Internal` | no | yes | Invariant violation; requires investigation. | An internal invariant check failed, indicating unexpected contract state. | Alert an operator immediately; do not retry without investigation. |
 
 > The table above is kept in lockstep with the `ContractError` enum by the
 > completeness test in `src/lib.rs`, which enumerates every variant and asserts
