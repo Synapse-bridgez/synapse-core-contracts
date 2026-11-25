@@ -11,6 +11,15 @@ topic-filtering guidance for common use cases.
 > is a reliable source of "subscriber misread the docs" bugs. The reference
 > decoder below is the single, tested translation of the schema into code.
 
+## Registration and duplicate detection (issue #484)
+
+`register_callback` emits a `reg` event **only on the first successful
+registration** for a given `transaction_id`. A second call with the same
+`transaction_id` (regardless of `idempotency_key`) returns
+`ContractError::DuplicateRequest` and emits no event. Consumers relying on
+`reg` events do not need to deduplicate: each `transaction_id` produces at most
+one `reg` event per contract lifetime.
+
 ## 1. Topic layout
 
 Every event is published with **two** topics and a typed struct payload

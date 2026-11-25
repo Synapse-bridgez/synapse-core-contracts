@@ -763,3 +763,32 @@ fn test_authorize_withdrawal_rejects_mismatched_amount_or_destination() {
     assert_eq!(client.treasury_balance(), 10_000);
     assert!(client.pending_withdrawal().is_some());
 }
+
+// ─── Issue #481: propagate treasury balance read error ────────────────────────
+
+#[test]
+fn test_treasury_balance_read_error_is_propagated_on_withdrawal() {
+    // When the treasury balance entry does not exist in storage,
+    // `get_treasury_balance_checked` must return TreasuryReadError rather than
+    // proceeding with balance == 0 (which could allow an erroneous withdrawal).
+    // We verify this by calling the storage helper directly.
+    use crate::storage::get_treasury_balance_checked;
+    use crate::types::ContractError;
+
+    let env = soroban_sdk::Env::default();
+    // No balance has been stored: the read must fail.
+    let result = get_treasury_balance_checked(&env);
+    assert_eq!(result, Err(ContractError::TreasuryReadError));
+}
+
+#[test]
+fn test_treasury_balance_read_succeeds_when_balance_stored() {
+    // Once a balance is written, get_treasury_balance_checked must return it.
+    use crate::storage::{get_treasury_balance_checked, set_treasury_balance};
+    use soroban_sdk::Env;
+
+    let env = Env::default();
+    set_treasury_balance(&env, 42_000);
+    let result = get_treasury_balance_checked(&env);
+    assert_eq!(result, Ok(42_000));
+}
