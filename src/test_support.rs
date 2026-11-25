@@ -34,46 +34,65 @@ use soroban_sdk::{
 /// Struct payloads (`#[contracttype]` structs encode as `ScVal::Map` with
 /// symbol keys) render as `{field: value, …}` in wire order; unit enum
 /// variants (`ScVal::Vec([Symbol])`) render as `[Variant]`.
-pub fn render_scval(v: &ScVal) -> String {
+///
+/// # Errors
+///
+/// Returns `Err` for any `ScVal` variant this renderer does not recognise,
+/// carrying a description of the discriminant. Callers should propagate the
+/// error so the failing test reports the unknown variant with context rather
+/// than aborting the whole harness.
+pub fn render_scval(v: &ScVal) -> Result<String, String> {
     match v {
-        ScVal::Bool(b) => format!("{b}"),
-        ScVal::Void => "void".into(),
-        ScVal::U32(n) => format!("u32:{n}"),
-        ScVal::I32(n) => format!("i32:{n}"),
-        ScVal::U64(n) => format!("u64:{n}"),
-        ScVal::I64(n) => format!("i64:{n}"),
+        ScVal::Bool(b) => Ok(format!("{b}")),
+        ScVal::Void => Ok("void".into()),
+        ScVal::U32(n) => Ok(format!("u32:{n}")),
+        ScVal::I32(n) => Ok(format!("i32:{n}")),
+        ScVal::U64(n) => Ok(format!("u64:{n}")),
+        ScVal::I64(n) => Ok(format!("i64:{n}")),
         ScVal::I128(parts) => {
             let n = ((parts.hi as i128) << 64) | parts.lo as i128;
-            format!("i128:{n}")
+            Ok(format!("i128:{n}"))
         }
         ScVal::U128(parts) => {
             let n = ((parts.hi as u128) << 64) | parts.lo as u128;
-            format!("u128:{n}")
+            Ok(format!("u128:{n}"))
         }
-        ScVal::Symbol(s) => format!("sym:{}", s.0),
-        ScVal::String(s) => format!("str:{:?}", std::string::String::from_utf8_lossy(&s.0)),
-        ScVal::Bytes(b) => format!("bytes:{}", hex(b.as_slice())),
-        ScVal::Address(a) => format!("addr:{a}"),
+        ScVal::Symbol(s) => Ok(format!("sym:{}", s.0)),
+        ScVal::String(s) => Ok(format!(
+            "str:{:?}",
+            std::string::String::from_utf8_lossy(&s.0)
+        )),
+        ScVal::Bytes(b) => Ok(format!("bytes:{}", hex(b.as_slice()))),
+        ScVal::Address(a) => Ok(format!("addr:{a}")),
         ScVal::Vec(Some(items)) => {
-            let inner: Vec<String> = items.iter().map(render_scval).collect();
-            format!("[{}]", inner.join(", "))
+            let inner: Vec<String> = items
+                .iter()
+                .map(render_scval)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("[{}]", inner.join(", ")))
         }
+        ScVal::Vec(None) => Ok("[]".into()),
         ScVal::Map(Some(entries)) => {
             let inner: Vec<String> = entries
                 .iter()
-                .map(|e| format!("{}: {}", render_map_key(&e.key), render_scval(&e.val)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
+                .map(|e| {
+                    let key = render_map_key(&e.key)?;
+                    let val = render_scval(&e.val)?;
+                    Ok(format!("{key}: {val}"))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{{{}}}", inner.join(", ")))
         }
-        // Anything the contract does not currently emit falls back to the
-        // XDR type's own Debug impl — still deterministic, just less terse.
-        other => format!("{other:?}"),
+        ScVal::Map(None) => Ok("{}".into()),
+        other => Err(format!(
+            "render_scval: unrecognised ScVal variant: {other:?}"
+        )),
     }
 }
 
-fn render_map_key(k: &ScVal) -> String {
+fn render_map_key(k: &ScVal) -> Result<String, String> {
     match k {
-        ScVal::Symbol(s) => format!("{}", s.0),
+        ScVal::Symbol(s) => Ok(format!("{}", s.0)),
         other => render_scval(other),
     }
 }
@@ -111,6 +130,12 @@ fn to_scval(env: &Env, v: &Val) -> ScVal {
 ///
 /// The emitting contract id is intentionally omitted: it is an artefact of
 /// test registration order, not of the payload shape subscribers depend on.
+///
+/// # Panics
+///
+/// Panics if any event topic or data is an `ScVal` variant that
+/// [`render_scval`] does not recognise. The panic message names the
+/// unrecognised variant so the failing test has actionable context.
 pub fn render_last_events(env: &Env) -> Vec<String> {
     let mut out = Vec::new();
     for (_contract, topics, data) in env.events().all().iter() {
@@ -122,9 +147,16 @@ pub fn render_last_events(env: &Env) -> Vec<String> {
                 .expect("topic count fits ScVec"),
         ));
         let data_sc = to_scval(env, &data);
-        let rendered_topics: Vec<String> = topic_vals.iter().map(render_scval).collect();
+        let rendered_topics: Vec<String> = topic_vals
+            .iter()
+            .map(|v| render_scval(v).expect("event topic contains unrecognised ScVal variant"))
+            .collect();
         out.push(format!("topics: [{}]", rendered_topics.join(", ")));
-        out.push(format!("data:   {}", render_scval(&data_sc)));
+        out.push(format!(
+            "data:   {}",
+            render_scval(&data_sc)
+                .expect("event data contains unrecognised ScVal variant")
+        ));
         out.push(format!(
             "xdr:    {}|{}",
             xdr_hex(&topics_sc),
@@ -199,4 +231,54 @@ pub fn line_diff(expected: &str, actual: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::xdr::ScVal;
+
+    // ── render_scval known-variant round-trips ────────────────────────────────
+
+    #[test]
+    fn render_bool() {
+        assert_eq!(render_scval(&ScVal::Bool(true)), Ok("true".into()));
+        assert_eq!(render_scval(&ScVal::Bool(false)), Ok("false".into()));
+    }
+
+    #[test]
+    fn render_void() {
+        assert_eq!(render_scval(&ScVal::Void), Ok("void".into()));
+    }
+
+    #[test]
+    fn render_u32() {
+        assert_eq!(render_scval(&ScVal::U32(42)), Ok("u32:42".into()));
+    }
+
+    #[test]
+    fn render_i64() {
+        assert_eq!(render_scval(&ScVal::I64(-7)), Ok("i64:-7".into()));
+    }
+
+    // ── render_scval unknown-variant returns Err ──────────────────────────────
+
+    /// `ScVal::LedgerKeyContractInstance` is a valid XDR discriminant that the
+    /// contract never emits. Feeding it to `render_scval` must return `Err`
+    /// with a descriptive message rather than aborting the harness.
+    #[test]
+    fn render_scval_unknown_variant_returns_err() {
+        let unknown = ScVal::LedgerKeyContractInstance;
+        let result = render_scval(&unknown);
+        assert!(
+            result.is_err(),
+            "expected Err for unrecognised variant, got Ok({:?})",
+            result
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("unrecognised ScVal variant"),
+            "error message should describe the variant, got: {msg:?}"
+        );
+    }
 }
