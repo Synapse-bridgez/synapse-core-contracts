@@ -169,7 +169,63 @@ function decode(event: { topic: xdr.ScVal[]; value: xdr.ScVal }) {
 }
 ```
 
-## 4. Topic-filtering guidance
+## 4. Ordering guarantees
+
+### Within a single invocation
+
+The contract provides **documented, tested ordering guarantees** for every
+entry point that emits more than one event per invocation. These guarantees are
+enforced at the source in `src/events.rs` — the helpers publish events in a
+fixed sequence — and each is asserted by a dedicated ordering test that checks
+the events vector's order, not merely presence.
+
+| Entry point | Events emitted | Guaranteed order |
+| --- | --- | --- |
+| `complete_transaction` | `status`, `done` | `status` is emitted **before** `done`. |
+| `cancel_transaction` | `status`, `cancel` | `status` is emitted **before** `cancel`. |
+| `batch_register_callback` | one `reg` per item, then `batch` | All per-item `reg` events are emitted **in input order**, followed by the `batch` summary **last**. |
+| upgrade finalize | preceding upgrade events, then `up_fin` | `up_fin` is emitted **after** all preceding upgrade events in the same invocation. |
+| dispute resolution | `dispute_raised`, `dispute_resolved` | `dispute_raised` is emitted **before** `dispute_resolved`. |
+
+Entry points that emit exactly one event (`init`, `reg`, `fail`, `propose`,
+`admin`, `relay`, `pause`, `upgrade`) make no ordering claim because there is
+only one event to place.
+
+The full ordering table with notes is in
+[`EVENTS.md` §6](../EVENTS.md#6-event-ordering-guarantees).
+
+### Across invocations (ledger order)
+
+**No cross-invocation ordering guarantee exists.** Two events for the same
+`tx_id` emitted by different invocations — for example, a `reg` event from
+`register_callback` and a `status` event from a later `start_processing` call
+— can in principle be observed out of order relative to each other if the
+subscriber's RPC node has processed ledger N but not yet ingested ledger N+1.
+
+The safe approach: treat each event atomically and reconstruct transaction
+state from the full event stream using the `tx_id` as the join key. Do not
+assume that observing `done` for a transaction means you have already seen its
+`status` event from the same call, unless both events arrived in the same RPC
+response with matching ledger sequence numbers.
+
+### Global ordering via the RPC cursor
+
+`getEvents` returns events in ascending TOID order
+(`ledger_sequence, transaction_index, operation_index, event_index`), which
+is a strict total order across the entire contract history. Within one ledger,
+events from the same invocation are contiguous and appear in emission order.
+Use the `event.id` cursor (see §4.4 of [`event-finality.md`](./event-finality.md))
+rather than timestamps to track position: the TOID is the only stable,
+globally consistent ordering key.
+
+> **ADR reference.** The decision to enforce multi-event emission order at the
+> emitter site (rather than at call sites) is recorded in the event-ordering
+> note in [`EVENTS.md` §6](../EVENTS.md#6-event-ordering-guarantees). The
+> underlying mechanism — `emit_status_then_done` and similar helpers in
+> `src/events.rs` — is the single source of truth so the guarantee holds
+> regardless of how many entry points call each helper.
+
+## 5. Topic-filtering guidance
 
 Subscribe to the narrowest set of topics your use case needs. Every Synapse
 event shares `topics[0] = "synapse"`, so filter on `topics[1]`.
@@ -181,16 +237,16 @@ event shares `topics[0] = "synapse"`, so filter on `topics[1]`.
 | Security / ops alerting | `admin`, `propose`, `relay`, `rs_*`, `pause`, `upgrade`, `up_*`, `rollback`, `migrate`, `chk_fail`, `slashed` | Privilege, signer-set, pause and code changes. |
 | Collateral / fee accounting | `bonded`, `unbondrq`, `unbondcl`, `slashed`, `tierset`, `rebate`, `param` | Wave 2 economics. |
 
-**Ordering.** Within one invocation, events are emitted in the order listed in
-[EVENTS.md §4](../EVENTS.md#4-additive-trailing-field-pattern-required-convention).
-`getEvents` returns them in ledger order; use the ledger sequence and the
-event's paging token for global ordering.
+**Ordering.** Within one invocation, events are emitted in the order documented
+in [§4 above](#4-ordering-guarantees) and in [`EVENTS.md` §6](../EVENTS.md#6-event-ordering-guarantees).
+`getEvents` returns them in TOID order; use the event's `id` cursor for global
+ordering across ledgers.
 
 **Finality.** Stellar has no reorgs: an event in a closed ledger is final. See
 [`event-finality.md`](./event-finality.md) for polling, cursor recovery and
 retention windows.
 
-## 5. Completeness checklist
+## 6. Completeness checklist
 
 Before merging any change that touches events:
 
