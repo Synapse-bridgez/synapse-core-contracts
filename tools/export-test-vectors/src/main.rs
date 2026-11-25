@@ -960,7 +960,18 @@ fn vectors() -> Vec<TestVector> {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let pretty = std::env::args().any(|a| a == "--pretty");
+    let args: Vec<String> = std::env::args().collect();
+    let pretty = args.iter().any(|a| a == "--pretty");
+    // --output <PATH>: write to a file with post-write count verification
+    // rather than stdout, so a partial write (killed mid-write, full disk,
+    // etc.) is caught before the bad file can be committed.
+    let output_path: Option<String> = args
+        .windows(2)
+        .find(|w| w[0] == "--output")
+        .map(|w| w[1].clone());
+
+    let vecs = vectors();
+    let expected_count = vecs.len();
 
     let file = TestVectorFile {
         schema_version: 1,
@@ -981,14 +992,99 @@ fn main() {
             s("docs/adr/0008-fee-accrual-and-treasury-withdrawal.md"),
             s("docs/test-vectors.md"),
         ],
-        vectors: vectors(),
+        vectors: vecs,
     };
 
-    let output = if pretty {
+    let serialized = if pretty {
         serde_json::to_string_pretty(&file).expect("serialization failed")
     } else {
         serde_json::to_string(&file).expect("serialization failed")
     };
 
-    println!("{output}");
+    match output_path {
+        None => {
+            // Legacy stdout mode: callers that redirect via `>` bear
+            // responsibility for write integrity.
+            println!("{serialized}");
+        }
+        Some(path) => {
+            write_and_verify(&path, &serialized, expected_count);
+        }
+    }
+}
+
+/// Write `content` to `path` via a sibling temp file and verify that the
+/// number of vectors in the written JSON matches `expected_count`.
+///
+/// On any mismatch (I/O error, truncation, deserialization failure, wrong
+/// count) the temp file is removed and the process exits non-zero, so the
+/// destination is never replaced with a partial or corrupt file.
+fn write_and_verify(path: &str, content: &str, expected_count: usize) {
+    use std::{
+        fs,
+        io::{self, Write},
+        path::Path,
+        process,
+    };
+
+    // Write to a sibling temp file so the destination is never partially
+    // replaced if the write is interrupted.
+    let tmp_path = format!("{path}.tmp");
+
+    let write_result = (|| -> io::Result<()> {
+        let mut f = fs::File::create(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        eprintln!("error: could not write to {tmp_path}: {e}");
+        let _ = fs::remove_file(&tmp_path);
+        process::exit(1);
+    }
+
+    // Re-read and count the vectors in the written file to catch truncation.
+    let verify_result = (|| -> Result<usize, String> {
+        let raw = fs::read_to_string(&tmp_path)
+            .map_err(|e| format!("could not re-read {tmp_path}: {e}"))?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("written file is not valid JSON: {e}"))?;
+        let written_count = parsed
+            .get("vectors")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .ok_or_else(|| "written JSON has no 'vectors' array".to_string())?;
+        Ok(written_count)
+    })();
+
+    match verify_result {
+        Err(msg) => {
+            eprintln!("error: post-write verification failed: {msg}");
+            let _ = fs::remove_file(&tmp_path);
+            process::exit(1);
+        }
+        Ok(written_count) if written_count != expected_count => {
+            eprintln!(
+                "error: partial write — expected {expected_count} vectors, \
+                 written file contains {written_count}. \
+                 Destination '{path}' was not updated."
+            );
+            let _ = fs::remove_file(&tmp_path);
+            process::exit(1);
+        }
+        Ok(_) => {}
+    }
+
+    // Atomically replace the destination only after verification passes.
+    if let Err(e) = fs::rename(&tmp_path, Path::new(path)) {
+        eprintln!("error: could not rename {tmp_path} -> {path}: {e}");
+        let _ = fs::remove_file(&tmp_path);
+        process::exit(1);
+    }
+
+    eprintln!(
+        "export-test-vectors: wrote {expected_count} vectors to {path}"
+    );
 }

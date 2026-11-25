@@ -2,7 +2,24 @@
 
 # Run the full local check suite — mirrors the CI job exactly.
 # A passing `make check` guarantees the same commit will pass CI.
-check: fmt clippy test wasm
+#
+# Each stage prints its name before running and writes "FAILED: <stage>" to
+# stderr when it exits non-zero, so CI logs and local runs always identify
+# the failing step by name.
+check:
+	@echo "[1/4] fmt" && \
+		cargo fmt --all -- --check || \
+		{ echo "FAILED: fmt" >&2; exit 1; }
+	@echo "[2/4] clippy" && \
+		cargo clippy --all-targets -- -D warnings || \
+		{ echo "FAILED: clippy" >&2; exit 1; }
+	@echo "[3/4] test" && \
+		cargo test --verbose || \
+		{ echo "FAILED: test" >&2; exit 1; }
+	@echo "[4/4] wasm" && \
+		GIT_COMMIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo unknown) \
+		cargo build --target wasm32-unknown-unknown --release || \
+		{ echo "FAILED: wasm" >&2; exit 1; }
 
 # ── Individual targets ────────────────────────────────────────────────────────
 
