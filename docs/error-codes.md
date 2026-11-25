@@ -52,6 +52,11 @@ Routine, non-retry-safe, non-alert-worthy failures should be dropped.
 | 6 | `DisputeClosed` | `State` | no | no | Operation attempted against a closed dispute. |
 | 7 | `StateConflict` | `State` | yes | no | Transient state mismatch; safe to retry. |
 | 8 | `Internal` | `Internal` | no | yes | Invariant violation; requires investigation. |
+| 9 | `NotAdmin` | `Auth` | no | yes | Caller failed the `require_admin` guard. Added by issue #483 to give each admin guard its own distinguishable error code. |
+| 10 | `NotRelayOrAdmin` | `Auth` | no | yes | Caller is neither relay signer nor admin (`require_relay_or_admin`). Added by issue #483. |
+| 11 | `NotPendingAdmin` | `Auth` | no | yes | Caller is not the pending admin (`require_pending_admin`). Added by issue #483. |
+| 12 | `NotGuardian` | `Auth` | no | yes | Caller is not the emergency guardian (`require_guardian`). Added by issue #483. |
+| 13 | `TreasuryReadError` | `Internal` | no | yes | Treasury balance could not be read from storage during a withdrawal; the withdrawal was aborted. Added by issue #481. |
 
 > The table above is kept in lockstep with the `ContractError` enum by the
 > completeness test in `src/lib.rs`, which enumerates every variant and asserts
